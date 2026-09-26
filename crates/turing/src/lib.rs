@@ -4,4 +4,5 @@
 //! cryptanalysis. Do not use this to protect real data.
 
 pub mod gf;
+pub mod linear;
 pub mod sbox;

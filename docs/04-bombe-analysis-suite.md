@@ -41,8 +41,9 @@ like even static; any line, block or bright spot is exploitable structure.
 
 ## Planned, in the order they become useful
 
-**Linear layer lab (step 5)**
-- Differential and linear branch number of the mixing layer (target 5).
+**Linear layer lab (step 5, built: `bombe gen-linear`)**
+- MDS check: every square submatrix invertible (exhaustive or sampled by size).
+- Branch number measured directly on inputs with 1–3 active bytes.
 - Rounds to full diffusion: how many rounds until every output byte depends on
   every input byte.
 

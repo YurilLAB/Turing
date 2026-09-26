@@ -46,3 +46,41 @@ pub fn aes_sbox() -> [u8; 256] {
     }
     table
 }
+
+/// Log/antilog tables for fast multiplication in the analysis tools, built
+/// from the generator 0x03. Not constant-time; never used by the cipher.
+struct Tables {
+    exp: [u8; 512],
+    log: [u8; 256],
+}
+
+fn tables() -> &'static Tables {
+    static TABLES: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let mut t = Tables { exp: [0; 512], log: [0; 256] };
+        let mut x = 1u8;
+        for i in 0..255 {
+            t.exp[i] = x;
+            t.exp[i + 255] = x;
+            t.log[x as usize] = i as u8;
+            x = mul(x, 3);
+        }
+        t
+    })
+}
+
+pub fn fast_mul(a: u8, b: u8) -> u8 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    let t = tables();
+    t.exp[t.log[a as usize] as usize + t.log[b as usize] as usize]
+}
+
+pub fn fast_inv(a: u8) -> u8 {
+    if a == 0 {
+        return 0;
+    }
+    let t = tables();
+    t.exp[255 - t.log[a as usize] as usize]
+}

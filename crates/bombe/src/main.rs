@@ -1,3 +1,4 @@
+use bombe::matrix::{self, MdsReport};
 use bombe::{gen, html, report::Report, sbox::Sbox};
 use std::process::ExitCode;
 
@@ -7,6 +8,7 @@ Bombe: cryptanalysis workbench for the Turing cipher
 Usage:
   bombe sbox <SOURCE> [--html <OUT.html>]
   bombe gen-sbox [--rust <OUT.rs>] [--html <OUT.html>]
+  bombe gen-linear [--rust <OUT.rs>]
 
 SOURCE:
   turing       the Turing S-box
@@ -97,11 +99,57 @@ fn run_gen(args: &[String]) -> Result<bool, String> {
     Ok(search.report.passed())
 }
 
+const AES_MIX: [[u8; 4]; 4] = [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]];
+
+fn print_matrix(m: &matrix::Matrix) {
+    for row in m {
+        let cells: Vec<String> = row.iter().map(|b| format!("{b:02x}")).collect();
+        println!("    {}", cells.join(" "));
+    }
+}
+
+fn run_gen_linear(args: &[String]) -> Result<bool, String> {
+    let (rust, html_out) = parse_outputs(args)?;
+    if html_out.is_some() {
+        return Err("gen-linear has no HTML output".into());
+    }
+    let aes = matrix::from_array(&AES_MIX);
+    let aes_report = MdsReport::new(&aes, &matrix::invert(&aes).ok_or("AES matrix is singular")?);
+    println!("Reference: AES MixColumns");
+    print!("{}", aes_report.to_text());
+    println!("  verdict: {}\n", if aes_report.passed() { "MDS" } else { "NOT MDS" });
+
+    let l = gen::linear();
+    for c in [&l.columns, &l.state] {
+        let n = c.m.len();
+        println!("{} ({n}x{n}): SHAKE256(\"{}\" || {})", if n == 4 { "MixColumns" } else { "MixState" }, c.label, c.counter);
+        let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+        println!("  x = {}", hex(&c.xs));
+        println!("  y = {}", hex(&c.ys));
+        println!("  Cauchy structure (proves MDS)       {}", if matrix::is_cauchy(&c.m, &c.xs, &c.ys) { "yes" } else { "NO" });
+        if n == 4 {
+            print_matrix(&c.m);
+        }
+        print!("{}", c.report.to_text());
+        println!("  verdict: {}\n", if c.report.passed() { "MDS" } else { "NOT MDS" });
+    }
+    let aes_round = |p| matrix::mix_columns_pattern(matrix::shift_rows_pattern(p));
+    println!("Rounds until every output byte depends on every input byte");
+    println!("  ShiftRows + MixColumns   {}", matrix::rounds_to_full_diffusion(aes_round));
+    println!("  MixState                 {}", matrix::rounds_to_full_diffusion(matrix::mix_state_pattern));
+    if let Some(path) = rust {
+        std::fs::write(&path, gen::render_linear_rust(&l)).map_err(|e| format!("cannot write {path}: {e}"))?;
+        println!("\nRust constants written to {path}");
+    }
+    Ok(aes_report.passed() && l.columns.report.passed() && l.state.report.passed())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("sbox") => run_sbox(&args[1..]),
         Some("gen-sbox") => run_gen(&args[1..]),
+        Some("gen-linear") => run_gen_linear(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
