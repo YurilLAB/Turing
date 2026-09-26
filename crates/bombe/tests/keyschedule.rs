@@ -4,20 +4,26 @@
 
 use bombe::keyschedule::*;
 use bombe::matrix;
+use sha3::digest::core_api::CoreWrapper;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use turing::keyschedule::{self as ks, expand};
+use turing::structure::ROUND_KEYS;
 
-// Kanda (SAC 2000): a Feistel cipher whose round function is S-boxes followed
-// by a linear layer of branch number B has at least B, B + 2 and 2B + 1
-// active S-boxes in any 4, 6 and 8 consecutive rounds. The prover must agree
-// for several sizes, not just ours.
+// Kanda (SAC 2000), as stated in eprint 2010/426: a Feistel cipher whose
+// round function is S-boxes followed by a linear layer of branch number B has
+// at least rB + floor(r/2) active S-boxes in every 4r rounds. The prover
+// must respect this lower bound for several sizes, not just ours.
 #[test]
-fn prover_matches_kanda_theorem() {
+fn prover_respects_kanda_theorem() {
     for n in [4usize, 8, 16] {
         let b = (n + 1) as u32;
-        let bounds = feistel_min_active_general(n, n + 1, 8);
+        let bounds = feistel_min_active_general(n, n + 1, 16);
+        for r in 1..=4u32 {
+            let kanda = r * b + r / 2;
+            assert!(bounds[4 * r as usize - 1] >= kanda, "n = {n}, {} rounds", 4 * r);
+        }
+        // For 4 and 8 rounds the prover lands exactly on Kanda's value.
         assert_eq!(bounds[3], b, "n = {n}, 4 rounds");
-        assert_eq!(bounds[5], b + 2, "n = {n}, 6 rounds");
         assert_eq!(bounds[7], 2 * b + 1, "n = {n}, 8 rounds");
     }
 }
@@ -29,39 +35,49 @@ fn prover_is_monotone() {
     assert!(bounds.windows(2).all(|w| w[0] <= w[1]));
 }
 
-// The shipped round counts meet their targets, and are the smallest that do.
+// Every round key the cipher uses, and many more, sits behind at least
+// ROUND_KEY_TARGET active S-boxes, counting the one-round lag of the R half.
+// 13 warm-up rounds is the least that achieves it: with 12, round key 1
+// depends on only 11 rounds (38 active S-boxes).
 #[test]
-fn turing_round_counts_meet_targets() {
-    assert_eq!(rounds_for(WARMUP_TARGET, 32), Some(ks::WARMUP_ROUNDS));
-    assert_eq!(rounds_for(PAIR_TARGET, 32), Some(ks::ROUNDS_PER_PAIR));
-    assert_eq!(feistel_min_active(ks::WARMUP_ROUNDS)[ks::WARMUP_ROUNDS - 1], 53);
-    assert_eq!(feistel_min_active(ks::ROUNDS_PER_PAIR)[ks::ROUNDS_PER_PAIR - 1], 35);
+fn every_round_key_meets_the_target() {
+    let bounds: Vec<u32> = (0..64).map(round_key_bound).collect();
+    assert!(bounds.iter().all(|&b| b >= ROUND_KEY_TARGET), "{bounds:?}");
+    assert_eq!(bounds.iter().min(), Some(&53));
+    assert_eq!(round_key_bound(1), 53, "the lagging R half of the first pair is the weakest");
+    assert_eq!(ks::round_key_depth(0), ks::WARMUP_ROUNDS);
+    assert_eq!(ks::round_key_depth(1), ks::WARMUP_ROUNDS - 1);
+    assert_eq!(rounds_for(ROUND_KEY_TARGET, 32), Some(ks::WARMUP_ROUNDS - 1));
+    assert!(feistel_min_active(11)[10] < ROUND_KEY_TARGET, "12 warm-up rounds would not be enough");
+    const { assert!(ROUND_KEYS <= 64) };
 }
 
 // Negative control: with a weak linear layer (branch 2, e.g. none at all)
-// the same targets need far more rounds, so the targets are not met by
-// accident.
+// the same target needs far more rounds, so it is not met by accident.
 #[test]
 fn weak_mixing_needs_many_more_rounds() {
     let weak = feistel_min_active_general(16, 2, 40);
-    let rounds = weak.iter().position(|&b| b >= WARMUP_TARGET).map(|i| i + 1);
+    let rounds = weak.iter().position(|&b| b >= ROUND_KEY_TARGET).map(|i| i + 1);
     assert!(rounds.unwrap_or(usize::MAX) > 3 * ks::WARMUP_ROUNDS, "{rounds:?}");
 }
 
+/// cSHAKE256 straight from the sha3 crate (not through turing::xof).
+fn cshake(label: &[u8], input: &[u8]) -> impl XofReader {
+    let mut h = CoreWrapper::from_core(sha3::CShake256Core::new(label));
+    h.update(input);
+    h.finalize_xof()
+}
+
 /// An independent model of the key schedule: table-lookup S-box, Bombe's
-/// table-based field arithmetic, same published labels. `feed_forward`
-/// switches the final XOR with K' off to show it matters.
+/// table-based field arithmetic, same published labels, round counts
+/// written out. `feed_forward` switches the final XOR with K' off to show
+/// it matters.
 fn reference(key: &[u8; 32], n: usize, feed_forward: bool) -> Vec<[u8; 16]> {
     let mut kp = [0u8; 32];
-    let mut h = sha3::Shake256::default();
-    h.update(b"Turing v1 key");
-    h.update(key);
-    h.finalize_xof().read(&mut kp);
+    cshake(b"Turing v1 key", key).read(&mut kp);
     let (k_l, k_r) = (kp[..16].to_vec(), kp[16..].to_vec());
     let (mut l, mut r) = (k_l.clone(), k_r.clone());
-    let mut cs = sha3::Shake256::default();
-    cs.update(b"Turing v1 key schedule constants");
-    let mut cs = cs.finalize_xof();
+    let mut cs = cshake(b"Turing v1 key schedule constants", &[]);
     let m = matrix::from_array(&turing::linear::MIX_STATE);
     let mut round = |l: &mut Vec<u8>, r: &mut Vec<u8>| {
         let mut c = [0u8; 16];
@@ -71,7 +87,7 @@ fn reference(key: &[u8; 32], n: usize, feed_forward: bool) -> Vec<[u8; 16]> {
         let new_l: Vec<u8> = (0..16).map(|i| r[i] ^ fo[i]).collect();
         *r = std::mem::replace(l, new_l);
     };
-    for _ in 0..12 {
+    for _ in 0..13 {
         round(&mut l, &mut r);
     }
     let mut out = Vec::new();
@@ -113,7 +129,7 @@ fn feed_forward_is_applied() {
     }
 }
 
-// Non-linearity of the Feistel stage itself (SHAKE256 removed). Any affine
+// Non-linearity of the Feistel stage itself (cSHAKE256 removed). Any affine
 // map E satisfies E(a) ^ E(b) ^ E(c) ^ E(a ^ b ^ c) = 0; the AES-256 schedule
 // is close to that, which is what the 2009 attacks exploited. Every Turing
 // round key must break the identity. An avalanche test cannot see this: a

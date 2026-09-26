@@ -12,8 +12,9 @@ Turing uses a mix of two layers:
 ShiftRows + MixColumns is cheap and is the structure behind AES's proof of at
 least 25 active S-boxes in any 4 rounds. MixState is expensive (256 field
 multiplications) but changes all 16 bytes from any one byte in a single round.
-**Which rounds use which layer is decided in step 7**, by computing the
-guaranteed number of active S-boxes for each placement.
+Step 7 decided the placement by computing the guaranteed number of active
+S-boxes for each option: **MixState in odd rounds, ShiftRows + MixColumns in
+even rounds** (docs/09).
 
 ## Branch number and MDS
 
@@ -31,13 +32,16 @@ M[i][j] = 1 / (x_i + y_j) over GF(2^8), with all 2n points distinct.
 Every square submatrix of a Cauchy matrix is again a Cauchy matrix, and a
 Cauchy determinant is a product of non-zero differences, so **every Cauchy
 matrix is MDS**. That makes the construction a proof, not a hope. The points
-are the first 2n distinct bytes of SHAKE256(label || counter):
+are the first 2n distinct bytes of cSHAKE256(X = counter, S = label):
 
-- MixColumns: label "Turing v1 MixColumns", counter 0.
+- MixColumns: label "Turing v1 MixColumns", counter 0:
+  x = 07 2a 5d d6, y = 80 a4 df 32.
 - MixState: label "Turing v1 MixState", counter 0.
 
 Both were accepted on the first draw, as the theorem predicts. Reproduce with
-`cargo run --release -p bombe -- gen-linear`.
+`cargo run --release -p bombe -- gen-linear`. (Until step 7 the points came
+from plain SHAKE256(label || counter); the switch to cSHAKE256 for domain
+separation, docs/08, changed them. The matrices are MDS either way.)
 
 ## Independent verification
 

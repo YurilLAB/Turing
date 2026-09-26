@@ -1,8 +1,9 @@
 //! The Turing S-box: S(x) = A_out( inv( A_in(x) ) ) over GF(2^8).
 //!
-//! The field inverse supplies the strength (optimal differential and linear
-//! properties for 8 bits). A_in and A_out are affine maps derived from
-//! SHAKE256 and selected by Bombe for structural criteria; see
+//! The field inverse supplies the strength (the best differential and linear
+//! properties known for an 8-bit permutation: uniformity 4, nonlinearity
+//! 112). A_in and A_out are affine maps derived from cSHAKE256 and selected
+//! by Bombe for structural criteria; see
 //! docs/05-sbox.md and `bombe gen-sbox`, which reproduces every constant in
 //! `sbox_constants.rs` from a public label.
 //!

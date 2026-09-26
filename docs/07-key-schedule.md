@@ -26,21 +26,21 @@ still a weakness in the design, and Turing is built to not have it.
 
 ## Turing's schedule: a mix of SHAKE256 and Turing's own rounds
 
-1. **Whitening (SHAKE256).** K' = SHAKE256("Turing v1 key" || K). A chosen
-   key difference becomes a pseudorandom difference the attacker cannot
-   predict.
+1. **Whitening (cSHAKE256).** K' = cSHAKE256(X = K, S = "Turing v1 key").
+   A chosen key difference becomes a pseudorandom difference the attacker
+   cannot predict.
 2. **Feistel expansion (Turing's round function).** Split K' = (L, R) and
    run (L, R) -> (R XOR F_j(L), L) with F_j(x) = MixState(S(x XOR C_j)).
-   The constants C_j are read from SHAKE256("Turing v1 key schedule
-   constants"). After 12 warm-up rounds the first round-key pair is taken,
-   then one pair every 8 rounds. This is the same shape as Kuznyechik's
-   schedule (8 Feistel rounds per pair of round keys, RFC 7801), with
-   Turing's S-box and whole-state MixState inside.
+   The constants C_j are read from cSHAKE256(X = "", S = "Turing v1 key
+   schedule constants"). After 13 warm-up rounds the first round-key pair
+   (L, R) is taken, then one pair every 8 rounds. This is the same shape as
+   Kuznyechik's schedule (8 Feistel rounds per pair of round keys, RFC 7801),
+   with Turing's S-box and whole-state MixState inside.
 3. **Feed-forward.** Round key = Feistel half XOR the matching half of K'.
 
 Round keys are wiped from memory (`zeroize`) when dropped.
 
-### Proof: every key difference is expensive
+### Proof: every round key is expensive to reach
 
 Bombe computes, by dynamic programming, the minimum number of active
 S-boxes any non-zero key difference must cross (`bombe key-schedule`).
@@ -51,24 +51,44 @@ state space:
 | Feistel rounds | Min active S-boxes | Trail probability |
 |---|---|---|
 | 4 | 17 | ≤ 2^-102 |
-| 8 (between pairs) | 35 | ≤ 2^-210 |
-| 12 (warm-up) | 53 | ≤ 2^-318 |
+| 8 | 35 | ≤ 2^-210 |
+| 11 | 38 | ≤ 2^-228 |
+| 12 | 53 | ≤ 2^-318 |
+| 13 | 54 | ≤ 2^-324 |
 
-Targets: at least 43 active S-boxes before the first round key (2^-258,
-beyond the 2^256 key space) and at least 22 between pairs (2^-132). 12 and
-8 are the smallest round counts that meet them.
+Each round key depends on a certain number of Feistel rounds. An L half is
+taken after the rounds run so far, but an R half equals the L half of *one
+round earlier*, so it lags by one. With 13 warm-up rounds the first pair
+depends on 13 and 12 rounds, and later pairs on 8 more each. The weakest
+round key is therefore behind 12 rounds, at least **53 active S-boxes**.
 
-**This bound holds even if SHAKE256 were broken** and an attacker could
+Target: every round key individually behind at least 43 active S-boxes
+(2^-258, beyond the 2^256 key space). 13 is the smallest warm-up that meets
+it.
+
+**This bound holds even if cSHAKE256 were broken** and an attacker could
 choose the difference in K' directly. The two layers are independent
 defences.
 
-The prover agrees exactly with Kanda's theorem (SAC 2000) for Feistel
-ciphers with an SP round function of branch number B: at least B, B + 2
-and 2B + 1 active S-boxes in 4, 6 and 8 rounds. This is tested for halves
-of 4, 8 and 16 bytes. The bound counts differential *trails*
+The prover respects Kanda's theorem (SAC 2000, as stated in ePrint
+2010/426): a Feistel cipher with an SP round function of branch number B has
+at least rB + ⌊r/2⌋ active S-boxes in every 4r rounds. This is tested for
+halves of 4, 8 and 16 bytes, and for 4 and 8 rounds the prover gives exactly
+Kanda's values (B and 2B + 1). The bound counts differential *trails*
 (characteristics). Clustering of many trails into one differential is the
 usual caveat, and the margin (2^-318 against a 2^-256 target) is there for
 it.
+
+### Correction made in the step 7 review
+
+The first version of this schedule used 12 warm-up rounds and claimed 53
+active S-boxes "before the first round keys", plus a target of 22 active
+S-boxes "between pairs". Both claims overlooked the one-round lag of the R
+half. Round key 1 depended on only 11 rounds (38 active S-boxes, 2^-228), and
+the R half of each later pair on 7 fresh rounds, not 8. The fix is one more
+warm-up round, and the target is now stated per round key, which is what an
+attacker actually needs to predict. The between-pairs target, which did not
+correspond to a real attack model, is gone.
 
 ### Why the feed-forward
 
@@ -93,7 +113,7 @@ known shortcut.
   round, and removing the S-boxes from F.
 
 The last one is worth remembering. **With the S-boxes removed, the schedule
-still passed the avalanche test**, because SHAKE256 and MixState spread bits
+still passed the avalanche test**, because cSHAKE256 and MixState spread bits
 around even when the schedule is linear. Avalanche does not detect linearity,
 and linearity is exactly what the 2009 attacks used. The non-affinity test
 was added because of this.

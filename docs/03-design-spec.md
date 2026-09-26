@@ -10,15 +10,20 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 - Substitution-permutation network (SPN).
 - Hybrid public-key encryption from the start, built on vetted post-quantum
   primitives. Only the data cipher is ours.
-- Hybrid KEM: **X-Wing** (X25519 + ML-KEM-768 with its published SHA3-256
-  combiner). ML-KEM-768 is NIST category 3; X25519 guards against a future
-  break of ML-KEM. We do not hand-build the combiner.
+- Hybrid KEM: **X-Wing** (X25519 + ML-KEM-768 with its SHA3-256 combiner,
+  specified in the IETF CFRG Internet-Draft draft-connolly-cfrg-xwing-kem;
+  version 10, March 2026, not yet an RFC). ML-KEM-768 is NIST category 3;
+  X25519 guards against a future break of ML-KEM. We do not hand-build the
+  combiner.
 - Sender signatures (ML-DSA): **later**, after file encryption works end to
   end. The file format reserves space for them (versioned header).
-- Constants: derived with **SHAKE256** (the SHA-3 extendable-output function)
-  from ASCII labels of the form `"Turing v1 <purpose>"`, e.g.
-  `"Turing v1 round constants"`. SHAKE256 produces any length, so one rule
-  covers every constant, and anyone can reproduce them with a standard tool.
+- Constants and key-derived values: **cSHAKE256** (NIST SP 800-185) with the
+  input as X and an ASCII label of the form `"Turing v1 <purpose>"` as the
+  customization string S (`crates/turing/src/xof.rs`). cSHAKE encodes the
+  label's length, so no two labels can ever produce the same hash input;
+  plain SHAKE256(label || input), used until step 7, only had that property
+  because the lengths happened to differ. It produces any output length, so
+  one rule covers everything, and standard tools reproduce it.
 
 ## Layer 1: the Turing block cipher
 
@@ -27,10 +32,10 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 | Block size | 128 bits (4x4 bytes) | Avoids the 64-bit birthday bound |
 | Key size | 256 bits | Quantum margin |
 | Round | S-box layer → linear layer → add round key | Classic SPN, wide-trail analysable |
-| S-box | A_out∘inv∘A_in over GF(2^8), affine layers from SHAKE256 (docs/05) | Optimal 8-bit strength, reproducible constants |
-| Linear layer | ShiftRows + 4×4 Cauchy MixColumns (branch 5) in most rounds, 16×16 Cauchy MixState (branch 17) in rounds chosen in step 7 (docs/06) | Guarantees active S-boxes |
-| Key schedule | SHAKE256 whitening, then a Feistel of S-box + MixState rounds with feed-forward (docs/07) | Every key difference crosses >= 53 active S-boxes; no local collisions |
-| Rounds | Set from proven bounds + margin (step 7); MixState at least every 4 rounds (docs/08) | AES-256 uses 14; expect similar or more |
+| S-box | A_out∘inv∘A_in over GF(2^8), affine layers from cSHAKE256 (docs/05) | Best known 8-bit strength, reproducible constants |
+| Linear layer | 16×16 Cauchy MixState (branch 17) in odd rounds, ShiftRows + 4×4 Cauchy MixColumns (branch 5) in even rounds, none in the last (docs/06, 09) | Guarantees active S-boxes |
+| Key schedule | cSHAKE256 whitening, then a Feistel of S-box + MixState rounds with feed-forward, 13 warm-up rounds (docs/07) | Every round key sits behind >= 53 active S-boxes; no local collisions |
+| Rounds | 16 (docs/09) | Twice the longest attack our tools can build (8 rounds); AES-256 uses 14 |
 | Implementation | Constant-time, no secret-indexed table lookups | Cache-timing side channels |
 
 ### S-box acceptance criteria (checked by our step 3 tools)
@@ -44,11 +49,13 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 - Algebraic degree 7 (maximal for a bijective 8-bit S-box).
 - No fixed points: S(x) ≠ x and S(x) ≠ x XOR 0xFF.
 - Shortest permutation cycle ≥ 16 (stricter than AES, which has a 2-cycle).
-- Has a small Boolean circuit, so it can be computed in constant time.
+- Computable in constant time: Turing evaluates it arithmetically (two affine
+  maps and x^254) with no table lookups; compact Boolean circuits for field
+  inversion are also known if speed is needed later.
 
-Note: forbidding S(x) = x in one component is fine. Enigma's flaw was that
-the *whole* cipher could never map a letter to itself; our full cipher must
-remain able to map any block to any block.
+Note: forbidding S(x) = x in one component is fine. One of Enigma's
+weaknesses was that the *whole* machine could never map a letter to itself;
+our full cipher must remain able to map any block to any block.
 
 ### Constants must be "nothing up my sleeve"
 

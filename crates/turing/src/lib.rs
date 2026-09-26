@@ -7,3 +7,5 @@ pub mod gf;
 pub mod keyschedule;
 pub mod linear;
 pub mod sbox;
+pub mod structure;
+pub mod xof;

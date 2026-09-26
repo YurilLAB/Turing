@@ -39,19 +39,29 @@ like even static; any line, block or bright spot is exploitable structure.
 - Mutation check: planting a bug in the BCT or the Möbius transform makes the
   suite fail (done by hand on 2026-09-26).
 
-## Planned, in the order they become useful
+## Built since
 
-**Linear layer lab (step 5, built: `bombe gen-linear`)**
+**Linear layer lab (step 5): `bombe gen-linear`**
 - MDS check: every square submatrix invertible (exhaustive or sampled by size).
 - Branch number measured directly on inputs with 1–3 active bytes.
 - Rounds to full diffusion: how many rounds until every output byte depends on
   every input byte.
 
-**Trail bounder (step 7)**
-- Exact minimum number of active S-boxes over r rounds, by dynamic programming
-  over byte-activity patterns (2^16 states per round for a 16-byte state).
-- Converts that into a bound on the best differential and linear trail, which
-  sets the round count.
+**Key-schedule prover (step 6): `bombe key-schedule`**
+- Minimum active S-boxes through the key-schedule Feistel, and the bound
+  behind every individual round key. Validated against Kanda's theorem.
+
+**Trail bounder and impossible-differential search (step 7): `bombe rounds`**
+- Exact minimum active S-boxes over any window of rounds, for any mix of
+  ShiftRows + MixColumns and MixState layers (dynamic programming over the
+  2^16 byte-activity patterns). Reproduces the published AES table for 1–14
+  rounds exactly.
+- Miss-in-the-middle impossible-differential search. Finds AES's 4-round
+  impossible differentials and none over 5 rounds, matching the proof of
+  Sun et al. Every result is rechecked by exhaustive trail enumeration.
+- Compares candidate layer schedules side by side (docs/09).
+
+## Planned, in the order they become useful
 
 **Watch: the round tracer (step 8)**
 - Encrypt with any key and plaintext and print or render the state after every
@@ -71,6 +81,8 @@ like even static; any line, block or bright spot is exploitable structure.
   serial, chi-square, and a subset of the NIST SP 800-22 tests.
 
 **Attack bench (step 10)**
+- Integral distinguishers via the division property: the one structural
+  attack family the step 7 tools do not model yet (docs/09).
 - Reduced-round distinguishers: differential, linear, integral (square) and
   boomerang. The number of rounds each one breaks, measured against the full
   round count, is the security margin.

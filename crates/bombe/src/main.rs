@@ -10,6 +10,7 @@ Usage:
   bombe gen-sbox [--rust <OUT.rs>] [--html <OUT.html>]
   bombe gen-linear [--rust <OUT.rs>]
   bombe key-schedule
+  bombe rounds [ROUNDS]
 
 SOURCE:
   turing       the Turing S-box
@@ -78,7 +79,7 @@ fn run_gen(args: &[String]) -> Result<bool, String> {
     let (rust, html_out) = parse_outputs(args)?;
     let search = gen::search();
     let c = &search.chosen;
-    println!("Deriving from SHAKE256(\"{}\" || counter)\n", gen::LABEL);
+    println!("Deriving from cSHAKE256(X = counter, S = \"{}\")\n", gen::LABEL);
     for (counter, failed) in &search.rejected {
         println!("  candidate {counter:>3}  rejected: {}", failed.join(", "));
     }
@@ -123,7 +124,7 @@ fn run_gen_linear(args: &[String]) -> Result<bool, String> {
     let l = gen::linear();
     for c in [&l.columns, &l.state] {
         let n = c.m.len();
-        println!("{} ({n}x{n}): SHAKE256(\"{}\" || {})", if n == 4 { "MixColumns" } else { "MixState" }, c.label, c.counter);
+        println!("{} ({n}x{n}): cSHAKE256(X = {}, S = \"{}\")", if n == 4 { "MixColumns" } else { "MixState" }, c.counter, c.label);
         let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
         println!("  x = {}", hex(&c.xs));
         println!("  y = {}", hex(&c.ys));
@@ -146,27 +147,72 @@ fn run_gen_linear(args: &[String]) -> Result<bool, String> {
 }
 
 fn run_key_schedule() -> Result<bool, String> {
-    use bombe::keyschedule::{feistel_min_active, PAIR_TARGET, WARMUP_TARGET};
-    use turing::keyschedule::{ROUNDS_PER_PAIR, WARMUP_ROUNDS};
+    use bombe::keyschedule::{feistel_min_active, round_key_bound, ROUND_KEY_TARGET};
+    use turing::keyschedule::{round_key_depth, ROUNDS_PER_PAIR, WARMUP_ROUNDS};
+    use turing::structure::ROUND_KEYS;
     println!("Key-schedule Feistel, F = MixState(S(x ^ C)): minimum active S-boxes");
     println!("for any non-zero key difference (each costs at least 2^-6)\n");
-    let bounds = feistel_min_active(16);
-    for (i, b) in bounds.iter().enumerate() {
-        let r = i + 1;
-        let mut note = String::new();
-        if r == ROUNDS_PER_PAIR {
-            note += "  <- rounds between round-key pairs";
-        }
-        if r == WARMUP_ROUNDS {
-            note += "  <- warm-up before the first round keys";
-        }
-        println!("  {r:>2} rounds  >= {b:>2} active  (trail probability <= 2^-{}){note}", 6 * b);
+    for (i, b) in feistel_min_active(16).iter().enumerate() {
+        println!("  {:>2} rounds  >= {b:>2} active  (trail probability <= 2^-{})", i + 1, 6 * b);
     }
-    let warm = bounds[WARMUP_ROUNDS - 1];
-    let pair = bounds[ROUNDS_PER_PAIR - 1];
-    println!("\nWarm-up target  >= {WARMUP_TARGET}: {warm}  {}", if warm >= WARMUP_TARGET { "PASS" } else { "FAIL" });
-    println!("Per-pair target >= {PAIR_TARGET}: {pair}  {}", if pair >= PAIR_TARGET { "PASS" } else { "FAIL" });
-    Ok(warm >= WARMUP_TARGET && pair >= PAIR_TARGET)
+    println!("\nWarm-up {WARMUP_ROUNDS} rounds, then one pair of round keys every {ROUNDS_PER_PAIR} rounds.");
+    println!("Round key  Feistel rounds behind it  Min active S-boxes");
+    let mut worst = u32::MAX;
+    for i in 0..ROUND_KEYS {
+        let b = round_key_bound(i);
+        worst = worst.min(b);
+        println!("  RK{i:<3}    {:>4}                      {b:>4}", round_key_depth(i));
+    }
+    let pass = worst >= ROUND_KEY_TARGET;
+    println!("\nEvery round key >= {ROUND_KEY_TARGET} active S-boxes: weakest {worst}  {}", if pass { "PASS" } else { "FAIL" });
+    Ok(pass)
+}
+
+fn run_rounds(args: &[String]) -> Result<bool, String> {
+    use bombe::structure::{candidates, evaluate};
+    let rounds = match args.first() {
+        Some(r) => r.parse::<usize>().map_err(|_| format!("bad round count {r:?}"))?,
+        None => turing::structure::ROUNDS,
+    };
+    if !(2..=40).contains(&rounds) {
+        return Err("round count must be 2..=40".into());
+    }
+    const WINDOWS: usize = 8;
+    println!("Candidate round structures for a {rounds}-round cipher (weakest window of r rounds)\n");
+    print!("{:<34}", "structure");
+    for r in 1..=WINDOWS {
+        print!("{:>5}", format!("r{r}"));
+    }
+    println!("  to22  to43  ID  diff  run  MS  cost");
+    let fmt = |v: Option<usize>| v.map_or("-".to_string(), |x| x.to_string());
+    let show = |name: &str, schedule: &[bombe::trail::Layer]| {
+        let e = evaluate(schedule, WINDOWS);
+        print!("{name:<34}");
+        for b in &e.weakest {
+            print!("{b:>5}");
+        }
+        println!(
+            "  {:>4}  {:>4}  {:>2}  {:>4}  {:>3}  {:>2}  {:>4}",
+            fmt(e.rounds_to_22),
+            fmt(e.rounds_to_43),
+            e.impossible,
+            fmt(e.diffusion),
+            e.aes_like_run,
+            e.mix_states,
+            e.cost
+        );
+    };
+    for (name, schedule) in candidates(rounds) {
+        show(&name, &schedule);
+    }
+    if rounds == turing::structure::ROUNDS {
+        println!();
+        show("TURING (turing::structure)", &turing::structure::schedule());
+    }
+    println!("\nto22/to43: rounds until every window has >= 22 / 43 active S-boxes (2^-132 / 2^-258).");
+    println!("ID: longest impossible differential. diff: rounds to full diffusion.");
+    println!("run: longest stretch of ShiftRows+MixColumns. MS: MixState layers. cost: relative work.");
+    Ok(true)
 }
 
 fn main() -> ExitCode {
@@ -176,6 +222,7 @@ fn main() -> ExitCode {
         Some("gen-sbox") => run_gen(&args[1..]),
         Some("gen-linear") => run_gen_linear(&args[1..]),
         Some("key-schedule") => run_key_schedule(),
+        Some("rounds") => run_rounds(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

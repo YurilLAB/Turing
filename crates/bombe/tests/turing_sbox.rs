@@ -47,12 +47,12 @@ fn cipher_sbox_agrees_with_table() {
     }
 }
 
-// Why the search keeps optimal strength: differential uniformity, linearity,
-// boomerang uniformity, degree and the implicit-equation counts are affine
-// invariants, so every candidate A_out∘inv∘A_in scores exactly like AES.
-// Only structural properties (fixed points, cycles) vary between candidates.
+// Why the search keeps the best-known strength: differential uniformity,
+// linearity, boomerang uniformity, degree and the implicit-equation counts are
+// affine invariants, so every candidate A_out∘inv∘A_in scores exactly like
+// AES. Only structural properties (fixed points, cycles) vary between them.
 #[test]
-fn every_candidate_has_the_optimal_core() {
+fn every_candidate_has_the_inverse_core() {
     for counter in 0..12 {
         let s = gen::candidate(counter).sbox;
         assert_eq!(ddt(&s).uniformity(), 4, "candidate {counter}");

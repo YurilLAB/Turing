@@ -43,7 +43,7 @@ impl Sbox {
     }
 
     /// A seeded random permutation (xorshift64* + Fisher-Yates).
-    /// For testing the tools only; Turing's S-box is derived with SHAKE256.
+    /// For testing the tools only; Turing's S-box is derived with cSHAKE256.
     pub fn random(seed: u64) -> Self {
         let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
         if state == 0 {

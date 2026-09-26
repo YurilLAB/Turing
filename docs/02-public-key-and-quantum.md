@@ -43,10 +43,27 @@ not a secure system.
 
 ## Why Turing does not invent the public-key part
 
-Rainbow (broken on a laptop over a weekend, 2022) and SIKE (key recovery in
-about an hour on one core, 2022) were post-quantum finalists that fell after
-years of expert review. Public-key schemes carry far more algebraic structure
-than symmetric ciphers, and structure is what attackers exploit.
+Two schemes that survived years of expert review in the NIST competition fell
+in 2022:
+
+- **Rainbow**, a round-3 finalist signature scheme: Beullens recovered a
+  secret key for the level-1 parameters in about 53 hours on a laptop
+  ("Breaking Rainbow Takes a Weekend on a Laptop", CRYPTO 2022).
+- **SIKE**, which had advanced to round 4 as a key-exchange candidate:
+  Castryck and Decru broke SIKEp434 in about 10 minutes on a single core
+  ("An Efficient Key Recovery Attack on SIDH", EUROCRYPT 2023, preprint
+  July 2022).
+
+Public-key schemes carry far more algebraic structure than symmetric
+ciphers, and structure is what attackers exploit.
 
 Turing's public-key layer therefore uses vetted implementations; the data
-itself is encrypted with the Turing cipher.
+itself is encrypted with the Turing cipher. The planned hybrid KEM, X-Wing
+(X25519 + ML-KEM-768), is specified in an IETF CFRG Internet-Draft
+(draft-connolly-cfrg-xwing-kem, version 10, March 2026). It is not an RFC,
+so the implementation must track the draft version it follows.
+
+Correction (review during step 7): an earlier version of this document said
+SIKE fell "in about an hour" and called both schemes finalists. The paper's
+own figure is about 10 minutes, and SIKE was a round-4 candidate, not a
+finalist.

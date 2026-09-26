@@ -64,20 +64,31 @@ bound, and it is how Turing's round count will be chosen.
 
 ## 7. The Turing connection
 
-Enigma fell to one structural bias: a letter never encrypted to itself.
-Turing's Bombe combined that with guessed plaintext ("cribs") to eliminate
-almost every rotor setting. The lesson for this project: any detectable
-pattern, however small, is a way in.
+Enigma was broken by a combination of things, not a single flaw. Marian
+Rejewski of the Polish Cipher Bureau first broke it in December 1932 with
+permutation-group mathematics and intelligence material, and the Poles
+handed their methods to Britain and France in 1939. At Bletchley Park,
+Turing's Bombe searched for rotor settings consistent with a guessed piece of
+plaintext (a "crib"). Gordon Welchman's diagonal board, which used the
+reciprocity of the plugboard, cut the false settings sharply. Structural
+properties and operator habits made this possible. Enigma could never
+encrypt a letter to itself, which showed where a crib could not sit, and
+operators kept sending predictable phrases. The lesson for this project: any
+detectable pattern, however small, is a way in.
 
 ## Roadmap
 
-1. Math foundations (this document)
-2. Design spec: block size, key size, structure
-3. Analysis tools in Rust: DDT, LAT, avalanche tests
-4. Design and measure the S-box
-5. Design the linear layer and prove its branch number
-6. Design the key schedule
-7. Set the round count from proven bounds
+1. Math foundations (this document) — done
+2. Design spec: block size, key size, structure — done (03)
+3. Analysis tools in Rust: DDT, LAT, avalanche tests — done (04)
+4. Design and measure the S-box — done (05)
+5. Design the linear layer and prove its branch number — done (06)
+6. Design the key schedule — done (07), reviewed (08)
+7. Set the round count from proven bounds — done (09)
 8. Implement the cipher with test vectors
 9. File encryption: mode, authentication, key derivation, file format
 10. Attack it ourselves
+
+Source for the Enigma history: "Cryptanalysis of the Enigma" (Wikipedia
+overview) and J. Wilcox, "Solving the Enigma: History of the Cryptanalytic
+Bombe" (NSA Center for Cryptologic History).

@@ -8,9 +8,10 @@
 //! - `mix_state`: the whole 16-byte state is multiplied by a 16x16 MDS matrix
 //!   (branch number 17): one changed byte changes all 16.
 //!
-//! Both matrices are Cauchy matrices over points drawn from SHAKE256; see
+//! Both matrices are Cauchy matrices over points drawn from cSHAKE256; see
 //! docs/06-linear-layer.md and `bombe gen-linear`, which reproduces
-//! `linear_constants.rs`. Which rounds use which layer is set in step 7.
+//! `linear_constants.rs`. Which rounds use which layer is set in
+//! `structure.rs`.
 
 use crate::gf;
 

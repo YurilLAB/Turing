@@ -3,28 +3,42 @@
 //! Three layers, each answering a known attack on AES-256's schedule
 //! (docs/07-key-schedule.md):
 //!
-//! 1. **Whitening**: K' = SHAKE256("Turing v1 key" || K). A key difference
+//! 1. **Whitening**: K' = cSHAKE256(K, S = "Turing v1 key"). A key difference
 //!    chosen by an attacker becomes a pseudorandom, unknown difference.
 //! 2. **Feistel expansion** on K' = (L, R): each round maps (L, R) to
 //!    (R XOR F_j(L), L) with F_j(x) = MixState(S(x XOR C_j)) and constants
-//!    C_j read from SHAKE256("Turing v1 key schedule constants"). Bombe
-//!    proves any key difference crosses at least 53 active S-boxes in the 12
-//!    warm-up rounds and 35 in each 8-round step.
+//!    C_j read from cSHAKE256("", S = "Turing v1 key schedule constants").
+//!    Round keys are taken in pairs (L, R) after 13 warm-up rounds, then
+//!    every 8 rounds. The R half is one round behind L, so the first R round
+//!    key depends on 12 rounds, and Bombe proves any key difference crosses
+//!    at least 53 active S-boxes before reaching any round key.
 //! 3. **Feed-forward**: each round key is a Feistel half XOR the matching
 //!    half of K', so round keys cannot be run backwards to K', and
 //!    neighbouring round keys have no simple relation to exploit.
 
-use crate::{linear, sbox};
-use sha3::digest::{ExtendableOutput, Update, XofReader};
-use sha3::Shake256;
+use crate::{linear, sbox, xof};
+use sha3::digest::XofReader;
 use zeroize::Zeroize;
 
-pub const KEY_LABEL: &[u8] = b"Turing v1 key";
-pub const CONSTANTS_LABEL: &[u8] = b"Turing v1 key schedule constants";
+pub const KEY_LABEL: &str = "Turing v1 key";
+pub const CONSTANTS_LABEL: &str = "Turing v1 key schedule constants";
 /// Feistel rounds before the first round keys are taken.
-pub const WARMUP_ROUNDS: usize = 12;
+pub const WARMUP_ROUNDS: usize = 13;
 /// Feistel rounds between consecutive round-key pairs.
 pub const ROUNDS_PER_PAIR: usize = 8;
+
+/// How many Feistel rounds determine round key `index`: an L half (even
+/// index) is taken after the rounds run so far; an R half (odd index) equals
+/// the L half of one round earlier.
+pub const fn round_key_depth(index: usize) -> usize {
+    let pair = index / 2;
+    let l_depth = WARMUP_ROUNDS + pair * ROUNDS_PER_PAIR;
+    if index.is_multiple_of(2) {
+        l_depth
+    } else {
+        l_depth - 1
+    }
+}
 
 pub type Block = [u8; 16];
 
@@ -74,10 +88,7 @@ impl<const N: usize> Drop for RoundKeys<N> {
 /// Expands `key` into N round keys.
 pub fn expand<const N: usize>(key: &[u8; 32]) -> RoundKeys<N> {
     let mut whitened = [0u8; 32];
-    let mut h = Shake256::default();
-    h.update(KEY_LABEL);
-    h.update(key);
-    h.finalize_xof().read(&mut whitened);
+    xof::cshake256(KEY_LABEL, key).read(&mut whitened);
 
     let mut k_left: Block = core::array::from_fn(|i| whitened[i]);
     let mut k_right: Block = core::array::from_fn(|i| whitened[16 + i]);
@@ -89,12 +100,12 @@ pub fn expand<const N: usize>(key: &[u8; 32]) -> RoundKeys<N> {
 }
 
 /// Layers 2 and 3 alone, starting from K' = (k_left, k_right). Exposed so
-/// Bombe can analyse the Feistel stage without the SHAKE256 layer in front.
+/// Bombe can analyse the Feistel stage without the cSHAKE256 layer in front.
 #[doc(hidden)]
 pub fn expand_whitened<const N: usize>(k_left: &Block, k_right: &Block) -> RoundKeys<N> {
     let (mut l, mut r) = (*k_left, *k_right);
 
-    let mut constants = Shake256::default().chain(CONSTANTS_LABEL).finalize_xof();
+    let mut constants = xof::cshake256(CONSTANTS_LABEL, &[]);
     for _ in 0..WARMUP_ROUNDS {
         feistel_round(&mut l, &mut r, &mut constants);
     }

@@ -10,7 +10,7 @@
 /// Every field with 256 elements is isomorphic to every other, and the
 /// isomorphism is a linear map on the bits. Choosing a different polynomial
 /// would therefore only amount to a different affine wrapper, which Turing's
-/// SHAKE256-derived affine layers already provide.
+/// cSHAKE256-derived affine layers already provide.
 pub const POLY: u8 = 0x1b;
 
 /// Multiplication in GF(2^8), branch-free.

@@ -66,15 +66,21 @@ pub fn feistel_min_active(rounds: usize) -> Vec<u32> {
     feistel_min_active_general(16, 17, rounds)
 }
 
-/// Security targets. Each active S-box passes a chosen difference with
-/// probability at most 2^-6.
-/// Warm-up: at least 43 active S-boxes, so any trail from the key to the
-/// first round keys has probability <= 2^-258, below 2^-256 (the key size).
-pub const WARMUP_TARGET: u32 = 43;
-/// Between pairs: at least 22 active S-boxes (<= 2^-132, beyond 2^-128).
-pub const PAIR_TARGET: u32 = 22;
+/// Security target. Each active S-box passes a chosen difference with
+/// probability at most 2^-6. Every single round key must sit behind at least
+/// 43 active S-boxes, so predicting the difference of even one round key
+/// from a key difference has probability <= 2^-258, below 2^-256 (the key
+/// size).
+pub const ROUND_KEY_TARGET: u32 = 43;
 
 /// Smallest number of Feistel rounds whose bound reaches `target`.
 pub fn rounds_for(target: u32, max_rounds: usize) -> Option<usize> {
     feistel_min_active(max_rounds).iter().position(|&b| b >= target).map(|i| i + 1)
+}
+
+/// The bound protecting round key `index`: the minimum active S-boxes over
+/// the Feistel rounds that determine it (`turing::keyschedule::round_key_depth`).
+pub fn round_key_bound(index: usize) -> u32 {
+    let depth = turing::keyschedule::round_key_depth(index);
+    feistel_min_active(depth)[depth - 1]
 }
