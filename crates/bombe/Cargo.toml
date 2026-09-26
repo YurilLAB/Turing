@@ -1,0 +1,8 @@
+[package]
+name = "bombe"
+version = "0.1.0"
+edition = "2021"
+description = "Cryptanalysis workbench for the Turing cipher"
+publish = false
+
+[dependencies]

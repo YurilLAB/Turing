@@ -37,7 +37,10 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 
 - Bijective (every output appears exactly once).
 - Differential uniformity ≤ 4 (max DDT entry, non-trivial rows).
-- Max LAT absolute entry ≤ 16 (linear bias ≤ 2^-3).
+- Linearity (max |Walsh coefficient|) ≤ 32: correlation ≤ 2^-3, i.e. a
+  linear approximation holds with probability at most 1/2 ± 2^-4.
+  (Nonlinearity ≥ 112.)
+- Boomerang uniformity ≤ 6.
 - Algebraic degree 7 (maximal for a bijective 8-bit S-box).
 - No fixed points: S(x) ≠ x and S(x) ≠ x XOR 0xFF.
 - Has a small Boolean circuit, so it can be computed in constant time.

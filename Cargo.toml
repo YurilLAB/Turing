@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/bombe"]
+resolver = "2"
+
+# The analysis loops are heavy; unoptimised test builds are needlessly slow.
+[profile.test]
+opt-level = 2
