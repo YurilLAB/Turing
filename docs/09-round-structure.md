@@ -165,8 +165,13 @@ cryptanalysis at the byte level. They do not model:
 - **integral / division-property** distinguishers,
 - **algebraic** attacks.
 
-Step 10 (the attack bench) will add integral analysis. The factor-of-two
-margin is there for what cannot yet be measured.
+Step 10 has since measured two of these (docs/11). The word-level division
+property keeps a 2^120-plaintext set balanced through 4 rounds, and a 4-round
+key recovery with 2^32 plaintexts was run and works: max(3, 4, 4) + 4 = 8,
+so the rule above is unchanged. Cube testers stop at 2 rounds, and the
+interpolation attack finds no sparse polynomial to start from. Hulls,
+meet-in-the-middle and bit-level models remain, and the factor-of-two margin
+is there for them.
 
 ## Cost
 

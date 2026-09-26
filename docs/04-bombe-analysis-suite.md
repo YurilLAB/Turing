@@ -81,9 +81,24 @@ like even static; any line, block or bright spot is exploitable structure.
 - Key checks: suspicious keys, equivalent keys among neighbours.
 - Timing side channel, dudect-style, with a leaky control.
 
+**Classic attacks and key handling (step 10, second campaign)**, see docs/11
+- Word-level division property engine (`bombe::division`), validated on
+  AES's integral distinguishers, and square attacks with 2^16–2^32
+  plaintext structures on all CPU threads (`attack --deep` runs 2^32).
+- Boomerang quartets against the S-box's BCT; 16-dimensional cube testers.
+- Related-key round-key and output differences, with and without cSHAKE.
+- Differential fault analysis of the last round key, and the
+  decrypt-and-compare countermeasure.
+- The S-box as a polynomial over GF(2^8) (interpolation attack), validated on
+  the published 9-term AES polynomial.
+- Invariant attacks: W_L(D) and invariant-factor profiles of the linear
+  layers (Beierle et al. 2017), validated on Midori-64.
+- Correlation power analysis on simulated Hamming-weight leakage.
+- `tools/asm_branches.py`: conditional jumps in the release assembly, for
+  the constant-time review.
+
 ## Planned
 
-- Integral distinguishers via the division property: the one structural
-  attack family not modelled yet (docs/09).
-- Boomerang and meet-in-the-middle experiments on reduced rounds.
+- Meet-in-the-middle experiments on reduced rounds.
+- Bit-level division property (MILP or SAT) to check the word-level results.
 - Bit independence criterion.

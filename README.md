@@ -18,7 +18,8 @@ The design reasoning lives in [docs/](docs/), one document per step.
 ## Bombe commands
 
 ```
-cargo run --release -p bombe -- attack             # attack the real cipher, about 30 s
+cargo run --release -p bombe -- attack             # attack the real cipher, about 35 s
+cargo run --release -p bombe -- attack --deep      # adds a 2^33-encryption square attack, about 15 min
 cargo run --release -p bombe -- trace --flip-plaintext-bit 0
 cargo run --release -p bombe -- sbox turing --html sbox.html
 cargo run --release -p bombe -- rounds             # compare round structures
@@ -28,5 +29,10 @@ cargo run --release -p bombe -- vectors            # known-answer vectors
 
 `cargo test` runs the whole suite: the cipher against an independent
 reference implementation and the vectors in `vectors/turing-v1.txt`, every
-analysis tool against published AES results, and Bombe's NIST statistical
-tests against NIST's own reference results.
+analysis tool against published results (AES, Midori-64, NIST), and each
+attack against the rounds it must break.
+
+Round keys and reduced-round encryption are only reachable through the
+`turing` crate's `analysis` feature, which only Bombe turns on. For the
+constant-time review, `tools/asm_branches.py` lists every conditional jump
+in the release build's assembly (docs/11).

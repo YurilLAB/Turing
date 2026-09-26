@@ -6,5 +6,10 @@ description = "Turing: an experimental 128-bit block cipher with a 256-bit key"
 publish = false
 
 [dependencies]
-sha3 = "0.10"
+sha3 = { version = "0.10", features = ["zeroize"] }
 zeroize = "1.9.0"
+
+[features]
+# Reduced-round encryption and round-key access, for the Bombe analysis
+# workbench only. A normal build of the cipher cannot expose round keys.
+analysis = []

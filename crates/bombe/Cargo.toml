@@ -6,5 +6,5 @@ description = "Cryptanalysis workbench for the Turing cipher"
 publish = false
 
 [dependencies]
-turing = { path = "../turing" }
+turing = { path = "../turing", features = ["analysis"] }
 sha3 = "0.10"

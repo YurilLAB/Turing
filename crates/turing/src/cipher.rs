@@ -30,56 +30,80 @@ impl Turing {
     }
 
     pub fn encrypt_block(&self, block: &mut Block) {
-        self.encrypt_rounds(block, ROUNDS);
+        self.encrypt_n(block, ROUNDS);
     }
 
     pub fn decrypt_block(&self, block: &mut Block) {
-        self.decrypt_rounds(block, ROUNDS);
+        self.decrypt_n(block, ROUNDS);
     }
 
     /// The first `rounds` rounds only, with the last of them missing its
     /// linear layer exactly like the full cipher's last round. Reduced-round
     /// versions exist for cryptanalysis: attacks are measured by how many
-    /// rounds they break.
-    #[doc(hidden)]
+    /// rounds they break. Analysis builds only (feature `analysis`).
+    #[cfg(feature = "analysis")]
     pub fn encrypt_rounds(&self, block: &mut Block, rounds: usize) {
+        self.encrypt_n(block, rounds);
+    }
+
+    /// The inverse of `encrypt_rounds`. Analysis builds only.
+    #[cfg(feature = "analysis")]
+    pub fn decrypt_rounds(&self, block: &mut Block, rounds: usize) {
+        self.decrypt_n(block, rounds);
+    }
+
+    /// Round key `index` (0..=16), for the round tracer and attack
+    /// experiments. Analysis builds only.
+    #[cfg(feature = "analysis")]
+    pub fn round_key(&self, index: usize) -> &Block {
+        self.keys.key(index)
+    }
+
+    fn encrypt_n(&self, block: &mut Block, rounds: usize) {
         assert!((1..=ROUNDS).contains(&rounds), "rounds must be 1..={ROUNDS}");
-        add_round_key(block, self.keys.get(0));
+        add_round_key(block, self.keys.key(0));
         for round in 1..=rounds {
             sbox::sub_bytes(block);
             if round < rounds {
                 let layer = structure::layer(round).expect("every round but the last has a layer");
                 *block = linear::apply_layer(layer, block);
             }
-            add_round_key(block, self.keys.get(round));
+            add_round_key(block, self.keys.key(round));
         }
     }
 
-    /// The inverse of `encrypt_rounds` with the same round count.
-    #[doc(hidden)]
-    pub fn decrypt_rounds(&self, block: &mut Block, rounds: usize) {
+    fn decrypt_n(&self, block: &mut Block, rounds: usize) {
         assert!((1..=ROUNDS).contains(&rounds), "rounds must be 1..={ROUNDS}");
         for round in (1..=rounds).rev() {
-            add_round_key(block, self.keys.get(round));
+            add_round_key(block, self.keys.key(round));
             if round < rounds {
                 let layer = structure::layer(round).expect("every round but the last has a layer");
                 *block = linear::invert_layer(layer, block);
             }
             sbox::inv_sub_bytes(block);
         }
-        add_round_key(block, self.keys.get(0));
-    }
-
-    /// Round key `index` (0..=16). For analysis and the round tracer only.
-    #[doc(hidden)]
-    pub fn round_key(&self, index: usize) -> &Block {
-        self.keys.get(index)
+        add_round_key(block, self.keys.key(0));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Round keys must never reach a log, so neither `Turing` nor `RoundKeys`
+    // may implement Debug. If one ever does, both impls below apply and the
+    // calls stop compiling as ambiguous (the static_assertions technique for
+    // asserting that a trait is not implemented).
+    trait AmbiguousIfDebug<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfDebug<()> for T {}
+    struct IsDebug;
+    impl<T: ?Sized + core::fmt::Debug> AmbiguousIfDebug<IsDebug> for T {}
+    const _: fn() = || {
+        <Turing as AmbiguousIfDebug<_>>::check();
+        <RoundKeys<ROUND_KEYS> as AmbiguousIfDebug<_>>::check();
+    };
 
     fn key(seed: u8) -> [u8; 32] {
         core::array::from_fn(|i| (i as u8).wrapping_mul(71) ^ seed)
@@ -92,9 +116,9 @@ mod tests {
             for rounds in 1..=ROUNDS {
                 let plain: Block = core::array::from_fn(|i| (i as u8) ^ seed.wrapping_mul(29) ^ rounds as u8);
                 let mut b = plain;
-                t.encrypt_rounds(&mut b, rounds);
+                t.encrypt_n(&mut b, rounds);
                 assert_ne!(b, plain, "{rounds} rounds left the block unchanged");
-                t.decrypt_rounds(&mut b, rounds);
+                t.decrypt_n(&mut b, rounds);
                 assert_eq!(b, plain, "seed {seed}, {rounds} rounds");
             }
         }
@@ -106,7 +130,7 @@ mod tests {
         let mut a = [0x42u8; 16];
         let mut b = a;
         t.encrypt_block(&mut a);
-        t.encrypt_rounds(&mut b, ROUNDS);
+        t.encrypt_n(&mut b, ROUNDS);
         assert_eq!(a, b);
     }
 
@@ -122,6 +146,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "rounds must be")]
     fn zero_rounds_is_refused() {
-        Turing::new(&key(0)).encrypt_rounds(&mut [0u8; 16], 0);
+        Turing::new(&key(0)).encrypt_n(&mut [0u8; 16], 0);
     }
 }

@@ -12,7 +12,7 @@ Usage:
   bombe key-schedule
   bombe rounds [ROUNDS]
   bombe vectors [--out PATH]
-  bombe attack [--quick] [--report PATH | --no-report]
+  bombe attack [--quick] [--deep] [--report PATH | --no-report]
   bombe trace [--key HEX] [--plaintext HEX] [--rounds N]
               [--flip-plaintext-bit N | --flip-key-bit N | --key2 HEX | --plaintext2 HEX]
 
@@ -290,11 +290,13 @@ fn run_trace(args: &[String]) -> Result<bool, String> {
 
 fn run_attack(args: &[String]) -> Result<bool, String> {
     let mut quick = false;
+    let mut deep = false;
     let mut report = Some("target/reports/attack-report.md".to_string());
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--quick" => quick = true,
+            "--deep" => deep = true,
             "--report" => report = Some(it.next().ok_or("--report needs a path")?.clone()),
             "--no-report" => report = None,
             other => return Err(format!("unexpected argument {other:?}")),
@@ -302,9 +304,9 @@ fn run_attack(args: &[String]) -> Result<bool, String> {
     }
     println!("Bombe attack campaign against Turing ({} run)", if quick { "quick" } else { "full" });
     println!("PASS = resists / holds, BROKEN = reduced rounds broken (expected), CAUGHT = control detected,");
-    println!("FAIL = a problem, INFO = measurement.");
+    println!("EXPOSED = implementation attack needing a countermeasure, FAIL = a problem, INFO = measurement.");
     let mut section = String::new();
-    let campaign = bombe::campaign::run(quick, &mut |f| {
+    let campaign = bombe::campaign::run(quick, deep, &mut |f| {
         if f.section != section {
             section = f.section.to_string();
             println!("\n{section}");

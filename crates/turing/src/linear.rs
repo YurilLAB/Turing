@@ -26,7 +26,13 @@ pub use constants::{
 
 pub type State = [u8; 16];
 
-/// y = M·x over GF(2^8). Constant-time: fixed loops, branch-free multiply.
+/// y = M·x over GF(2^8), the plain way: the reference the fast layers below
+/// are proven against. NOT constant-time. `gf::mul` has no branches in the
+/// source, but when it is inlined here the optimiser turns its masks back
+/// into a conditional jump on each bit of x (21 such jumps on state bits in
+/// the release build of `mix_columns_with`). Compiled only for tests and
+/// analysis builds, so the cipher cannot call it on secret data.
+#[cfg(any(test, feature = "analysis"))]
 pub fn mat_vec<const N: usize>(m: &[[u8; N]; N], x: &[u8; N]) -> [u8; N] {
     let mut y = [0u8; N];
     for (yi, row) in y.iter_mut().zip(m) {
@@ -60,8 +66,10 @@ pub fn inv_shift_rows(s: &State) -> State {
     out
 }
 
-/// Multiplies every column by `m`. Public so tests can run it with the AES
-/// matrix against the FIPS-197 vectors.
+/// Multiplies every column by `m`, through `mat_vec`, so NOT constant-time.
+/// Public so tests can run it with the AES matrix against the FIPS-197
+/// vectors. Tests and analysis builds only.
+#[cfg(any(test, feature = "analysis"))]
 pub fn mix_columns_with(m: &[[u8; 4]; 4], s: &State) -> State {
     let mut out = [0u8; 16];
     for c in 0..4 {
@@ -76,9 +84,10 @@ pub fn mix_columns_with(m: &[[u8; 4]; 4], s: &State) -> State {
 // and bit k, the column vector (M[i][j] * x^k) over all outputs i. Then
 // y = XOR over (j, k) of mask(bit k of x_j) AND that vector. The indices j
 // and k are public loop counters; secret data only builds masks, so there
-// are no secret-dependent branches or lookups. Both this and `mat_vec` are
-// GF(2)-linear, so agreeing on all 128 single-bit inputs proves they agree
-// everywhere (see the tests).
+// are no secret-dependent branches or lookups, and the release build's
+// assembly for these functions has no conditional jump outside the loop
+// counters (docs/11). Both this and `mat_vec` are GF(2)-linear, so agreeing
+// on all 128 single-bit inputs proves they agree everywhere (see the tests).
 // ---------------------------------------------------------------------------
 
 const fn prepare16(m: &[[u8; 16]; 16]) -> [[[u64; 2]; 8]; 16] {

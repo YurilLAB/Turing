@@ -13,8 +13,12 @@
 /// cSHAKE256-derived affine layers already provide.
 pub const POLY: u8 = 0x1b;
 
-/// Multiplication in GF(2^8), branch-free. Also usable in constant
-/// expressions, which is how the lookup-free tables below are built.
+/// Multiplication in GF(2^8), branch-free in the source. Also usable in
+/// constant expressions, which is how the lookup-free tables below are built.
+/// The source is not the machine code: inlined into a loop over secret bytes
+/// the optimiser can turn the masks back into branches (it does in
+/// `linear::mat_vec`). Secret data goes through `mul8`, whose compiled code
+/// is checked (docs/11).
 pub const fn mul(mut a: u8, mut b: u8) -> u8 {
     let mut product = 0u8;
     let mut i = 0;

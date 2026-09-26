@@ -1,10 +1,10 @@
 # 08 — Security review
 
 A living review of every component against published attacks on AES-like
-ciphers, first written after step 6 and revisited in step 7. Each item says
-what the literature shows, whether Turing is exposed, and what, if anything,
-changes. The second review's findings about Turing's *own* earlier work are
-at the end.
+ciphers, first written after step 6 and revisited in steps 7 and 10. Each
+item says what the literature shows, whether Turing is exposed, and what, if
+anything, changes. The reviews of Turing's *own* earlier work are at the
+end.
 
 ## Related-key attacks (Biryukov–Khovratovich 2009)
 
@@ -18,7 +18,7 @@ but a break on paper. Bicliques build groups of keys whose differences touch
 only part of the cipher for a few rounds, which AES's slow key schedule
 permits. In Turing every round key depends on every key bit through at least
 53 S-boxes, so that partial-key structure is absent. Status: expected to be
-mitigated; to be tested in step 10.
+mitigated; not modelled by Bombe yet (docs/11).
 
 ## Hidden S-box structure (Kuznyechik)
 
@@ -37,7 +37,11 @@ Beierle, Canteaut, Leander and Rotella (CRYPTO 2017) show these attacks
 target ciphers whose round keys differ only by round constants (Midori,
 PRINTcipher and others), and give criteria for choosing those constants.
 Turing's round keys are nonlinear pseudorandom outputs of the key schedule,
-not "key + constant", so the precondition does not hold. Status: not exposed.
+not "key + constant", so the precondition does not hold. **Measured in step
+10 (docs/11):** both linear layers have a single invariant factor, and the
+real round-key differences span all 128 dimensions (W_L(D) = 128) for every
+key tried, so the paper's criterion leaves no invariant. Status: not
+exposed.
 
 ## Subspace trails, multiple-of-8, mixture and yoyo attacks
 
@@ -68,16 +72,23 @@ only for encryption, never as a hash building block. Hashing uses SHA-3.
 ## Cold-boot memory attacks (Halderman et al. 2008)
 
 Handled in step 6: the feed-forward removes simple relations between round
-keys, and round keys are wiped when dropped. Wiping cannot protect keys
-while they are in use, and copies made by the compiler or OS (swap,
-hibernation) are outside the cipher's control.
+keys, and round keys are wiped when dropped. Step 10 closed three gaps
+(review 3 below): key bytes left in the cSHAKE state, round keys copied
+when the cipher value moved, and round keys readable through the public API.
+Wiping cannot protect keys while they are in use, and copies made by the
+compiler or OS (swap, hibernation) are outside the cipher's control; the
+file tool must lock its key pages (docs/11).
 
 ## Timing side channels
 
 Everything is written branch-free with no secret-indexed tables, and
 cSHAKE256 (Keccak) uses no tables. The compiler could still introduce
-branches, so this is a claim to measure, not assume. **Planned:** a
-dudect-style timing test in step 10.
+branches, so this is a claim to measure, not assume. **Measured:** the
+dudect-style test finds no data-dependent timing (step 8, docs/10), and in
+step 10 the release build's assembly was read: no conditional jump in the
+cipher's secret paths depends on data. The compiler *did* turn the masks of
+the reference `mat_vec` into branches on state bits, which is why it is now
+compiled for tests only (docs/11).
 
 ## Block size and data limits
 
@@ -113,6 +124,25 @@ Checked and found correct: the AES validation values (differential 4,
 nonlinearity 112, boomerang 6, 39/23 equations, cycles), Cauchy MDS proofs,
 the FIPS-197 round vectors, the 2009 attack quotes, the Halderman and
 Beierle et al. citations, the biclique complexity (2^254.4).
+
+## Review 3 (step 10, second campaign): key handling and earlier claims
+
+| # | Where | Problem | Severity | Fix |
+|---|---|---|---|---|
+| 1 | Key whitening (steps 6, 8) | The key went through cSHAKE256 and the hasher was dropped unwiped: sha3 without its `zeroize` feature leaves the Keccak state in memory, and the digest crate never wipes its input buffer | Real, needs a memory disclosure to exploit | sha3 `zeroize` feature; `xof::cshake256_secret` wipes the buffer and output block; a test proves identical output for every input length 0–135 |
+| 2 | `RoundKeys` (step 6) | Round keys stored inline, so every move of a `Turing` copied them and left the old copy unwiped | Real, same condition | Round keys on the heap, filled in place |
+| 3 | Cipher API (step 8) | `round_key`, `get`, `all` and the reduced-round functions were public in every build | Real: any program could read the round keys | `analysis` feature, used only by Bombe; a probe crate shows the calls fail to compile without it |
+| 4 | `linear::mat_vec` (step 5) | Documented as constant-time, but the release build compiles it into 21 conditional jumps on state bits | Latent: the cipher never calls it | Docs corrected; compiled for tests and analysis only |
+| 5 | This document | The timing test was still "planned" (done in step 8) and bicliques "to be tested in step 10" | Accuracy | Updated |
+| 6 | Doc 10 | "The best attack breaks 3 rounds" and "division property not covered" | Accuracy | The division property predicts, and a 2^32-plaintext run confirms, a 4-round key recovery; doc 10 now points to doc 11 |
+| 7 | New structured square attack | With two fixed sets, a correct attack is reported as failed about 6% of the time (a wrong key byte guess survives both sets with probability 2^-16) | Tooling | Adds sets until every byte is unique |
+
+Checked and found correct in review 3: Turing's inversion chain is exactly
+Rivain–Prouff's Algorithm 2 (so masking applies unchanged), the BCLR
+statements and Midori-64 figures (reproduced by Bombe), the AES S-box
+polynomial (Rosenthal, reproduced), the Midori cell permutation (checked
+against its published inverse), and the Trivium, Plundervolt and PLATYPUS
+claims against the papers.
 
 ## Sources
 

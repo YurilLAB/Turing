@@ -4,12 +4,13 @@
 //! all of them; negative controls must fail, or the test that missed them
 //! is useless.
 
+use crate::invariant::LinearMap;
 use crate::refcipher::Reference;
 use crate::rng::Rng;
-use crate::{avalanche, battery, differential, integral, keycheck, timing};
+use crate::{avalanche, battery, boomerang, cube, differential, fault, integral, interpolation, invariant, keycheck, power, relatedkey, timing};
 use std::fmt::Write;
 use std::time::Instant;
-use turing::structure::ROUNDS;
+use turing::structure::{Layer, ROUNDS};
 use turing::Turing;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -22,6 +23,9 @@ pub enum Verdict {
     Broken,
     /// A negative control was caught, proving the test has teeth.
     Caught,
+    /// An implementation attack that works on the full cipher given physical
+    /// access (fault injection); needs a countermeasure, not a design fix.
+    Exposed,
     /// Measurement only.
     Info,
 }
@@ -33,6 +37,7 @@ impl Verdict {
             Verdict::Fail => "FAIL",
             Verdict::Broken => "BROKEN",
             Verdict::Caught => "CAUGHT",
+            Verdict::Exposed => "EXPOSED",
             Verdict::Info => "INFO",
         }
     }
@@ -121,7 +126,7 @@ fn pass_if(ok: bool) -> Verdict {
 }
 
 /// Runs everything. `progress` sees each finding as it is made.
-pub fn run(quick: bool, progress: &mut dyn FnMut(&Finding)) -> Campaign {
+pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campaign {
     let start = Instant::now();
     let mut log = Log { findings: Vec::new(), progress };
     let scale = |full: usize, fast: usize| if quick { fast } else { full };
@@ -209,10 +214,53 @@ pub fn run(quick: bool, progress: &mut dyn FnMut(&Finding)) -> Campaign {
         };
         log.add(s, format!("key recovery, {rounds} round(s)"), result, verdict);
     }
+    // Bigger structures: what the division property says, then the attack.
+    let schedule = turing::structure::schedule();
+    let reach = |n: usize| crate::division::balanced_until(&crate::division::active(&(0..n).collect::<Vec<_>>()), &schedule);
+    log.add(
+        s,
+        "division property: reach by structure size",
+        format!(
+            "2^8-2^24 plaintexts: {:?}, 2^32-2^112: {:?}, 2^120: {:?} (S-box layer the set stays balanced to)",
+            reach(1).unwrap_or(0),
+            reach(4).unwrap_or(0),
+            reach(15).unwrap_or(0)
+        ),
+        Verdict::Info,
+    );
+    let sets_used = |a: &integral::KeyRecovery, bytes: usize| a.chosen_plaintexts >> (8 * bytes);
+    for (rounds, bytes) in [(3usize, 2usize), (4, 2), (4, 3)] {
+        let a = integral::structured_square_attack(rounds, &(0..bytes).collect::<Vec<_>>(), 4, &format!("structured {rounds} {bytes}"));
+        let (result, verdict) = if a.correct {
+            (format!("RECOVERED round key {rounds} with {} sets of 2^{} plaintexts", sets_used(&a, bytes), 8 * bytes), Verdict::Broken)
+        } else {
+            (format!("fails with 2^{} plaintexts per set, as the division property predicts", 8 * bytes), Verdict::Pass)
+        };
+        log.add(s, format!("key recovery, {rounds} rounds, {bytes} active bytes"), result, verdict);
+    }
+    if deep {
+        let a = integral::structured_square_attack(4, &[0, 1, 2, 3], 4, "structured 4 4");
+        let verdict = if a.correct { Verdict::Broken } else { Verdict::Fail };
+        log.add(
+            s,
+            "key recovery, 4 rounds, 4 active bytes",
+            format!(
+                "{} with {} sets of 2^32 plaintexts (the division property predicts success)",
+                if a.correct { "RECOVERED round key 4" } else { "no key" },
+                sets_used(&a, 4)
+            ),
+            verdict,
+        );
+    } else {
+        log.add(s, "key recovery, 4 rounds, 4 active bytes", "not run (2^33 encryptions, about 15 min): use --deep", Verdict::Info);
+    }
     log.add(
         s,
         "security margin against this attack",
-        format!("distinguisher reaches {broken_through} rounds, key recovery 3; {ROUNDS} rounds in the cipher"),
+        format!(
+            "1-byte distinguisher reaches {broken_through} rounds; key recovery 3 rounds (2^8 texts), 4 rounds (2^32 texts, predicted{}); {ROUNDS} rounds in the cipher",
+            if deep { " and run above" } else { "; --deep runs it" }
+        ),
         Verdict::Info,
     );
 
@@ -364,6 +412,160 @@ pub fn run(quick: bool, progress: &mut dyn FnMut(&Finding)) -> Campaign {
         "control: textbook early-exit S-box",
         format!("max |t| {:.1}", r.max_t),
         if r.leaks() { Verdict::Caught } else { Verdict::Fail },
+    );
+
+    // --- Boomerang ---------------------------------------------------------------------
+    let s = "9. Boomerang attack (Wagner 1999; broke COCONUT98)";
+    let quartets = scale(1 << 18, 1 << 16);
+    let (alpha, delta, bct) = boomerang::best_bct_pair();
+    for rounds in [1, 2, 3, 4] {
+        let b = boomerang::run(rounds, quartets, &format!("boomerang {rounds}"));
+        // A random permutation returns with probability 2^-128: any handful
+        // of returns is a distinguisher.
+        let verdict = if b.returned >= 5 { Verdict::Broken } else { Verdict::Pass };
+        let rate = if b.returned > 0 { format!("2^{:.1}", (b.returned as f64 / b.quartets as f64).log2()) } else { "0".into() };
+        let predicted = match rounds {
+            1 => format!(", predicted 2^{:.1} by the BCT", (f64::from(bct) / 256.0).log2()),
+            2 => format!(", predicted 2^{:.1} exactly", boomerang::two_round_rate(alpha, delta).log2()),
+            _ => String::new(),
+        };
+        log.add(s, format!("{rounds} round(s)"), format!("{} of {} quartets returned (rate {rate}{predicted}; random 2^-128)", b.returned, b.quartets), verdict);
+    }
+
+    // --- Cube testers --------------------------------------------------------------------
+    let s = "10. Cube testers (Dinur-Shamir 2009 family; bit-level, 16-dimensional)";
+    for rounds in [1, 2, 3, 4] {
+        let c = cube::run(rounds, 16, scale(16, 8), &format!("cube {rounds}"));
+        let verdict = if c.distinguishes() { Verdict::Broken } else { Verdict::Pass };
+        log.add(
+            s,
+            format!("{rounds} round(s)"),
+            format!("{} of {} cube-sum bits zero (random: half), z = {:.1}", c.zero_bits, 128 * c.cubes, c.z),
+            verdict,
+        );
+    }
+
+    // --- Related keys -------------------------------------------------------------------
+    let s = "11. Related keys (the 2009 AES-256 attack model)";
+    let keys = scale(16, 4);
+    for r in [relatedkey::master_key_bits(keys, "related master"), relatedkey::feistel_bits(keys, "related feistel")] {
+        log.add(
+            s,
+            r.label,
+            format!("{} round-key differences: mean {:.2} of 128 bits, lowest {}, z = {:.2}", r.samples, r.mean, r.min, r.z),
+            pass_if(r.random_looking()),
+        );
+    }
+    for rounds in [1, ROUNDS] {
+        let r = relatedkey::cipher_output(rounds, keys, &format!("related output {rounds}"));
+        log.add(
+            s,
+            format!("same plaintext, one key bit flipped, {rounds} round(s)"),
+            format!("mean output difference {:.2} of 128 bits, lowest {}, z = {:.2}", r.mean, r.min, r.z),
+            pass_if(r.random_looking()),
+        );
+    }
+
+    // --- Fault attacks --------------------------------------------------------------------
+    let s = "12. Fault attacks (implementation; Piret-Quisquater DFA, CHES 2003)";
+    let f = fault::last_round_key(6, "campaign dfa");
+    log.add(
+        s,
+        "byte fault in round 15, unprotected implementation",
+        format!(
+            "{} last round key from {} faulty ciphertexts (candidates after each: {:?})",
+            if f.correct { "RECOVERED the" } else { "did not recover the" },
+            f.faults,
+            f.remaining
+        ),
+        if f.correct { Verdict::Exposed } else { Verdict::Info },
+    );
+    let (caught, trials) = fault::countermeasure(scale(20_000, 2_000), "campaign countermeasure");
+    log.add(
+        s,
+        "countermeasure: decrypt the output and compare",
+        format!("{caught} of {trials} single faults detected (random round, byte and value)"),
+        pass_if(caught == trials),
+    );
+
+    // --- Interpolation and invariants -----------------------------------------------------
+    let s = "13. Interpolation and invariant attacks (Jakobsen-Knudsen 1997; PRINTcipher 2011; Midori-64 2016)";
+    let table = &turing::sbox::TABLE;
+    let (terms, inverse_terms) = (interpolation::terms(table), interpolation::terms(&interpolation::inverse_table(table)));
+    let aes = crate::gf256::aes_sbox();
+    log.add(
+        s,
+        "S-box as a polynomial over GF(2^8)",
+        format!(
+            "{terms} terms, inverse {inverse_terms} (AES: {} and {}; a random permutation about 254)",
+            interpolation::terms(&aes),
+            interpolation::terms(&interpolation::inverse_table(&aes))
+        ),
+        pass_if(terms >= 240 && inverse_terms >= 240),
+    );
+    let midori = invariant::profile(&LinearMap::midori64(), 64, "campaign midori");
+    log.add(
+        s,
+        "tool check: Midori-64 linear layer (BCLR 2017, section 4.2)",
+        format!("reaches {:?} with 1, 2, ... differences, as published", midori),
+        pass_if(midori == invariant::midori64_published_profile()),
+    );
+    let profiles: Vec<Vec<usize>> = [LinearMap::turing(Layer::MixState), LinearMap::turing(Layer::ShiftMixColumns), LinearMap::aes()]
+        .iter()
+        .enumerate()
+        .map(|(i, m)| invariant::profile(m, 64, &format!("campaign layer {i}")))
+        .collect();
+    log.add(
+        s,
+        "linear layers: invariant factors (BCLR Theorem 1)",
+        format!(
+            "MixState {}, ShiftRows+MixColumns {} (minimal polynomials of degree {} and {}: one round-key difference can reach all 128 bits); AES {} of degree {}",
+            profiles[0].len(),
+            profiles[1].len(),
+            profiles[0][0],
+            profiles[1][0],
+            profiles[2].len(),
+            profiles[2][0]
+        ),
+        pass_if(profiles[0] == [128] && profiles[1] == [128]),
+    );
+    let r = invariant::round_key_spaces(scale(64, 16), "campaign invariants");
+    log.add(
+        s,
+        "real round keys: smallest W_L(D) over random keys",
+        format!(
+            "{} keys: {} (MixState rounds, {} differences), {} (ShiftRows+MixColumns rounds, {}), {} (all rounds) of 128: only affine invariants remain, and the S-box has no linear component",
+            r.keys, r.mix_state, r.differences.0, r.shift_mix, r.differences.1, r.both
+        ),
+        pass_if(r.full()),
+    );
+    let control = invariant::identical_round_keys();
+    log.add(
+        s,
+        "control: the same round key in every round",
+        format!("W_L(D) = {control} of 128"),
+        if control == 0 { Verdict::Caught } else { Verdict::Fail },
+    );
+
+    // --- Power analysis -------------------------------------------------------------------
+    let s = "14. Power analysis (implementation; CPA, Brier-Clavier-Olivier CHES 2004)";
+    for (sigma, snr) in [(0.0, "no noise"), (2f64.sqrt(), "SNR 1"), (20f64.sqrt(), "SNR 0.1")] {
+        let n = power::traces_needed(sigma, 1 << 16, &format!("campaign cpa {snr}"));
+        log.add(
+            s,
+            format!("unmasked implementation, Hamming-weight leakage, {snr}"),
+            match n {
+                Some(n) => format!("RECOVERED round key 0 from {n} traces"),
+                None => "round key 0 not recovered from 65,536 traces".into(),
+            },
+            if n.is_some() { Verdict::Exposed } else { Verdict::Info },
+        );
+    }
+    log.add(
+        s,
+        "countermeasure",
+        "masking, not implemented (not in the desktop threat model): the S-box's x^254 is Rivain-Prouff's 4-multiplication chain, maskable at any order",
+        Verdict::Info,
     );
 
     Campaign { findings: log.findings, quick, seconds: start.elapsed().as_secs_f64() }

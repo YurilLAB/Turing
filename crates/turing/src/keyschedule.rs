@@ -65,16 +65,27 @@ fn feistel_round(l: &mut Block, r: &mut Block, constants: &mut impl XofReader) {
     new_l.zeroize();
 }
 
-/// Round keys, wiped from memory when dropped.
+/// Round keys, kept on the heap and wiped when dropped. On the heap because a
+/// value on the stack is copied every time it moves, and zeroize can only
+/// wipe the copy it is given (the zeroize crate documents this limitation);
+/// moving a `RoundKeys` moves only a pointer.
 pub struct RoundKeys<const N: usize> {
-    keys: [Block; N],
+    keys: Box<[Block; N]>,
 }
 
 impl<const N: usize> RoundKeys<N> {
-    pub fn get(&self, round: usize) -> &Block {
+    pub(crate) fn key(&self, round: usize) -> &Block {
         &self.keys[round]
     }
 
+    /// Round key `round`. Analysis builds only (feature `analysis`).
+    #[cfg(feature = "analysis")]
+    pub fn get(&self, round: usize) -> &Block {
+        self.key(round)
+    }
+
+    /// All round keys. Analysis builds only (feature `analysis`).
+    #[cfg(feature = "analysis")]
     pub fn all(&self) -> &[Block; N] {
         &self.keys
     }
@@ -89,28 +100,35 @@ impl<const N: usize> Drop for RoundKeys<N> {
 /// Expands `key` into N round keys.
 pub fn expand<const N: usize>(key: &[u8; 32]) -> RoundKeys<N> {
     let mut whitened = [0u8; 32];
-    xof::cshake256(KEY_LABEL, key).read(&mut whitened);
+    xof::cshake256_secret(KEY_LABEL, key, &mut whitened);
 
     let mut k_left: Block = core::array::from_fn(|i| whitened[i]);
     let mut k_right: Block = core::array::from_fn(|i| whitened[16 + i]);
     whitened.zeroize();
-    let keys = expand_whitened(&k_left, &k_right);
+    let keys = from_whitened(&k_left, &k_right);
     k_left.zeroize();
     k_right.zeroize();
     keys
 }
 
-/// Layers 2 and 3 alone, starting from K' = (k_left, k_right). Exposed so
-/// Bombe can analyse the Feistel stage without the cSHAKE256 layer in front.
-#[doc(hidden)]
+/// Layers 2 and 3 alone, starting from K' = (k_left, k_right), so Bombe can
+/// analyse the Feistel stage without the cSHAKE256 layer in front. Analysis
+/// builds only (feature `analysis`).
+#[cfg(feature = "analysis")]
 pub fn expand_whitened<const N: usize>(k_left: &Block, k_right: &Block) -> RoundKeys<N> {
+    from_whitened(k_left, k_right)
+}
+
+fn from_whitened<const N: usize>(k_left: &Block, k_right: &Block) -> RoundKeys<N> {
     let (mut l, mut r) = (*k_left, *k_right);
 
     let mut constants = xof::cshake256(CONSTANTS_LABEL, &[]);
     for _ in 0..WARMUP_ROUNDS {
         feistel_round(&mut l, &mut r, &mut constants);
     }
-    let mut keys = [[0u8; 16]; N];
+    // Allocated first and filled in place: the zeroes that are copied onto
+    // the heap are not secret, and the keys are written only there.
+    let mut keys = Box::new([[0u8; 16]; N]);
     for pair in 0..N.div_ceil(2) {
         if pair > 0 {
             for _ in 0..ROUNDS_PER_PAIR {
@@ -135,14 +153,18 @@ mod tests {
         core::array::from_fn(|i| (i as u8).wrapping_mul(29) ^ seed)
     }
 
+    fn all<const N: usize>(k: &RoundKeys<N>) -> Vec<Block> {
+        (0..N).map(|i| *k.key(i)).collect()
+    }
+
     #[test]
     fn deterministic_and_key_dependent() {
         let a = expand::<16>(&key(1));
         let b = expand::<16>(&key(1));
         let c = expand::<16>(&key(2));
-        assert_eq!(a.all(), b.all());
+        assert_eq!(all(&a), all(&b));
         for i in 0..16 {
-            assert_ne!(a.get(i), c.get(i), "round key {i}");
+            assert_ne!(a.key(i), c.key(i), "round key {i}");
         }
     }
 
@@ -151,7 +173,7 @@ mod tests {
         let k = expand::<16>(&key(7));
         for i in 0..16 {
             for j in i + 1..16 {
-                assert_ne!(k.get(i), k.get(j));
+                assert_ne!(k.key(i), k.key(j));
             }
         }
     }
@@ -162,7 +184,7 @@ mod tests {
     fn expansion_is_prefix_consistent() {
         let long = expand::<16>(&key(3));
         let short = expand::<15>(&key(3));
-        assert_eq!(&long.all()[..15], &short.all()[..]);
+        assert_eq!(all(&long)[..15], all(&short)[..]);
     }
 
     // The all-zero key is not special: its round keys are not zero and
@@ -171,7 +193,20 @@ mod tests {
     fn zero_key_has_no_weak_structure() {
         let k = expand::<16>(&[0u8; 32]);
         for i in 0..16 {
-            assert_ne!(k.get(i), &[0u8; 16]);
+            assert_ne!(k.key(i), &[0u8; 16]);
         }
+    }
+
+    // The whitening goes through the wiping cSHAKE path and still computes
+    // the same K' as the streaming one (so the schedule is unchanged).
+    #[test]
+    fn whitening_is_unchanged() {
+        use sha3::digest::XofReader;
+        let k = key(9);
+        let mut streaming = [0u8; 32];
+        xof::cshake256(KEY_LABEL, &k).read(&mut streaming);
+        let mut wiped = [0u8; 32];
+        xof::cshake256_secret(KEY_LABEL, &k, &mut wiped);
+        assert_eq!(streaming, wiped);
     }
 }

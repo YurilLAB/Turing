@@ -5,8 +5,8 @@ block had been encrypted end to end. This step builds the cipher, checks it
 is right, lets you watch it run, and attacks it.
 
 ```
-cargo run --release -p bombe -- attack            # everything, about 30 s
-cargo run --release -p bombe -- attack --quick    # about 10 s
+cargo run --release -p bombe -- attack            # everything, about 35 s
+cargo run --release -p bombe -- attack --quick    # about 13 s
 cargo run --release -p bombe -- trace --flip-plaintext-bit 0
 cargo run --release -p bombe -- vectors
 ```
@@ -80,7 +80,9 @@ working, and against the full cipher. Full run, 43 findings, **0 failures**:
 | Timing side channel (dudect) | — | — | encryption \|t\| 0.8–1.7 across runs, key setup 1.0–2.1; limit 4.5 |
 
 The best attack here breaks **3 of Turing's 16 rounds**, and the statistical
-tests stop seeing any structure after 2–3 rounds.
+tests stop seeing any structure after 2–3 rounds. (The second campaign,
+docs/11, extends the square attack to 4 rounds with 2^32 chosen plaintexts,
+as the division property predicts.)
 
 Recovering round key 3 does not give up the master key: the key schedule is
 one-way (cSHAKE256 and feed-forward). In AES-128, by contrast, the key
@@ -135,10 +137,13 @@ Every test has to show it can catch a bad cipher, or its pass means nothing:
 - Passing statistical tests is necessary, not sufficient. The best attacks
   on real ciphers are structural, and these tools cover integral,
   differential, linear and impossible-differential attacks, not
-  meet-in-the-middle, division-property or algebraic ones.
+  meet-in-the-middle, division-property or algebraic ones. (Docs/11 adds the
+  division property, boomerangs, cube testers, related keys, interpolation,
+  invariant attacks, and fault and power analysis.)
 - The timing test ran on one machine with one compiler. It shows no
   data-dependent timing there; it does not prove constant time everywhere,
-  and cache or power side channels are not measured.
+  and cache or power side channels are not measured. (Docs/11 reads the
+  release assembly and simulates power analysis.)
 - Everything here is Bombe attacking a cipher Bombe's author designed. Real
   confidence only comes from other people trying to break it.
 

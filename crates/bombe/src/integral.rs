@@ -80,6 +80,85 @@ pub struct KeyRecovery {
     pub correct: bool,
 }
 
+/// The square attack with bigger structures: each set holds 256^n
+/// plaintexts, the bytes in `active` taking every combination of values.
+/// Encryption runs on all CPU threads; for each output byte position only
+/// the parity of how often each value occurs is kept (XOR over the set only
+/// depends on that), so memory stays tiny even for 2^32 plaintexts.
+/// Recovers round key `rounds` if the set is balanced at the input of the
+/// last S-box layer. Uses two sets, and more (up to `max_sets`) only while
+/// some byte still has several candidates: a wrong guess survives a set
+/// with probability 2^-8, so after two sets one of the 16 x 255 wrong
+/// guesses is still there about 6% of the time.
+pub fn structured_square_attack(rounds: usize, active: &[usize], max_sets: usize, label: &str) -> KeyRecovery {
+    assert!(!active.is_empty() && active.len() <= 4, "1 to 4 active bytes");
+    let mut rng = Rng::new(label);
+    let t = Turing::new(&rng.bytes());
+    let inv = inverse_sbox();
+    let mut candidates: Vec<Vec<u8>> = (0..16).map(|_| (0..=255u8).collect()).collect();
+    let total: u64 = 1 << (8 * active.len());
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
+    let mut sets = 0;
+    while sets < max_sets {
+        sets += 1;
+        let base: Block = rng.bytes();
+        let mut parity = [[0u64; 4]; 16];
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|w| {
+                    let (t, base, active) = (&t, base, active);
+                    scope.spawn(move || {
+                        let mut local = [[0u64; 4]; 16];
+                        let (start, end) = (total * w / threads, total * (w + 1) / threads);
+                        for index in start..end {
+                            let mut b = base;
+                            for (i, &pos) in active.iter().enumerate() {
+                                b[pos] = (index >> (8 * i)) as u8;
+                            }
+                            t.encrypt_rounds(&mut b, rounds);
+                            for (j, &c) in b.iter().enumerate() {
+                                local[j][(c >> 6) as usize] ^= 1 << (c & 63);
+                            }
+                        }
+                        local
+                    })
+                })
+                .collect();
+            for worker in workers {
+                let local = worker.join().expect("worker");
+                for (p, l) in parity.iter_mut().zip(local) {
+                    for (a, b) in p.iter_mut().zip(l) {
+                        *a ^= b;
+                    }
+                }
+            }
+        });
+        for (j, keep) in candidates.iter_mut().enumerate() {
+            keep.retain(|&k| {
+                (0..=255u8)
+                    .filter(|&c| parity[j][(c >> 6) as usize] >> (c & 63) & 1 == 1)
+                    .fold(0u8, |acc, c| acc ^ inv[(c ^ k) as usize])
+                    == 0
+            });
+        }
+        if sets >= 2 && candidates.iter().all(|c| c.len() <= 1) {
+            break;
+        }
+    }
+    let recovered = candidates
+        .iter()
+        .all(|c| c.len() == 1)
+        .then(|| std::array::from_fn(|j| candidates[j][0]));
+    let correct = recovered.as_ref() == Some(t.round_key(rounds));
+    KeyRecovery {
+        rounds,
+        chosen_plaintexts: (total as usize).saturating_mul(sets),
+        candidates: std::array::from_fn(|j| candidates[j].len()),
+        recovered,
+        correct,
+    }
+}
+
 /// The square attack on `rounds`-round Turing under a random key: recover
 /// round key `rounds` using up to `max_sets` sets of 256 chosen plaintexts.
 pub fn square_attack(rounds: usize, max_sets: usize, label: &str) -> KeyRecovery {

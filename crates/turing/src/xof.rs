@@ -7,18 +7,46 @@
 //! whatever the input lengths. Plain SHAKE256(label || input) only has that
 //! property while every label/input combination happens to differ in length.
 
-use sha3::digest::core_api::CoreWrapper;
+use sha3::digest::core_api::{Buffer, CoreWrapper, ExtendableOutputCore, XofReaderCore};
 use sha3::digest::{ExtendableOutput, Update};
 use sha3::{CShake256Core, CShake256Reader};
+use zeroize::Zeroize;
 
 /// cSHAKE256(X = input, N = "", S = label). The label must not be empty:
 /// with N and S both empty, cSHAKE is defined to be plain SHAKE256, which
 /// would silently drop the domain separation.
+///
+/// For public data only: the digest crate's internal buffers are not wiped
+/// when dropped. Secrets go through `cshake256_secret`.
 pub fn cshake256(label: &str, input: &[u8]) -> CShake256Reader {
     assert!(!label.is_empty(), "cSHAKE label must not be empty");
     let mut h = CoreWrapper::from_core(CShake256Core::new(label.as_bytes()));
     h.update(input);
     h.finalize_xof()
+}
+
+/// The same function for secret input and output (key whitening), leaving no
+/// copy behind. The high-level API above keeps the input and the last output
+/// block in the digest crate's buffers, which are never wiped. Here the
+/// buffers are ours: the input goes into a block buffer we wipe, the output
+/// block is wiped after copying, and the Keccak state itself is wiped on
+/// drop by the sha3 crate (its `zeroize` feature, enabled in Cargo.toml).
+///
+/// Handles input shorter than one block (136 bytes) and output of at most
+/// one block, which covers a 32-byte key.
+pub fn cshake256_secret(label: &str, input: &[u8], out: &mut [u8]) {
+    assert!(!label.is_empty(), "cSHAKE label must not be empty");
+    let mut core = CShake256Core::new(label.as_bytes());
+    let mut buffer = Buffer::<CShake256Core>::new(input);
+    let mut reader = core.finalize_xof_core(&mut buffer);
+    let mut block = reader.read_block();
+    assert!(out.len() <= block.len(), "at most one block of output");
+    out.copy_from_slice(&block[..out.len()]);
+    block.as_mut_slice().zeroize();
+    // SAFETY: a BlockBuffer is a byte array, a u8 position and a PhantomData:
+    // no references, no Drop impl, and all zeroes is a valid (empty) buffer.
+    // It is not used again.
+    unsafe { zeroize::zeroize_flat_type(&mut buffer) };
 }
 
 #[cfg(test)]
@@ -67,5 +95,24 @@ mod tests {
     #[should_panic(expected = "must not be empty")]
     fn empty_label_is_refused() {
         cshake256("", b"x");
+    }
+
+    // The wiping version computes exactly the same function, for every input
+    // length it accepts and every output length.
+    #[test]
+    fn secret_version_matches() {
+        let data: Vec<u8> = (0..136u32).map(|i| (i * 7 + 3) as u8).collect();
+        for len in 0..136 {
+            let mut expected = [0u8; 136];
+            cshake256("Turing v1 test", &data[..len]).read(&mut expected);
+            for out_len in [1usize, 16, 32, 135, 136] {
+                let mut got = vec![0u8; out_len];
+                cshake256_secret("Turing v1 test", &data[..len], &mut got);
+                assert_eq!(got, expected[..out_len], "input {len}, output {out_len}");
+            }
+        }
+        let mut nist = [0u8; 64];
+        cshake256_secret("Email Signature", &[0, 1, 2, 3], &mut nist);
+        assert_eq!(hex(&nist[..8]), "D008828E2B80AC9D");
     }
 }
