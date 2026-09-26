@@ -8,6 +8,7 @@ pub mod analysis;
 pub mod gen;
 pub mod gf256;
 pub mod html;
+pub mod keyschedule;
 pub mod matrix;
 pub mod report;
 pub mod sbox;

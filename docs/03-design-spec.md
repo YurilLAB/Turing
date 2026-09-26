@@ -29,8 +29,8 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 | Round | S-box layer → linear layer → add round key | Classic SPN, wide-trail analysable |
 | S-box | A_out∘inv∘A_in over GF(2^8), affine layers from SHAKE256 (docs/05) | Optimal 8-bit strength, reproducible constants |
 | Linear layer | ShiftRows + 4×4 Cauchy MixColumns (branch 5) in most rounds, 16×16 Cauchy MixState (branch 17) in rounds chosen in step 7 (docs/06) | Guarantees active S-boxes |
-| Key schedule | Non-linear, uses the S-box, per-round constants | Blocks slide and related-key attacks (step 6) |
-| Rounds | Set from proven bounds + margin (step 7) | AES-256 uses 14; expect similar or more |
+| Key schedule | SHAKE256 whitening, then a Feistel of S-box + MixState rounds with feed-forward (docs/07) | Every key difference crosses >= 53 active S-boxes; no local collisions |
+| Rounds | Set from proven bounds + margin (step 7); MixState at least every 4 rounds (docs/08) | AES-256 uses 14; expect similar or more |
 | Implementation | Constant-time, no secret-indexed table lookups | Cache-timing side channels |
 
 ### S-box acceptance criteria (checked by our step 3 tools)

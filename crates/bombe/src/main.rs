@@ -9,6 +9,7 @@ Usage:
   bombe sbox <SOURCE> [--html <OUT.html>]
   bombe gen-sbox [--rust <OUT.rs>] [--html <OUT.html>]
   bombe gen-linear [--rust <OUT.rs>]
+  bombe key-schedule
 
 SOURCE:
   turing       the Turing S-box
@@ -144,12 +145,37 @@ fn run_gen_linear(args: &[String]) -> Result<bool, String> {
     Ok(aes_report.passed() && l.columns.report.passed() && l.state.report.passed())
 }
 
+fn run_key_schedule() -> Result<bool, String> {
+    use bombe::keyschedule::{feistel_min_active, PAIR_TARGET, WARMUP_TARGET};
+    use turing::keyschedule::{ROUNDS_PER_PAIR, WARMUP_ROUNDS};
+    println!("Key-schedule Feistel, F = MixState(S(x ^ C)): minimum active S-boxes");
+    println!("for any non-zero key difference (each costs at least 2^-6)\n");
+    let bounds = feistel_min_active(16);
+    for (i, b) in bounds.iter().enumerate() {
+        let r = i + 1;
+        let mut note = String::new();
+        if r == ROUNDS_PER_PAIR {
+            note += "  <- rounds between round-key pairs";
+        }
+        if r == WARMUP_ROUNDS {
+            note += "  <- warm-up before the first round keys";
+        }
+        println!("  {r:>2} rounds  >= {b:>2} active  (trail probability <= 2^-{}){note}", 6 * b);
+    }
+    let warm = bounds[WARMUP_ROUNDS - 1];
+    let pair = bounds[ROUNDS_PER_PAIR - 1];
+    println!("\nWarm-up target  >= {WARMUP_TARGET}: {warm}  {}", if warm >= WARMUP_TARGET { "PASS" } else { "FAIL" });
+    println!("Per-pair target >= {PAIR_TARGET}: {pair}  {}", if pair >= PAIR_TARGET { "PASS" } else { "FAIL" });
+    Ok(warm >= WARMUP_TARGET && pair >= PAIR_TARGET)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("sbox") => run_sbox(&args[1..]),
         Some("gen-sbox") => run_gen(&args[1..]),
         Some("gen-linear") => run_gen_linear(&args[1..]),
+        Some("key-schedule") => run_key_schedule(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
