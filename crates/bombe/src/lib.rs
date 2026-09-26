@@ -5,6 +5,7 @@
 //! on anything of ours.
 
 pub mod analysis;
+pub mod gen;
 pub mod gf256;
 pub mod html;
 pub mod report;

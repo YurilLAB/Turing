@@ -1,0 +1,8 @@
+[package]
+name = "turing"
+version = "0.1.0"
+edition = "2021"
+description = "Turing: an experimental 128-bit block cipher with a 256-bit key"
+publish = false
+
+[dependencies]

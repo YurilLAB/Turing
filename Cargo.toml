@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/bombe"]
+members = ["crates/bombe", "crates/turing"]
 resolver = "2"
 
 # The analysis loops are heavy; unoptimised test builds are needlessly slow.

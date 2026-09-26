@@ -1,4 +1,4 @@
-use bombe::{html, report::Report, sbox::Sbox};
+use bombe::{gen, html, report::Report, sbox::Sbox};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -6,8 +6,10 @@ Bombe: cryptanalysis workbench for the Turing cipher
 
 Usage:
   bombe sbox <SOURCE> [--html <OUT.html>]
+  bombe gen-sbox [--rust <OUT.rs>] [--html <OUT.html>]
 
 SOURCE:
+  turing       the Turing S-box
   aes          the AES S-box (reference for validating the tools)
   aes-inv      its inverse
   identity     S(x) = x (negative control)
@@ -18,6 +20,7 @@ Exit status: 0 if the S-box meets the Turing v1 criteria, 1 if not, 2 on error."
 
 fn load(source: &str) -> Result<(String, Sbox), String> {
     match source {
+        "turing" => Ok(("Turing S-box".into(), Sbox::new(turing::sbox::TABLE))),
         "aes" => Ok(("AES S-box".into(), Sbox::aes())),
         "aes-inv" => Ok(("AES inverse S-box".into(), Sbox::aes().inverse().expect("AES S-box is a permutation"))),
         "identity" => Ok(("Identity S-box".into(), Sbox::identity())),
@@ -54,10 +57,51 @@ fn run_sbox(args: &[String]) -> Result<bool, String> {
     Ok(report.passed())
 }
 
+fn parse_outputs(args: &[String]) -> Result<(Option<String>, Option<String>), String> {
+    let (mut rust, mut html_out) = (None, None);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let slot = match arg.as_str() {
+            "--rust" => &mut rust,
+            "--html" => &mut html_out,
+            s => return Err(format!("unexpected argument {s:?}")),
+        };
+        *slot = Some(it.next().ok_or(format!("{arg} needs a file path"))?.clone());
+    }
+    Ok((rust, html_out))
+}
+
+fn run_gen(args: &[String]) -> Result<bool, String> {
+    let (rust, html_out) = parse_outputs(args)?;
+    let search = gen::search();
+    let c = &search.chosen;
+    println!("Deriving from SHAKE256(\"{}\" || counter)\n", gen::LABEL);
+    for (counter, failed) in &search.rejected {
+        println!("  candidate {counter:>3}  rejected: {}", failed.join(", "));
+    }
+    println!("  candidate {:>3}  ACCEPTED\n", c.counter);
+    for (name, a) in [("A_in ", &c.a_in), ("A_out", &c.a_out)] {
+        let rows: Vec<String> = a.rows.iter().map(|r| format!("{r:08b}")).collect();
+        println!("{name} rows {}  constant {:#04x}", rows.join(" "), a.constant);
+    }
+    println!();
+    print!("{}", search.report.to_text());
+    if let Some(path) = rust {
+        std::fs::write(&path, gen::render_rust(&search)).map_err(|e| format!("cannot write {path}: {e}"))?;
+        println!("Rust constants written to {path}");
+    }
+    if let Some(path) = html_out {
+        std::fs::write(&path, html::render(&search.report)).map_err(|e| format!("cannot write {path}: {e}"))?;
+        println!("Worksheet written to {path}");
+    }
+    Ok(search.report.passed())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("sbox") => run_sbox(&args[1..]),
+        Some("gen-sbox") => run_gen(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

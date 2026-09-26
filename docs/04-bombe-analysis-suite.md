@@ -8,7 +8,8 @@ components counts.
 ## Built: S-box lab (step 3)
 
 ```
-cargo run --release -p bombe -- sbox <aes | aes-inv | identity | random:SEED | file> [--html out.html]
+cargo run --release -p bombe -- sbox <turing | aes | aes-inv | identity | random:SEED | file> [--html out.html]
+cargo run --release -p bombe -- gen-sbox [--rust out.rs] [--html out.html]
 ```
 
 Exit status 0 = meets the Turing v1 criteria, 1 = rejected, 2 = error.

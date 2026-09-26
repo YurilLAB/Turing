@@ -6,6 +6,10 @@ use crate::sbox::Sbox;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+/// Hygiene criterion stricter than AES (whose S-box has a 2-cycle). No known
+/// attack uses short S-box cycles, but they are cheap to exclude.
+pub const MIN_CYCLE: usize = 16;
+
 pub struct Check {
     pub name: &'static str,
     pub requirement: &'static str,
@@ -58,6 +62,7 @@ impl Report {
         let du = self.ddt.uniformity();
         let lin = self.lat.linearity();
         let bu = self.boomerang_uniformity;
+        let shortest = self.cycles.as_ref().and_then(|c| c.last().copied());
         vec![
             Check {
                 name: "bijective",
@@ -100,6 +105,12 @@ impl Report {
                 requirement: "0",
                 measured: self.opposite_fixed_points.to_string(),
                 pass: self.opposite_fixed_points == 0,
+            },
+            Check {
+                name: "shortest cycle",
+                requirement: ">= 16",
+                measured: shortest.map_or("n/a (not bijective)".into(), |v| v.to_string()),
+                pass: shortest.is_some_and(|v| v >= MIN_CYCLE),
             },
         ]
     }

@@ -27,7 +27,7 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 | Block size | 128 bits (4x4 bytes) | Avoids the 64-bit birthday bound |
 | Key size | 256 bits | Quantum margin |
 | Round | S-box layer → linear layer → add round key | Classic SPN, wide-trail analysable |
-| S-box | Our own 8-bit bijective S-box | Designed and measured in step 4 |
+| S-box | A_out∘inv∘A_in over GF(2^8), affine layers from SHAKE256 (docs/05) | Optimal 8-bit strength, reproducible constants |
 | Linear layer | Our own, target branch number 5 (MDS) | Guarantees active S-boxes (step 5) |
 | Key schedule | Non-linear, uses the S-box, per-round constants | Blocks slide and related-key attacks (step 6) |
 | Rounds | Set from proven bounds + margin (step 7) | AES-256 uses 14; expect similar or more |
@@ -43,6 +43,7 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 - Boomerang uniformity ≤ 6.
 - Algebraic degree 7 (maximal for a bijective 8-bit S-box).
 - No fixed points: S(x) ≠ x and S(x) ≠ x XOR 0xFF.
+- Shortest permutation cycle ≥ 16 (stricter than AES, which has a 2-cycle).
 - Has a small Boolean circuit, so it can be computed in constant time.
 
 Note: forbidding S(x) = x in one component is fine. Enigma's flaw was that

@@ -63,9 +63,13 @@ fn aes_structure() {
     assert_eq!(linear_branch_number(&lat(&s)), 2);
 }
 
+// Turing's criteria are AES's plus one hygiene rule: AES's S-box has a
+// 2-cycle, so it fails "shortest cycle" and nothing else.
 #[test]
-fn aes_passes_and_inverse_is_equally_strong() {
-    assert!(Report::new("aes", &Sbox::aes()).passed());
+fn aes_fails_only_the_cycle_rule_and_inverse_is_equally_strong() {
+    let r = Report::new("aes", &Sbox::aes());
+    let failed: Vec<_> = r.checks.iter().filter(|c| !c.pass).map(|c| c.name).collect();
+    assert_eq!(failed, ["shortest cycle"]);
     let inv = Sbox::aes().inverse().unwrap();
     assert_eq!(ddt(&inv).uniformity(), 4);
     assert_eq!(lat(&inv).linearity(), 32);
@@ -84,7 +88,7 @@ fn identity_is_rejected() {
     assert_eq!(implicit_equations(&s).quadratic, 100);
     let r = Report::new("identity", &s);
     assert!(!r.passed());
-    assert_eq!(r.checks.iter().filter(|c| !c.pass).count(), 5);
+    assert_eq!(r.checks.iter().filter(|c| !c.pass).count(), 6);
 }
 
 // Negative control: an affine S-box (rotate, XOR constant) has no fixed
