@@ -1,7 +1,8 @@
 # 08 — Security review
 
 A living review of every component against published attacks on AES-like
-ciphers, first written after step 6 and revisited in steps 7 and 10. Each
+ciphers, first written after step 6 and revisited in steps 7 and 10 (three
+times). Each
 item says what the literature shows, whether Turing is exposed, and what, if
 anything, changes. The reviews of Turing's *own* earlier work are at the
 end.
@@ -136,6 +137,21 @@ Beierle et al. citations, the biclique complexity (2^254.4).
 | 5 | This document | The timing test was still "planned" (done in step 8) and bicliques "to be tested in step 10" | Accuracy | Updated |
 | 6 | Doc 10 | "The best attack breaks 3 rounds" and "division property not covered" | Accuracy | The division property predicts, and a 2^32-plaintext run confirms, a 4-round key recovery; doc 10 now points to doc 11 |
 | 7 | New structured square attack | With two fixed sets, a correct attack is reported as failed about 6% of the time (a wrong key byte guess survives both sets with probability 2^-16) | Tooling | Adds sets until every byte is unique |
+
+## Review 4 (step 10, third campaign): earlier claims and tooling
+
+| # | Where | Problem | Severity | Fix |
+|---|---|---|---|---|
+| 1 | Docs 10, 11 | The planted-bug results they cite came from a script that lived outside the repository | Tooling: a cited checker must exist | `tools/mutate.py`, with the step-8, step-9 and round-3 sets |
+| 2 | Doc 09 | "Differentials and linear hulls (many trails adding up)" listed as unmodelled | Gap | Provable bounds that count every trail (docs/12): any 3 rounds ≤ 2^-102.0 / 2^-99.6, any 5 ≤ 2^-110.8 / 2^-105.9 |
+| 3 | Doc 11 | Todo's MISTY1 and division-property claims rested on memory: the local "MISTY" paper was a different one (Li et al.) | Accuracy (the claims were right) | Todo's two papers downloaded and checked |
+| 4 | Library | Nothing checked at run time that the compiled cipher still computes Turing | Hardening | `turing::self_test()`; the vectors are cross-checked against the reference implementation |
+| 5 | Library | The DFA countermeasure existed only as a Bombe simulation | Hardening | `encrypt_block_checked` / `decrypt_block_checked` |
+
+Checked and found correct in review 4: Park et al.'s theorems and AES
+values, Keliher and Sui's exact AES MEDP, and FIPS-197's key expansion (all
+reproduced by Bombe). Also Anubis's matrix, checked in the Linux kernel's
+tables.
 
 Checked and found correct in review 3: Turing's inversion chain is exactly
 Rivain–Prouff's Algorithm 2 (so masking applies unchanged), the BCLR

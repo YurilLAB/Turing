@@ -75,3 +75,14 @@ fn distinct_inputs_give_distinct_outputs() {
         assert!(seen.insert(b), "collision at counter {i}");
     }
 }
+
+// The self-test's embedded vectors must be the reference implementation's
+// outputs, so turing::self_test checks the cipher against something
+// independent of the code it tests.
+#[test]
+fn self_test_vectors_come_from_the_reference() {
+    for (key, plain, cipher) in turing::selftest::VECTORS {
+        assert_eq!(Reference::new(&key).encrypt(&plain, ROUNDS), cipher);
+    }
+    assert_eq!(turing::self_test(), Ok(()));
+}

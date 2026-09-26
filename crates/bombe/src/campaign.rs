@@ -7,7 +7,10 @@
 use crate::invariant::LinearMap;
 use crate::refcipher::Reference;
 use crate::rng::Rng;
-use crate::{avalanche, battery, boomerang, cube, differential, fault, integral, interpolation, invariant, keycheck, power, relatedkey, timing};
+use crate::{
+    avalanche, battery, boomerang, cube, difflinear, differential, fault, integral, interpolation, invariant, keycheck, keyrelations, power, provable,
+    relatedkey, symmetry, timing,
+};
 use std::fmt::Write;
 use std::time::Instant;
 use turing::structure::{Layer, ROUNDS};
@@ -160,6 +163,24 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         b == *c
     });
     log.add(s, "known-answer vectors", format!("{} of {} reproduced", if kat_ok { vectors.len() } else { 0 }, vectors.len()), pass_if(kat_ok));
+    let self_test = turing::self_test();
+    log.add(s, "library self-test (turing::self_test, run at start-up)", format!("{self_test:?}"), pass_if(self_test.is_ok()));
+    if deep {
+        let trials = 100_000;
+        let mut rng = Rng::new("campaign correctness at scale");
+        let mut mismatches = 0;
+        for _ in 0..trials {
+            let key: [u8; 32] = rng.bytes();
+            let (t, r) = (Turing::new(&key), Reference::new(&key));
+            let p: [u8; 16] = rng.bytes();
+            let mut c = p;
+            t.encrypt_block(&mut c);
+            let mut d = c;
+            t.decrypt_block(&mut d);
+            mismatches += usize::from(c != r.encrypt(&p, ROUNDS) || d != p);
+        }
+        log.add(s, "matches the reference at scale (--deep)", format!("{trials} random keys and blocks, {mismatches} mismatches"), pass_if(mismatches == 0));
+    }
 
     // --- Speed -------------------------------------------------------------
     let s = "2. Speed (constant-time implementation)";
@@ -370,6 +391,18 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         };
         log.add(s, r.source, detail, verdict);
     }
+    if deep {
+        for source in [battery::Source::Turing { rounds: ROUNDS }, battery::Source::TuringZeroKey] {
+            let r = battery::run(source, 1000, "campaign battery at scale");
+            let failing = r.failing_tests();
+            let detail = if failing.is_empty() {
+                format!("all 11 statistics pass and P-values are uniform (1000 sequences, >= {} must pass each)", r.min_pass)
+            } else {
+                format!("fails: {}", failing.join(", "))
+            };
+            log.add(s, format!("{} at NIST's scale (--deep)", r.source), detail, pass_if(r.passed()));
+        }
+    }
 
     // --- Keys --------------------------------------------------------------------
     let s = "7. Keys";
@@ -567,6 +600,113 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         "masking, not implemented (not in the desktop threat model): the S-box's x^254 is Rivain-Prouff's 4-multiplication chain, maskable at any order",
         Verdict::Info,
     );
+
+    // --- Provable bounds --------------------------------------------------------------------
+    let s = "15. Provable bounds, every trail counted (Park et al. 2003; Keliher-Sui 2005)";
+    let aes_sbox = crate::gf256::aes_sbox();
+    let (aes_dp, aes_lp) = (provable::dp_bound(&aes_sbox, 5), provable::lp_bound(&aes_sbox, 5));
+    log.add(
+        s,
+        "tool check: Park et al.'s AES bounds",
+        format!("MEDP <= {:?}, MELP <= {:?} (published: 79/2^34 = 5056/2^40, 192,773,764/2^54)", aes_dp.exact, aes_lp.exact),
+        pass_if(aes_dp.exact == Some((79 << 6, 40)) && aes_lp.exact == Some((192_773_764u128 << 26, 80))),
+    );
+    let aes_lower = provable::ks_lower_bound(&aes_sbox, &provable::AES_MIX_COLUMNS, 255);
+    log.add(
+        s,
+        "tool check: Keliher-Sui's exact 2-round AES MEDP",
+        format!("{} x 2^-35 = 2^{:.2} (published: 53/2^34)", aes_lower.units, aes_lower.log2),
+        pass_if(aes_lower.units == 106),
+    );
+    let table = &turing::sbox::TABLE;
+    let (dp5, lp5, dp17, lp17) = (provable::dp_bound(table, 5), provable::lp_bound(table, 5), provable::dp_bound(table, 17), provable::lp_bound(table, 17));
+    let lower = if deep {
+        let l = provable::ks_lower_bound(table, &turing::linear::MIX_COLUMNS, 255);
+        format!("the best differential over minimal patterns reaches {} x 2^-35 = 2^{:.2}", l.units, l.log2)
+    } else {
+        "the best differential over minimal patterns is 57 x 2^-35 = 2^-29.17 (run with --deep)".into()
+    };
+    log.add(s, "2 rounds through ShiftRows+MixColumns (B = 5)", format!("MEDP <= 2^{:.2}, MELP <= 2^{:.2}; {lower}", dp5.log2, lp5.log2), Verdict::Info);
+    log.add(
+        s,
+        "any 3 consecutive rounds (they contain S, MixState with B = 17, S)",
+        format!("MEDP <= 2^{:.2}, MELP <= 2^{:.2} (the same argument gives AES 2^-28.27)", dp17.log2, lp17.log2),
+        Verdict::Info,
+    );
+    let (full_dp, full_lp) = (4.0 * dp5.log2, 4.0 * lp5.log2);
+    log.add(
+        s,
+        "any 5 consecutive rounds, so the full cipher (two super-box layers around MixState)",
+        format!("MEDP <= 2^{full_dp:.1}, MELP <= 2^{full_lp:.1}: every differential and linear hull needs over 2^100 texts"),
+        pass_if(full_dp < -100.0 && full_lp < -100.0 && dp17.log2 < -100.0 && lp17.log2 < -96.0),
+    );
+
+    // --- Symmetries --------------------------------------------------------------------------
+    let s = "16. Symmetries and reflection (custom: the attacker knows every constant)";
+    const AES_MIX: [[u8; 4]; 4] = [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]];
+    let aes_round = symmetry::byte_matrix(|x| turing::linear::mix_columns_with(&AES_MIX, &turing::linear::shift_rows(x)));
+    let (ms, sm) = (
+        symmetry::byte_matrix(|x| turing::linear::apply_layer(Layer::MixState, x)),
+        symmetry::byte_matrix(|x| turing::linear::apply_layer(Layer::ShiftMixColumns, x)),
+    );
+    let aes_perms = symmetry::permutation_symmetries(&aes_round).len();
+    log.add(s, "control: AES round, byte permutations it commutes with", format!("{aes_perms} (the column rotations)"), if aes_perms > 1 { Verdict::Caught } else { Verdict::Fail });
+    let (ms_perms, sm_perms) = (symmetry::permutation_symmetries(&ms), symmetry::permutation_symmetries(&sm).len());
+    let joint = ms_perms.iter().filter(|p| symmetry::is_symmetry(&sm, p)).count();
+    log.add(
+        s,
+        "Turing's rounds, byte permutations they commute with",
+        format!("ShiftRows+MixColumns {sm_perms} (like AES), MixState {}, both layers {joint}", ms_perms.len()),
+        pass_if(joint == 1),
+    );
+    let control_pairs = symmetry::permutation_pairs(&symmetry::structured_cauchy()).len();
+    log.add(s, "control: Cauchy matrix on points GF(16) and 2 + GF(16), shuffle pairs", format!("{control_pairs} (one per shift)"), if control_pairs > 1 { Verdict::Caught } else { Verdict::Fail });
+    let ms_pairs = symmetry::permutation_pairs(&ms).len();
+    log.add(s, "MixState, pairs (pi_out, pi_in) with pi_out MixState = MixState pi_in", format!("{ms_pairs}: only the identity, so no round-dependent shuffle crosses it"), pass_if(ms_pairs == 1));
+    let generate = symmetry::cross_ratios_generate(&ms) && symmetry::cross_ratios_generate(&sm);
+    log.add(s, "precondition: cross-ratios of both matrices generate GF(2^8)", format!("{generate}: any bytewise symmetry must be a field multiplication"), pass_if(generate));
+    let bare: [u8; 256] = std::array::from_fn(|x| crate::gf256::inv(x as u8));
+    let bare_count = symmetry::scalar_symmetries(&bare).len();
+    log.add(s, "control: bare inverse x^-1, scaling symmetries", format!("{bare_count} of 255"), if bare_count == 255 { Verdict::Caught } else { Verdict::Fail });
+    let own = symmetry::scalar_symmetries(table);
+    log.add(s, "Turing's S-box, scalings x -> S^-1(beta S(x) ^ b) that are affine", format!("{own:?} (only the identity)"), pass_if(own == [(1, 0)]));
+    let identity: [u8; 256] = std::array::from_fn(|x| x as u8);
+    let hadamard = LinearMap::from_fn(128, |v| u128::from_le_bytes(symmetry::hadamard_columns(&v.to_le_bytes())));
+    let control = symmetry::reflection_distance(&identity, &hadamard, &hadamard);
+    log.add(s, "control: involutional SPN (x^-1, Hadamard layer)", format!("reflection distance {control}"), if control == 0 { Verdict::Caught } else { Verdict::Fail });
+    let t = symmetry::turing_reflection_map();
+    let layers = [Layer::MixState, Layer::ShiftMixColumns];
+    let nearest = layers
+        .iter()
+        .flat_map(|&l| {
+            let inv = LinearMap::from_fn(128, |v| u128::from_le_bytes(turing::linear::invert_layer(l, &v.to_le_bytes())));
+            layers.iter().map(move |&target| symmetry::reflection_distance(&t, &inv, &LinearMap::turing(target))).collect::<Vec<_>>()
+        })
+        .min()
+        .unwrap_or(0);
+    log.add(s, "Turing: decryption rewritten with S^-1 = T S T", format!("closest to an encryption layer at rank {nearest} of 128 (0 would be a reflection)"), pass_if(nearest > 64));
+
+    // --- Key-schedule relations ---------------------------------------------------------------
+    let s = "17. Linear relations in the key schedule";
+    let aes_rel = keyrelations::aes128(128, "campaign aes relations");
+    log.add(s, "control: AES-128 key and round keys", format!("{} relations among {} bits", aes_rel.count(), aes_rel.columns - 1), if aes_rel.count() > 0 { Verdict::Caught } else { Verdict::Fail });
+    for (name, r) in [("Turing key and all round keys", keyrelations::turing(128, "campaign relations")), ("Feistel stage alone (K' and round keys)", keyrelations::turing_feistel(128, "campaign feistel relations"))] {
+        log.add(s, name, format!("{} relations among {} bits ({} random keys)", r.count(), r.columns - 1, r.samples), pass_if(r.count() == 0));
+    }
+
+    // --- Differential-linear ------------------------------------------------------------------
+    let s = "18. Differential-linear (Langford-Hellman 1994)";
+    let predicted = difflinear::predict_two_rounds(0x01);
+    for rounds in [1, 2, 3, 4] {
+        let d = difflinear::measure(rounds, 0x01, scale(1 << 22, 1 << 20), &format!("difflinear {rounds}"));
+        let note = if rounds == 2 { format!(", predicted {:+.4} there", predicted[d.byte][d.mask as usize]) } else { String::new() };
+        log.add(
+            s,
+            format!("{rounds} round(s)"),
+            format!("best |correlation| {:.4} (byte {}, mask {:#04x}{note}); noise limit {:.4}", d.max_correlation, d.byte, d.mask, d.threshold()),
+            if d.distinguishes() { Verdict::Broken } else { Verdict::Pass },
+        );
+    }
 
     Campaign { findings: log.findings, quick, seconds: start.elapsed().as_secs_f64() }
 }

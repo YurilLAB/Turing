@@ -9,12 +9,37 @@
 use crate::keyschedule::{self, RoundKeys};
 use crate::structure::{self, ROUNDS, ROUND_KEYS};
 use crate::{linear, sbox};
+use zeroize::Zeroize;
 
 pub type Block = [u8; 16];
 
 fn add_round_key(state: &mut Block, key: &Block) {
     for (s, k) in state.iter_mut().zip(key) {
         *s ^= k;
+    }
+}
+
+/// A fault was detected: the result did not invert back to the input, so it
+/// was wiped instead of returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FaultDetected;
+
+/// Runs `forward`, runs `backward` on a copy of the result and compares it
+/// with the input without branching on the data; on a mismatch the output
+/// is wiped. The copies of the input and the check are wiped either way.
+fn checked(block: &mut Block, forward: impl Fn(&mut Block), backward: impl Fn(&mut Block)) -> Result<(), FaultDetected> {
+    let mut input = *block;
+    forward(block);
+    let mut check = *block;
+    backward(&mut check);
+    let diff = core::hint::black_box(input.iter().zip(&check).fold(0u8, |acc, (a, b)| acc | (a ^ b)));
+    input.zeroize();
+    check.zeroize();
+    if diff == 0 {
+        Ok(())
+    } else {
+        block.zeroize();
+        Err(FaultDetected)
     }
 }
 
@@ -35,6 +60,22 @@ impl Turing {
 
     pub fn decrypt_block(&self, block: &mut Block) {
         self.decrypt_n(block, ROUNDS);
+    }
+
+    /// Encrypts, then decrypts the result and compares it with the input. A
+    /// transient fault in either computation (a voltage or clock glitch,
+    /// Plundervolt-style undervolting) makes them disagree, and the faulty
+    /// ciphertext is wiped instead of released: the countermeasure to
+    /// differential fault analysis (docs/11). Costs twice encrypt_block. It
+    /// cannot catch a persistent fault in the stored round keys, which
+    /// corrupts both directions alike.
+    pub fn encrypt_block_checked(&self, block: &mut Block) -> Result<(), FaultDetected> {
+        checked(block, |b| self.encrypt_block(b), |b| self.decrypt_block(b))
+    }
+
+    /// The same for decryption: decrypts, re-encrypts and compares.
+    pub fn decrypt_block_checked(&self, block: &mut Block) -> Result<(), FaultDetected> {
+        checked(block, |b| self.decrypt_block(b), |b| self.encrypt_block(b))
     }
 
     /// The first `rounds` rounds only, with the last of them missing its
@@ -107,6 +148,42 @@ mod tests {
 
     fn key(seed: u8) -> [u8; 32] {
         core::array::from_fn(|i| (i as u8).wrapping_mul(71) ^ seed)
+    }
+
+    #[test]
+    fn checked_calls_match_the_plain_ones() {
+        let t = Turing::new(&key(5));
+        for i in 0..64u8 {
+            let plain: Block = core::array::from_fn(|k| (k as u8).wrapping_mul(i) ^ i);
+            let (mut a, mut b) = (plain, plain);
+            t.encrypt_block(&mut a);
+            assert_eq!(t.encrypt_block_checked(&mut b), Ok(()));
+            assert_eq!(a, b);
+            assert_eq!(t.decrypt_block_checked(&mut b), Ok(()));
+            assert_eq!(b, plain);
+        }
+    }
+
+    // Faults are injected into the forward or the backward computation; both
+    // must be caught, and the faulty output must not be released.
+    #[test]
+    fn checked_calls_catch_faults() {
+        let t = Turing::new(&key(6));
+        for byte in 0..16 {
+            let mut block = [0x33u8; 16];
+            let faulty_forward = |b: &mut Block| {
+                t.encrypt_block(b);
+                b[byte] ^= 0x10;
+            };
+            assert_eq!(checked(&mut block, faulty_forward, |b| t.decrypt_block(b)), Err(FaultDetected));
+            assert_eq!(block, [0u8; 16], "a faulty ciphertext is wiped, not returned");
+            let mut block = [0x44u8; 16];
+            let faulty_backward = |b: &mut Block| {
+                b[byte] ^= 0x01;
+                t.decrypt_block(b);
+            };
+            assert_eq!(checked(&mut block, |b| t.encrypt_block(b), faulty_backward), Err(FaultDetected));
+        }
     }
 
     #[test]

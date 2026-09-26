@@ -86,12 +86,17 @@ detectable pattern, however small, is a way in.
 6. Design the key schedule — done (07), reviewed (08)
 7. Set the round count from proven bounds — done (09)
 8. Implement the cipher with test vectors — done (10), with the round tracer
-9. File encryption: mode, authentication, key derivation, file format
+9. File encryption: mode, authentication, key derivation, file format —
+   parked until the cipher is hardened and validated (requirements collected
+   in docs/11 and 12)
 10. Attack it ourselves — first campaign done (10): square, differential,
     linear, avalanche, NIST battery, key checks, timing. Second campaign done
     (11): division property, boomerang, cube testers, related keys,
     interpolation, invariant attacks, fault and power analysis, and a
-    key-handling review. Meet-in-the-middle still to add
+    key-handling review. Third campaign done (12): provable bounds that count
+    every trail, symmetries, reflection, key-schedule relations,
+    differential-linear, and a self-test plus fault-checked calls in the
+    library. Meet-in-the-middle still to add
 
 Source for the Enigma history: "Cryptanalysis of the Enigma" (Wikipedia
 overview) and J. Wilcox, "Solving the Enigma: History of the Cryptanalytic

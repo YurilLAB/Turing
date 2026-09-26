@@ -8,7 +8,9 @@ pub mod gf;
 pub mod keyschedule;
 pub mod linear;
 pub mod sbox;
+pub mod selftest;
 pub mod structure;
 pub mod xof;
 
-pub use cipher::{Block, Turing};
+pub use cipher::{Block, FaultDetected, Turing};
+pub use selftest::{self_test, SelfTestError};

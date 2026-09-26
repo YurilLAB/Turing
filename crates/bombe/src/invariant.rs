@@ -81,6 +81,11 @@ impl LinearMap {
         self.columns.len()
     }
 
+    /// The images of the unit vectors.
+    pub fn columns(&self) -> &[u128] {
+        &self.columns
+    }
+
     pub fn apply(&self, mut v: u128) -> u128 {
         let mut out = 0;
         while v != 0 {
@@ -115,6 +120,15 @@ impl Span {
         }
         false
     }
+}
+
+/// Dimension of the span of `vectors` over GF(2).
+pub fn rank(vectors: &[u128]) -> usize {
+    let mut span = Span::new();
+    for &v in vectors {
+        span.insert(v);
+    }
+    span.dim
 }
 
 /// Dimension of W(D): the smallest subspace that contains `generators` and

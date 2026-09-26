@@ -97,8 +97,21 @@ like even static; any line, block or bright spot is exploitable structure.
 - `tools/asm_branches.py`: conditional jumps in the release assembly, for
   the constant-time review.
 
+**Attacks by someone who knows everything (step 10, third campaign)**, see
+docs/12
+- Provable MEDP/MELP bounds (Park et al.), validated on AES's published
+  values, and Keliher and Sui's exact best-differential search (53/2^34 for
+  AES reproduced; Turing 57/2^35).
+- Symmetry search over byte permutations and S-box scalings, and the
+  reflection test, each with a control that must be caught.
+- Linear relations in the key schedule (AES-128's 1,088 as the control).
+- Differential-linear distinguishers with an exact 2-round prediction.
+- `tools/mutate.py`: the planted-bug harness, now in the repository.
+
 ## Planned
 
+- Keliher and Sui's upper-bound search, to pin Turing's exact 2-round MEDP
+  between 57/2^35 and 79/2^34.
 - Meet-in-the-middle experiments on reduced rounds.
 - Bit-level division property (MILP or SAT) to check the word-level results.
 - Bit independence criterion.

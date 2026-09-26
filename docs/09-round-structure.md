@@ -165,7 +165,13 @@ cryptanalysis at the byte level. They do not model:
 - **integral / division-property** distinguishers,
 - **algebraic** attacks.
 
-Step 10 has since measured two of these (docs/11). The word-level division
+Step 10 has since measured three of these. **Clustering is bounded**
+(docs/12). Park et al.'s theorem counts every trail at once, under
+independent round keys. Any 3 consecutive rounds contain S-box layer,
+MixState, S-box layer, so every differential over them has probability at
+most 2^-102.0 and every linear hull at most 2^-99.6 (the same argument gives
+AES only 2^-28.3). Any 5 rounds: 2^-110.8 and 2^-105.9. The integral
+part (docs/11): the word-level division
 property keeps a 2^120-plaintext set balanced through 4 rounds, and a 4-round
 key recovery with 2^32 plaintexts was run and works: max(3, 4, 4) + 4 = 8,
 so the rule above is unchanged. Cube testers stop at 2 rounds, and the

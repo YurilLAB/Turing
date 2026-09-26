@@ -1,0 +1,260 @@
+"""Mutation checks: plant one bug, run the named tests, restore the file.
+
+Each mutation must make at least one test fail; the script reports which
+tests caught it and always restores the original file (and verifies it). A
+test run that exceeds the time limit has not passed either: it counts as
+caught, and the whole process tree is killed.
+
+    python tools/mutate.py [--step8 | --step9 | --round3] [--check] [NAME ...]
+
+--check only verifies that every pattern still matches the current code
+exactly once, without running any tests. NAME filters mutations by name.
+"""
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+
+TIMEOUT = 580
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+MUTATIONS_STEP8 = [
+    ("gf: 8-lane multiply lets carries leak between lanes", "crates/turing/src/gf.rs",
+     "a = ((a << 1) & LANES_CLEAR_LOW_BIT) ^ carry;", "a = (a << 1) ^ carry;",
+     ["-p", "turing", "--lib"]),
+    ("gf: inverse chain ends on x^253", "crates/turing/src/gf.rs",
+     "mul8(x252, x2)\n}", "mul8(x252, x)\n}",
+     ["-p", "turing", "--lib"]),
+    ("linear: fast MixState swaps its two output halves", "crates/turing/src/linear.rs",
+     "out[..8].copy_from_slice(&y[0].to_le_bytes());", "out[..8].copy_from_slice(&y[1].to_le_bytes());",
+     ["-p", "turing", "--lib"]),
+    ("cipher: round keys off by one", "crates/turing/src/cipher.rs",
+     "            add_round_key(block, self.keys.key(round));\n        }\n    }",
+     "            add_round_key(block, self.keys.key(round - 1));\n        }\n    }",
+     ["-p", "bombe", "--test", "cipher"]),
+    ("cipher: decryption applies the forward layer", "crates/turing/src/cipher.rs",
+     "*block = linear::invert_layer(layer, block);", "*block = linear::apply_layer(layer, block);",
+     ["-p", "turing", "--lib"]),
+    ("reference: MixState in even rounds", "crates/bombe/src/refcipher.rs",
+     "    round % 2 == 1\n}", "    round % 2 == 0\n}",
+     ["-p", "bombe", "--test", "cipher"]),
+    ("square attack: forward S-box instead of inverse", "crates/bombe/src/integral.rs",
+     "acc ^ inv[(c[j] ^ k) as usize]", "acc ^ turing::sbox::TABLE[(c[j] ^ k) as usize]",
+     ["-p", "bombe", "--test", "attacks"]),
+    ("nist: spectral threshold at 1% instead of 5%", "crates/bombe/src/nist.rs",
+     "((1.0f64 / 0.05).ln() * n as f64).sqrt()", "((1.0f64 / 0.01).ln() * n as f64).sqrt()",
+     ["-p", "bombe", "--test", "nist"]),
+    ("nist: longest-run class probability typo", "crates/bombe/src/nist.rs",
+     "0.0882, 0.2092, 0.2483", "0.0882, 0.2092, 0.2438",
+     ["-p", "bombe", "--test", "nist"]),
+    ("nist: serial test without wrap-around", "crates/bombe/src/nist.rs",
+     "e.0[(i + m - 1) % n] as usize", "e.0[(i + m - 1).min(n - 1)] as usize",
+     ["-p", "bombe", "--test", "nist"]),
+    ("timing control made constant-time", "crates/bombe/src/timing.rs",
+     "result = crate::gf256::mul(result, base);\n            }\n            base = crate::gf256::mul(base, base);",
+     "result = turing::gf::mul(result, base);\n            }\n            base = turing::gf::mul(base, base);",
+     ["-p", "bombe", "--test", "attacks", "timing"]),
+    ("battery: false-alarm budget 100x looser", "crates/bombe/src/battery.rs",
+     "pub const FAMILY_ALPHA: f64 = 0.001;", "pub const FAMILY_ALPHA: f64 = 0.1;",
+     ["-p", "bombe", "--test", "attacks"]),
+    ("truncated differential counts changed bytes", "crates/bombe/src/differential.rs",
+     ".filter(|(a, b)| a == b).count() as u64;", ".filter(|(a, b)| a != b).count() as u64;",
+     ["-p", "bombe", "--test", "attacks"]),
+]
+
+MUTATIONS_STEP9 = [
+    ("xof: secret cSHAKE drops its label", "crates/turing/src/xof.rs",
+     "let mut core = CShake256Core::new(label.as_bytes());", 'let mut core = CShake256Core::new(b"");',
+     ["-p", "turing", "--lib"]),
+    ("keyschedule: right half of K' copied from the left half", "crates/turing/src/keyschedule.rs",
+     "whitened[16 + i]", "whitened[i]",
+     ["-p", "bombe", "--test", "cipher"]),
+    ("cipher: Turing gains a Debug impl that prints a round key", "crates/turing/src/cipher.rs",
+     "pub struct Turing {\n    keys: RoundKeys<ROUND_KEYS>,\n}\n",
+     "pub struct Turing {\n    keys: RoundKeys<ROUND_KEYS>,\n}\n\nimpl core::fmt::Debug for Turing {\n    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {\n        write!(f, \"{:?}\", self.keys.key(0))\n    }\n}\n",
+     ["-p", "turing", "--lib"]),
+    ("division: S-box keeps degree 2 of structure (unsound)", "crates/bombe/src/division.rs",
+     "        _ => 1,\n", "        _ => 2,\n",
+     ["-p", "bombe", "--test", "division"]),
+    ("structured square: forward S-box in the key test", "crates/bombe/src/integral.rs",
+     ".fold(0u8, |acc, c| acc ^ inv[(c ^ k) as usize])", ".fold(0u8, |acc, c| acc ^ turing::sbox::TABLE[(c ^ k) as usize])",
+     ["-p", "bombe", "--test", "classic_attacks", "structured"]),
+    ("boomerang: only one ciphertext shifted", "crates/bombe/src/boomerang.rs",
+     "        c2[0] ^= d;\n", "",
+     ["-p", "bombe", "--test", "classic_attacks", "boomerang"]),
+    ("cube: each worker skips one plaintext", "crates/bombe/src/cube.rs",
+     "for index in total * w / threads..total * (w + 1) / threads {", "for index in total * w / threads + 1..total * (w + 1) / threads {",
+     ["-p", "bombe", "--test", "classic_attacks", "cube"]),
+    ("relatedkey: difference weight counts one byte", "crates/bombe/src/relatedkey.rs",
+     "a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum()", "a.iter().zip(b).take(1).map(|(x, y)| (x ^ y).count_ones()).sum()",
+     ["-p", "bombe", "--test", "classic_attacks", "related"]),
+    ("fault: DFA uses a row of MixState instead of a column", "crates/bombe/src/fault.rs",
+     "let target = gf::mul(linear::MIX_STATE[j][p], beta);", "let target = gf::mul(linear::MIX_STATE[p][j], beta);",
+     ["-p", "bombe", "--test", "classic_attacks", "fault"]),
+    ("fault: fault injected one round late", "crates/bombe/src/fault.rs",
+     "        if r == round {", "        if r == round + 1 {",
+     ["-p", "bombe", "--test", "classic_attacks", "fault"]),
+    ("interpolation: coefficients stored reversed", "crates/bombe/src/interpolation.rs",
+     "c[255 - e] ^= gf256::mul(y, p);", "c[e] ^= gf256::mul(y, p);",
+     ["-p", "bombe", "--lib", "interpolation"]),
+    ("invariant: closure forgets the images of new vectors", "crates/bombe/src/invariant.rs",
+     "            if span.insert(w) {\n                queue.push(w);\n            }", "            span.insert(w);",
+     ["-p", "bombe", "--lib", "invariant"]),
+    ("invariant: Turing layer map always MixState", "crates/bombe/src/invariant.rs",
+     "linear::apply_layer(layer, &v.to_le_bytes())", "linear::apply_layer(Layer::MixState, &v.to_le_bytes())",
+     ["-p", "bombe", "--lib", "invariant"]),
+    ("invariant: differences mixed across layers", "crates/bombe/src/invariant.rs",
+     "structure::layer(r) == Some(layer)", "structure::layer(r).is_some()",
+     ["-p", "bombe", "--lib", "invariant"]),
+    ("boomerang: return shift uses MixState instead of its inverse", "crates/bombe/src/boomerang.rs",
+     "let c = turing::gf::mul(m_inv, t);", "let c = turing::gf::mul(m, t);",
+     ["-p", "bombe", "--test", "classic_attacks", "boomerang"]),
+    ("power: attacker's model adds the key instead of XOR", "crates/bombe/src/power.rs",
+     "sbox::TABLE[(p[j] ^ k) as usize]", "sbox::TABLE[p[j].wrapping_add(k) as usize]",
+     ["-p", "bombe", "--test", "classic_attacks", "cpa"]),
+]
+
+MUTATIONS_ROUND3 = [
+    ("provable: Park bound uses one power too few", "crates/bombe/src/provable.rs",
+     "u128::from(v).checked_pow(power)", "u128::from(v).checked_pow(power - 1)",
+     ["-p", "bombe", "--lib", "provable"]),
+    ("provable: pruning ignores future doublings", "crates/bombe/src/provable.rs",
+     "let bound = next.sum() + ((1u64 << remaining) - 1) * next.largest();", "let bound = next.sum();",
+     ["-p", "bombe", "--release", "--test", "kerckhoffs", "keliher_sui"]),
+    ("provable: round-2 inner differences taken from round 1", "crates/bombe/src/provable.rs",
+     "col[ins.len() + q] = ys[j];", "col[ins.len() + q] = xs[j];",
+     ["-p", "bombe", "--release", "--test", "kerckhoffs", "keliher_sui"]),
+    ("symmetry: permutation check accepts any match", "crates/bombe/src/symmetry.rs",
+     "if (0..depth).all(|i| m[perm[i]][c] == m[i][depth]", "if (0..depth).any(|i| m[perm[i]][c] == m[i][depth]",
+     ["-p", "bombe", "--test", "kerckhoffs", "symmetries"]),
+    ("symmetry: pair search reads the wrong column", "crates/bombe/src/symmetry.rs",
+     "(0..16).find(|&r| m[r][pi_in[0]] == m[i][0])", "(0..16).find(|&r| m[r][pi_in[1]] == m[i][0])",
+     ["-p", "bombe", "--lib", "symmetry"]),
+    ("symmetry: scalings skip b = 0", "crates/bombe/src/symmetry.rs",
+     "        for b in 0..=255u8 {", "        for b in 1..=255u8 {",
+     ["-p", "bombe", "--lib", "symmetry"]),
+    ("symmetry: cross-ratio test inverted", "crates/bombe/src/symmetry.rs",
+     "!in_gf16(ratio)", "in_gf16(ratio)",
+     ["-p", "bombe", "--test", "kerckhoffs", "symmetries"]),
+    ("symmetry: reflection map composed in the wrong order", "crates/bombe/src/symmetry.rs",
+     "a_in_inv[a_out_inv[x] as usize]", "a_out_inv[a_in_inv[x] as usize]",
+     ["-p", "bombe", "--lib", "symmetry"]),
+    ("keyrelations: AES round constant typo", "crates/bombe/src/keyrelations.rs",
+     "0x80, 0x1b, 0x36]", "0x80, 0x1c, 0x36]",
+     ["-p", "bombe", "--lib", "keyrelations"]),
+    ("keyrelations: constant column dropped", "crates/bombe/src/keyrelations.rs",
+     "            bits[(columns - 1) / 64] |= 1 << ((columns - 1) % 64);\n", "",
+     ["-p", "bombe", "--test", "kerckhoffs", "key_schedule"]),
+    ("difflinear: prediction reads a row of MixState", "crates/bombe/src/difflinear.rs",
+     "let m = turing::linear::MIX_STATE[j][0];", "let m = turing::linear::MIX_STATE[0][j];",
+     ["-p", "bombe", "--test", "kerckhoffs", "differential_linear"]),
+    ("selftest: encryption uses the previous round key", "crates/turing/src/cipher.rs",
+     "            add_round_key(block, self.keys.key(round));\n        }\n    }",
+     "            add_round_key(block, self.keys.key(round - 1));\n        }\n    }",
+     ["-p", "turing", "--lib", "self_test"]),
+    ("checked: comparison ANDs instead of ORs", "crates/turing/src/cipher.rs",
+     "fold(0u8, |acc, (a, b)| acc | (a ^ b))", "fold(0u8, |acc, (a, b)| acc & (a ^ b))",
+     ["-p", "turing", "--lib", "checked"]),
+    ("checked: faulty output released", "crates/turing/src/cipher.rs",
+     "    } else {\n        block.zeroize();\n        Err(FaultDetected)", "    } else {\n        Err(FaultDetected)",
+     ["-p", "turing", "--lib", "checked"]),
+]
+
+MUTATIONS = [
+    ("trail: MixColumns branch 5 -> 4", "crates/bombe/src/trail.rs",
+     "x.count_ones() + y.count_ones() >= 5)\n}", "x.count_ones() + y.count_ones() >= 4)\n}",
+     ["-p", "bombe", "--test", "rounds"]),
+    ("trail: MixState branch 17 -> 16", "crates/bombe/src/trail.rs",
+     "*slot = at_least[(17 - wy).max(1)];", "*slot = at_least[(16 - wy).max(1)];",
+     ["-p", "bombe", "--test", "rounds"]),
+    ("impossible: claim 'all non-zero' even with unknown bytes", "crates/bombe/src/impossible.rs",
+     "} else if nz.count_ones() == 1 && unknown == 0 {", "} else if nz.count_ones() == 1 {",
+     ["-p", "bombe", "--test", "rounds"]),
+    ("impossible: forget the branch-number check across layers", "crates/bombe/src/impossible.rs",
+     "let non_zero = in_max >= 1 && out_max >= 1 && in_max + out_max >= branch;",
+     "let non_zero = in_max >= 1 && out_max >= 1;",
+     ["-p", "bombe", "--test", "rounds"]),
+    ("key schedule: 12 warm-up rounds", "crates/turing/src/keyschedule.rs",
+     "pub const WARMUP_ROUNDS: usize = 13;", "pub const WARMUP_ROUNDS: usize = 12;",
+     ["-p", "bombe", "--test", "keyschedule"]),
+    ("xof: plain SHAKE (empty customization)", "crates/turing/src/xof.rs",
+     "CoreWrapper::from_core(CShake256Core::new(label.as_bytes()))", "CoreWrapper::from_core(CShake256Core::new(&[]))",
+     ["-p", "turing", "--lib"]),
+    ("structure: MixState in even rounds", "crates/turing/src/structure.rs",
+     "} else if round % 2 == 1 {", "} else if round % 2 == 0 {",
+     ["-p", "bombe", "--test", "rounds"]),
+    ("structure: 14 rounds", "crates/turing/src/structure.rs",
+     "pub const ROUNDS: usize = 16;", "pub const ROUNDS: usize = 14;",
+     ["-p", "bombe", "--test", "rounds"]),
+]
+
+
+def kill_tree(p):
+    """Kills cargo and the test binary it started."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+    else:
+        os.killpg(p.pid, signal.SIGKILL)
+
+
+def run(args):
+    # No -q: the default output prints one "test <name> ... FAILED" line per
+    # failing test, which is what tells us which test caught the bug.
+    cmd = ["cargo", "test", *args]
+    group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **group)
+    try:
+        out, _ = p.communicate(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        kill_tree(p)
+        p.communicate()
+        return None, [], False
+    failed = [line.split()[1] for line in out.splitlines()
+              if line.startswith("test ") and line.rstrip().endswith("FAILED")]
+    compile_error = "could not compile" in out or "error[E" in out
+    return p.returncode, failed, compile_error
+
+
+def main():
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3}
+    check_only = "--check" in sys.argv
+    only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
+    mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)
+    all_caught = True
+    for name, rel, old, new, args in mutations:
+        if only and not any(o in name for o in only):
+            continue
+        path = ROOT / rel
+        original = path.read_bytes()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            print(f"SKIP {name}: pattern found {text.count(old)} times")
+            all_caught = False
+            continue
+        if check_only:
+            print(f"OK      {name}")
+            continue
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            code, failed, compile_error = run(args)
+        finally:
+            path.write_bytes(original)
+        assert path.read_bytes() == original, f"{rel} not restored"
+        caught = code != 0
+        all_caught &= caught
+        if code is None:
+            how = f"timed out after {TIMEOUT} s (the test did not pass)"
+        else:
+            how = ", ".join(failed) if failed else ("compile error" if compile_error else "exit %d" % code)
+        print(f"{'CAUGHT' if caught else 'MISSED'}  {name}: {how}", flush=True)
+    if check_only:
+        print("all patterns match" if all_caught else "SOME PATTERNS ARE STALE")
+    else:
+        print("all mutations caught" if all_caught else "SOME MUTATIONS NOT CAUGHT")
+    return 0 if all_caught else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
