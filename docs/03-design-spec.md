@@ -39,7 +39,7 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 | Key schedule | cSHAKE256 whitening, then a Feistel of S-box + MixState rounds with feed-forward, 13 warm-up rounds (docs/07) | Every round key sits behind >= 53 active S-boxes; no local collisions |
 | Rounds | 24 (version 2; docs/09, 13); 24 is the maximum | Three times the longest attack our tools can build (8 rounds); AES-256 uses 14 |
 | Implementation | Constant-time, no secret-indexed table lookups (checked in the release assembly) | Cache-timing side channels |
-| Keys in memory | Round keys in locked, dump-excluded pages with an integrity checksum, checked before and after every checked call; stack burned after key setup (docs/13) | Cold boot, crash dumps, RAMBleed; Rowhammer faults |
+| Keys in memory | Round keys in locked pages (on Linux also dump-excluded) with a keyed integrity checksum, checked before and after every checked call; stack burned after key setup (docs/13) | Cold boot, crash dumps, RAMBleed; Rowhammer faults |
 | Masked variant | `MaskedTuring`: first-order Boolean masking, round-key shares re-randomised every call (docs/13) | Power, EM and frequency side channels |
 
 ### S-box acceptance criteria (checked by our step 3 tools)

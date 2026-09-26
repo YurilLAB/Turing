@@ -142,6 +142,17 @@ Beierle et al. citations, the biclique complexity (2^254.4).
 | 6 | Doc 10 | "The best attack breaks 3 rounds" and "division property not covered" | Accuracy | The division property predicts, and a 2^32-plaintext run confirms, a 4-round key recovery; doc 10 now points to doc 11 |
 | 7 | New structured square attack | With two fixed sets, a correct attack is reported as failed about 6% of the time (a wrong key byte guess survives both sets with probability 2^-16) | Tooling | Adds sets until every byte is unique |
 
+## Review 6 (after version 2): an outside review
+
+Four problems around the cipher, each reproduced here before it was fixed.
+
+| # | Where | Problem | Severity | Fix |
+|---|---|---|---|---|
+| 1 | Round-key checksum | Σ x^i · RK_i has two-bit blind spots: bit b of RK_i and bit b − 1 of RK_i+1 cancel. 38,700 two-bit faults in all (0.7%), 35,800 of them in the round keys, and the checked calls passed each one, releasing output under the wrong keys | Fault countermeasure bypassed | Keyed checksum Σ H^(i+1) · RK_i at a secret point (derived from the key for `Turing`, random for `MaskedTuring`): a fault arranged without the key escapes with probability at most 25/2^127, whatever its weight. All 35,800 pairs and random 2–16-bit faults caught (campaign 12); unit tests show no one- or two-bit fault goes unseen |
+| 2 | `random::MaskStream` | Its public draws reseeded after fork(2) only if the state had been wiped, so outside Linux, or where the kernel refused MADV_WIPEONFORK, a child drawing directly repeated its parent's masks. `MaskedTuring` was safe: it checks the process ID at the start of every operation | Masking defeated for direct users | Every public draw checks the process ID first; the masked cipher keeps a crate-private path without the system call, behind its own check |
+| 3 | `SecretBox` | The results of MADV_DONTDUMP and MADV_WIPEONFORK were discarded, so nothing reported whether a key's pages were kept out of core dumps | Protection not observable | `dump_excluded()` and `wiped_on_fork()` report the kernel's answers, passed on as `keys_dump_excluded()` and `ShieldedKey::dump_excluded()`; campaign 20 reports them |
+| 4 | Doc 13, `shield.rs` | "Has to recover all 16,416 bytes without error": each unknown bit only doubles a search that a known plaintext can test, so a few errors are correctable | Accuracy | "With high accuracy", as OpenSSH says, with what each missing bit costs |
+
 ## Review 5 (step 10, fourth campaign): version 2 and the library
 
 | # | Where | Problem | Severity | Fix |

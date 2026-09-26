@@ -576,6 +576,21 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         format!("{caught} of {trials} single faults detected (random round, byte and value)"),
         pass_if(caught == trials),
     );
+    let (caught, blind, tried) = fault::two_bit_key_faults("campaign two-bit key faults");
+    log.add(
+        s,
+        "persistent two-bit faults in the stored round keys",
+        format!("{caught} of {tried} caught by the keyed checksum, block wiped (every pair that cancels in Σ x^i · RK_i)"),
+        pass_if(caught == tried && tried > 0),
+    );
+    log.add(
+        s,
+        "control: version 2's first checksum, Σ x^i · RK_i, same faults",
+        format!("{blind} of {tried} leave it unchanged: each would release a ciphertext under the wrong keys"),
+        caught_if(blind == tried && tried > 0),
+    );
+    let (caught, trials) = fault::multi_bit_key_faults(scale(20_000, 2_000), "campaign multi-bit key faults");
+    log.add(s, "persistent faults of 2 to 16 random bits in the stored round keys", format!("{caught} of {trials} caught"), pass_if(caught == trials));
 
     // --- Interpolation and invariants -----------------------------------------------------
     let s = "13. Interpolation and invariant attacks (Jakobsen-Knudsen 1997; PRINTcipher 2011; Midori-64 2016)";
@@ -881,6 +896,21 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         "key pages locked out of the page file",
         if locked { "Turing, MaskedTuring and ShieldedKey: all locked" } else { "the OS refused to lock (fallback: ordinary memory, still wiped)" },
         if locked { Verdict::Pass } else { Verdict::Info },
+    );
+    let excluded = Turing::new(&[1; 32]).keys_dump_excluded()
+        && MaskedTuring::new(&[1; 32]).expect("OS randomness").keys_dump_excluded()
+        && ShieldedKey::new(&[1; 32]).expect("OS randomness").dump_excluded();
+    log.add(
+        s,
+        "key pages left out of core dumps",
+        if excluded {
+            "Turing, MaskedTuring and ShieldedKey: all excluded (MADV_DONTDUMP accepted)"
+        } else if cfg!(any(target_os = "linux", target_os = "android")) {
+            "the kernel refused MADV_DONTDUMP"
+        } else {
+            "no such call on this platform (Linux and Android only); crash dumps include the keys"
+        },
+        if excluded { Verdict::Pass } else { Verdict::Info },
     );
 
     // --- Time of check to time of use, concurrency ----------------------------------------------

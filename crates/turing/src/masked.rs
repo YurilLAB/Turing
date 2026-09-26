@@ -15,7 +15,9 @@
 //!   is order 2, which first-order masking does not claim to resist.
 //! - Round keys are stored as two shares in locked memory, re-randomised on
 //!   every call, so the key never sits in memory as itself. Their checksum
-//!   is shared the same way and catches a corrupted share.
+//!   is shared the same way and catches corrupted shares. Its secret point
+//!   is drawn at random, not derived from the key, so checking it handles
+//!   no value that depends on the key.
 //!
 //! First order: one probe learns nothing, two probes combined can (Bombe's
 //! leakage tests show both, on every value this code computes). A compiler
@@ -58,16 +60,19 @@ use crate::{linear, sbox, Block};
 use core::hint::black_box;
 use zeroize::Zeroize;
 
-/// Round keys and their checksum, each as two XOR shares.
+/// Round keys and their checksum, each as two XOR shares, and the checksum's
+/// secret point (keyschedule.rs).
 struct Shares {
     keys: [[Block; ROUND_KEYS]; 2],
     check: [Block; 2],
+    point: Block,
 }
 
 impl Zeroize for Shares {
     fn zeroize(&mut self) {
         self.keys.zeroize();
         self.check.zeroize();
+        self.point.zeroize();
     }
 }
 
@@ -144,7 +149,7 @@ fn noted(x: (u64, u64)) -> (u64, u64) {
 /// be merged with a1 b0 into (a0 ^ a1)(b0 ^ b1) ^ a0 b0 ^ a1 b1, which
 /// would depend on the secret product.
 fn sec_mult(a: (u64, u64), b: (u64, u64), stream: &mut MaskStream) -> (u64, u64) {
-    let r = stream.u64();
+    let r = stream.draw_u64();
     let cross = black_box(r ^ mul(a.0, b.1));
     note(cross);
     let r10 = cross ^ mul(a.1, b.0);
@@ -154,7 +159,7 @@ fn sec_mult(a: (u64, u64), b: (u64, u64), stream: &mut MaskStream) -> (u64, u64)
 
 /// RefreshMasks (Rivain-Prouff Algorithm 4, d = 1).
 fn refresh(x: (u64, u64), stream: &mut MaskStream) -> (u64, u64) {
-    let r = stream.u64();
+    let r = stream.draw_u64();
     noted((x.0 ^ r, x.1 ^ r))
 }
 
@@ -251,30 +256,35 @@ impl MaskedTuring {
         MaskedTuring::with_stream(key, MaskStream::from_seed(seed))
     }
 
+    /// The stream was seeded by this process just before, so its draws
+    /// need no process check.
     fn with_stream(key: &[u8; 32], mut stream: MaskStream) -> MaskedTuring {
         let plain = keyschedule::expand::<ROUND_KEYS>(key);
         let mut shares: SecretBox<Shares> = SecretBox::zeroed();
         for round in 0..ROUND_KEYS {
-            let mask = stream.block();
+            let mask = stream.draw_block();
             shares.keys[0][round] = mask;
             shares.keys[1][round] = xor(plain.key(round), &mask);
         }
-        let mut sum = checksum(plain.keys());
-        let mask = stream.block();
+        shares.point = stream.draw_block();
+        shares.point[0] |= 1;
+        let mut sum = checksum(plain.keys(), &shares.point);
+        let mask = stream.draw_block();
         shares.check = [mask, xor(&sum, &mask)];
         sum.zeroize();
         MaskedTuring { shares, stream }
     }
 
-    /// Re-randomises every share (called on every operation).
+    /// Re-randomises every share (called on every operation, after the
+    /// fork check).
     fn refresh(&mut self) {
         for round in 0..ROUND_KEYS {
-            let mask = self.stream.block();
+            let mask = self.stream.draw_block();
             for share in self.shares.keys.iter_mut() {
                 share[round] = xor(&share[round], &mask);
             }
         }
-        let mask = self.stream.block();
+        let mask = self.stream.draw_block();
         for c in self.shares.check.iter_mut() {
             *c = xor(c, &mask);
         }
@@ -284,15 +294,15 @@ impl MaskedTuring {
     /// exactly when the shared keys match the shared checksum; each side is
     /// masked, so the comparison never handles an unmasked key value.
     fn intact(&self) -> bool {
-        let a = xor(&checksum(&self.shares.keys[0]), &self.shares.check[0]);
-        let b = xor(&checksum(&self.shares.keys[1]), &self.shares.check[1]);
+        let a = xor(&checksum(&self.shares.keys[0], &self.shares.point), &self.shares.check[0]);
+        let b = xor(&checksum(&self.shares.keys[1], &self.shares.point), &self.shares.check[1]);
         a.iter().zip(&b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
     }
 
     fn encrypt_inner(&mut self, block: &mut Block, mut probe: Probe) {
         self.stream.check_fork();
         self.refresh();
-        let mask = halves(&self.stream.block());
+        let mask = halves(&self.stream.draw_block());
         let data = halves(block);
         let mut st = State { s: [[data[0] ^ mask[0], data[1] ^ mask[1]], mask] };
         st.add_key(&self.shares, 0);
@@ -317,7 +327,7 @@ impl MaskedTuring {
     pub fn decrypt_block(&mut self, block: &mut Block) {
         self.stream.check_fork();
         self.refresh();
-        let mask = halves(&self.stream.block());
+        let mask = halves(&self.stream.draw_block());
         let data = halves(block);
         let mut st = State { s: [[data[0] ^ mask[0], data[1] ^ mask[1]], mask] };
         for round in (1..=ROUNDS).rev() {
@@ -381,6 +391,12 @@ impl MaskedTuring {
     /// Whether the operating system locked the key shares' memory.
     pub fn keys_locked(&self) -> bool {
         self.shares.locked()
+    }
+
+    /// Whether the operating system left the key shares' memory out of core
+    /// dumps (Linux and Android only; always false on Windows).
+    pub fn keys_dump_excluded(&self) -> bool {
+        self.shares.dump_excluded()
     }
 
     /// Encrypts, handing both shares to `probe` after every S-box layer.
@@ -462,6 +478,27 @@ mod tests {
         assert_eq!(m.encrypt_block_checked(&mut c), Err(FaultDetected));
         assert_eq!(c, [0u8; 16]);
         assert_eq!(m.decrypt_block_checked(&mut c), Err(FaultDetected));
+    }
+
+    // Share faults that left the public checksum Σ x^i · RK_i unchanged.
+    #[test]
+    fn two_bit_share_faults_are_caught() {
+        for [(ra, ba), (rb, bb)] in [[(0, 1), (1, 0)], [(23, 1), (24, 0)], [(3, 40), (7, 36)]] {
+            let mut m = MaskedTuring::new(&key(5)).unwrap();
+            m.flip_share_bit(ra, ba);
+            m.flip_share_bit(rb, bb);
+            let mut b = [0x42u8; 16];
+            assert_eq!(m.encrypt_block_checked(&mut b), Err(FaultDetected), "RK{ra} bit {ba}, RK{rb} bit {bb}");
+            assert_eq!(b, [0u8; 16]);
+        }
+    }
+
+    // Each masked cipher draws its own point; it is not the key's.
+    #[test]
+    fn the_checksum_point_is_drawn_at_random() {
+        let (a, b) = (MaskedTuring::new(&key(6)).unwrap(), MaskedTuring::new(&key(6)).unwrap());
+        assert_ne!(a.shares.point, b.shares.point);
+        assert_eq!(a.shares.point[0] & 1, 1);
     }
 
     // A share that flips after the first check still inverts itself (both

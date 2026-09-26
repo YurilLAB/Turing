@@ -129,12 +129,30 @@ groups past 4.5 in the same direction: 2 × (3.4 × 10^-6)^2 per point, under
 
 ## Integrity checksum (keyschedule.rs)
 
-The checksum C = Σ_i x^i · RK_i over GF(2^128) is linear. An error E_i in
-round key i changes C by Σ_i x^i · E_i. If only one E_j is non-zero, the
-change is x^j · E_j, which is non-zero because x is invertible modulo the
-irreducible polynomial x^128 + x^7 + x^2 + x + 1. Errors in several round
-keys go unseen only if Σ x^i E_i = 0 exactly. Linearity is also why the
-masked cipher can keep the checksum as shares: C(k0) ⊕ C(k1) = C(k0 ⊕ k1),
-and re-randomising both key shares with the same masks moves both sides of
-the comparison by the same amount.
+The checksum C = Σ_{i=0}^{24} H^(i+1) · RK_i over GF(2^128), modulo the
+irreducible x^128 + x^7 + x^2 + x + 1, is taken at a secret point H: for a
+plain cipher cSHAKE256 of K' under "Turing v2 key check", for the masked one
+a value drawn from its mask stream, made odd in both cases. Errors E_i in
+the round keys and e in the stored checksum go unseen only if
+f(H) = Σ_i E_i · H^(i+1) + e = 0. Unless every E_i and e are zero, f is a
+non-zero polynomial of degree at most 25, so it has at most 25 roots in the
+field. H is uniform over 2^127 odd values and unknown to whoever arranges
+the fault, so the fault escapes with probability at most
+25/2^127 ≈ 2^-122.4, whatever its weight. Each failed attempt rules out at
+most 25 values of H, so repeated attempts learn next to nothing.
+
+Linearity (for a fixed H) is why the masked cipher can keep the checksum as
+shares: C(k0) ⊕ C(k1) = C(k0 ⊕ k1), and re-randomising both key shares with
+the same masks moves both sides of the comparison by the same amount.
+
+Why H must be secret: version 2 first used the public point x,
+C = Σ x^i · RK_i. Bit b of RK_i then contributes x^(i+b), so any two bits
+with the same i + b cancel. For round keys i < j = i + d, the pairs are
+bit c + d of RK_i with bit c of RK_j, c < 128 − d, which gives
+Σ_{d=1}^{24} (25 − d)(128 − d) = 35,800 pairs of round-key bits. Bit b of
+RK_i and bit i + b of the stored checksum also cancel when i + b < 128:
+Σ_{i=0}^{24} (128 − i) = 2,900 more. Together that is 38,700 of the
+C(3328, 2) = 5,536,128 two-bit faults, 0.70%. Enumerating all two-bit faults
+through `encrypt_block_checked` reproduces 35,800 exactly for the round
+keys, and finds 0 with the keyed checksum.
 

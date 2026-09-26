@@ -119,6 +119,13 @@ docs/12
 - `tools/asm_branches.py --loads`: indexed memory accesses (table lookups)
   in the release assembly.
 - `tools/wsl_linux.py`: builds for Linux on Windows and runs the tests in WSL.
+
+**After the outside review (review 6 in docs/08)**, see docs/13 §5
+- `fault::two_bit_key_faults`: every two-bit fault in the stored round keys
+  that cancels in version 2's first, public checksum (35,800 pairs), flipped
+  in a real cipher and run through the checked call, with the public
+  checksum recomputed as the control; `fault::multi_bit_key_faults` for
+  random faults of 2 to 16 bits.
 - `tools/mutate.py --round4`: 25 planted bugs in this round's code.
 
 ## Planned

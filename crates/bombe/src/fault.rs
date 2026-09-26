@@ -13,8 +13,8 @@
 //! is then solved separately.
 
 use crate::rng::Rng;
-use turing::structure::{self, ROUNDS};
-use turing::{gf, linear, sbox, Block, Turing};
+use turing::structure::{self, ROUNDS, ROUND_KEYS};
+use turing::{gf, linear, sbox, Block, FaultDetected, Turing};
 
 /// Encrypts with `delta` XORed into byte `pos` of the state just before the
 /// S-box layer of round `round` (a simulated transient fault).
@@ -145,6 +145,73 @@ pub fn countermeasure(trials: usize, label: &str) -> (usize, usize) {
         let mut back = faulty;
         t.decrypt_block(&mut back);
         caught += usize::from(back != p);
+    }
+    (caught, trials)
+}
+
+fn times_x(v: u128) -> u128 {
+    (v << 1) ^ (0u128.wrapping_sub(v >> 127) & 0x87)
+}
+
+/// Version 2's first round-key checksum, Σ x^i · RK_i at the public point x
+/// (the library now uses a secret point), kept as the control below.
+pub fn public_checksum(t: &Turing) -> u128 {
+    (0..ROUND_KEYS).rev().fold(0u128, |acc, i| times_x(acc) ^ u128::from_le_bytes(*t.round_key(i)))
+}
+
+/// Every pair of round-key bits whose flips cancel in the public checksum:
+/// bit b of RK_i and bit c of RK_j, i < j, with i + b = j + c, since both
+/// flips add x^(i+b). 35,800 of the 5,118,400 pairs.
+pub fn public_checksum_blind_pairs() -> Vec<[(usize, usize); 2]> {
+    let mut pairs = Vec::new();
+    for i in 0..ROUND_KEYS {
+        for j in i + 1..ROUND_KEYS {
+            for c in 0..128 - (j - i) {
+                pairs.push([(i, c + j - i), (j, c)]);
+            }
+        }
+    }
+    pairs
+}
+
+/// Persistent faults (Rowhammer) in the stored round keys that the public
+/// checksum cannot see: each pair above is flipped in a cipher's keys, and a
+/// checked encryption runs. Returns how many the library's keyed checksum
+/// caught with the block wiped, how many leave the public checksum unchanged
+/// (the control: each would release a ciphertext under the wrong keys), and
+/// how many pairs were tried.
+pub fn two_bit_key_faults(label: &str) -> (usize, usize, usize) {
+    let mut rng = Rng::new(label);
+    let mut t = Turing::new(&rng.bytes());
+    let before = public_checksum(&t);
+    let pairs = public_checksum_blind_pairs();
+    let (mut caught, mut blind) = (0, 0);
+    for &[(ra, ba), (rb, bb)] in &pairs {
+        t.flip_round_key_bit(ra, ba);
+        t.flip_round_key_bit(rb, bb);
+        blind += usize::from(public_checksum(&t) == before);
+        let mut b: Block = rng.bytes();
+        caught += usize::from(t.encrypt_block_checked(&mut b) == Err(FaultDetected) && b == [0u8; 16]);
+        t.flip_round_key_bit(ra, ba);
+        t.flip_round_key_bit(rb, bb);
+    }
+    (caught, blind, pairs.len())
+}
+
+/// Persistent faults of 2 to 16 random bits anywhere in the stored round
+/// keys: how many of `trials` checked encryptions caught them.
+pub fn multi_bit_key_faults(trials: usize, label: &str) -> (usize, usize) {
+    let mut rng = Rng::new(label);
+    let mut t = Turing::new(&rng.bytes());
+    let mut caught = 0;
+    for _ in 0..trials {
+        let mut bits: Vec<usize> = (0..2 + rng.below(15)).map(|_| rng.below(ROUND_KEYS as u64 * 128) as usize).collect();
+        bits.sort_unstable();
+        bits.dedup();
+        bits.iter().for_each(|&bit| t.flip_round_key_bit(bit / 128, bit % 128));
+        let mut b: Block = rng.bytes();
+        caught += usize::from(t.encrypt_block_checked(&mut b) == Err(FaultDetected) && b == [0u8; 16]);
+        bits.iter().for_each(|&bit| t.flip_round_key_bit(bit / 128, bit % 128));
     }
     (caught, trials)
 }

@@ -91,6 +91,20 @@ fn fault_attack_and_countermeasure() {
     assert_eq!(caught, trials);
 }
 
+// Persistent faults in the stored round keys. Version 2's first checksum,
+// Σ x^i · RK_i, missed every two-bit fault with i + b = j + c; the keyed
+// checksum catches all 35,800 through the library's checked call, and the
+// control shows each one leaves the public checksum unchanged.
+#[test]
+fn persistent_key_faults_the_public_checksum_missed_are_caught() {
+    let (caught, blind, tried) = fault::two_bit_key_faults("test two-bit key faults");
+    assert_eq!(tried, 35_800);
+    assert_eq!(caught, tried, "caught by the keyed checksum, block wiped");
+    assert_eq!(blind, tried, "control: the public checksum sees none of them");
+    let (caught, trials) = fault::multi_bit_key_faults(2000, "test multi-bit key faults");
+    assert_eq!(caught, trials);
+}
+
 // Interpolation: Turing's S-box and its inverse are as dense as a random
 // permutation's (about 254 of 256 coefficients), unlike the 9-term AES S-box.
 #[test]

@@ -10,7 +10,7 @@ tests, and the new defences are each shown to matter by a planted bug that
 the tests catch.
 
 ```
-cargo run --release -p bombe -- attack          # 21 sections, 132 findings (135 with --deep), 0 failures
+cargo run --release -p bombe -- attack          # 21 sections, 136 findings (139 with --deep), 0 failures
 cargo test --release                            # the whole suite
 python tools/wsl_linux.py test -p turing --lib  # the Linux code paths, run in WSL
 python tools/mutate.py --round4                 # the planted bugs of this round
@@ -25,7 +25,7 @@ python tools/mutate.py --round4                 # the planted bugs of this round
 | Where the key lives and what it touches | Locked, dump-excluded pages per secret; stack burned after key setup; nothing found by a memory-dump attacker | campaign 20, `tests/memory.rs` |
 | Randomising secrets before and after use | First-order masked cipher (fresh shares every call), OpenSSH-style shielded key, fork-safe mask generator, keys derived from a hashed OS seed | campaign 19, `tests/leakage.rs` |
 | Timing, TOCTOU and other breaking attacks | dudect on eight code paths; assembly read for jumps and table lookups; a second key check closes the check-to-use window; concurrency and fork tested | campaign 8, 21 |
-| Fact-checking | Primary sources for every claim (`research/`); 25 planted bugs, all caught | `tools/mutate.py --round4` |
+| Fact-checking | Primary sources for every claim (`research/`); 34 planted bugs (§7) | `tools/mutate.py --round4` |
 
 ## 1. Less linear: the S-box
 
@@ -83,8 +83,8 @@ and the margin comes from rounds instead.
 
 | Object | Secret | Where |
 |---|---|---|
-| `Turing` | 25 round keys and their checksum | one `SecretBox` |
-| `MaskedTuring` | two XOR shares of every round key and of the checksum; the mask generator's state | two `SecretBox`es, the second wiped in a fork child |
+| `Turing` | 25 round keys, their checksum and its secret point | one `SecretBox` |
+| `MaskedTuring` | two XOR shares of every round key and of the checksum; the checksum's random point; the mask generator's state | two `SecretBox`es, the second wiped in a fork child |
 | `ShieldedKey` | a 16 KB random prekey and the key XORed with cSHAKE256(prekey) | two `SecretBox`es |
 | `random::new_key` | the new key; its 64-byte seed (wiped) | `SecretBox` |
 
@@ -99,6 +99,16 @@ proc(5)'s `VmFlags` line shows the result on Linux, `lo` ("pages are
 locked in memory") and `dd` ("do not include area into core dump"), and a
 test reads it from /proc/self/smaps (against a heap allocation that shows
 neither).
+
+What the operating system granted is reported, not assumed. `locked()`,
+`dump_excluded()` and `wiped_on_fork()` return its answers to mlock,
+MADV_DONTDUMP and MADV_WIPEONFORK (false wherever a call was refused or does
+not exist, as on Windows), and the key types pass them on as
+`keys_locked()` and `keys_dump_excluded()` (`locked()` and
+`dump_excluded()` for `ShieldedKey`). The first version discarded the two
+madvise results, so a refused one went unnoticed; a test now checks each
+answer against the kernel's `VmFlags`, and another that advice the kernel
+refuses is reported as refused.
 
 ### Burning the stack
 
@@ -218,10 +228,16 @@ runs in place there. Two processes must never share it: after fork(2) a
 parent and child would use each mask twice. On Linux the state's pages are
 MADV_WIPEONFORK ("Present the child process with zero-filled memory in
 this range after a fork(2)", since Linux 4.14; `VmFlags` shows `wf`), so a
-child finds them zeroed and reseeds before its first mask. Elsewhere the
-generator compares process IDs at the start of every operation. Both
-mechanisms are tested: on Linux with a real fork, and the process-ID check
-on every platform by changing the recorded ID.
+child finds them zeroed and reseeds before its first mask. The generator
+also compares process IDs: the masked cipher at the start of every
+operation, and every public draw from the generator (`fill`, `u64`,
+`block`) before it draws. The first version checked the process ID in the
+masked cipher only, so a program drawing from the generator directly, on a
+system without MADV_WIPEONFORK or with a kernel that refused it, would have
+drawn its parent's masks in a fork child. Both mechanisms are tested: on
+Linux with a real fork, the process-ID check on every platform by changing
+the recorded ID, and each public draw with a real fork of a generator whose
+pages are not wiped.
 
 ### Attacking it
 
@@ -272,18 +288,46 @@ for it, and is left open.
 and Rambleed": XORed with cSHAKE256 of a random 16 KB prekey
 ("relatively large 'prekey' consisting of random data (currently 16KB)").
 An attacker reading memory bit by bit has to recover all 16,416 bytes
-without error. The key is unshielded only inside `cipher()` and `masked()`,
+"with high accuracy", as OpenSSH puts it. An earlier version of this page
+said "without error", which is too strong: each bit still unknown only
+doubles the candidates for the key, each testable against a known
+plaintext and ciphertext at the cost of a 16 KB cSHAKE256 and a key setup,
+and a wrong bit in an unknown place multiplies them by about 131,000. A few
+bad bits can be searched; with 256 unknown, the search is no faster than
+guessing the key. The key is unshielded only inside `cipher()` and `masked()`,
 into a stack buffer that is wiped, with the stack burned after. `refresh()`
 replaces the prekey by XORing in the difference of the two masks, so the
 plain key never appears.
 
 ## 5. Integrity, and the gap between check and use
 
-The round keys carry a checksum, Σ x^i · RK_i in GF(2^128) (the GCM
-polynomial x^128 + x^7 + x^2 + x + 1). It is linear, so it works on shares,
-and since x is invertible any change confined to one round key changes
-it. Changes in several round keys escape only if they satisfy
-Σ x^i · E_i = 0, a relation a physical fault does not arrange.
+The round keys carry a keyed checksum, Σ H^(i+1) · RK_i in GF(2^128) (the
+GCM polynomial x^128 + x^7 + x^2 + x + 1), at a secret point H. A plain
+`Turing` derives H from the key (cSHAKE256 of K' under the label "Turing v2
+key check", made odd); a `MaskedTuring` draws it at random, so checking it
+handles no value that depends on the key. The checksum is linear in the
+round keys, so it works on shares. A fault that changes the keys by E_i and
+the stored checksum by e goes unseen only if Σ H^(i+1) · E_i = e, a
+non-zero polynomial equation in H of degree at most 25, true for at most 25
+of the 2^127 odd points. A fault arranged without knowing the key therefore
+escapes with probability at most 25/2^127 ≈ 2^-122.4, however many bits it
+flips and wherever they are; a fault in H itself changes every term.
+
+The point has to be secret. Version 2 first used the public point x,
+Σ x^i · RK_i, and said that changes in several round keys escape only if
+Σ x^i · E_i = 0, "a relation a physical fault does not arrange". An outside
+review showed the relation has two-bit solutions: flipping bit b of RK_i and
+bit b − 1 of RK_i+1 adds x^(i+b) twice. That makes 35,800 pairs of
+round-key bits, and 2,900 more that pair a round-key bit with a bit of the
+stored checksum: 0.7% of all two-bit faults, each of which the checked calls
+passed, releasing a ciphertext under the wrong keys. A pair in round keys 23
+and 24 is the last-round DFA setting of docs/11. With the keyed checksum
+none of the 5,118,400 pairs of round-key bits passes a checked call, and the
+unit tests show, through linearity, that no fault of one or two bits
+anywhere in the round keys or the stored checksum goes unseen. Each
+checksum is 25 constant-time multiplications in GF(2^128) (integer
+multiplications of operands with holes, as in BearSSL's ctmul64), about
+1.5 µs, so a checked call now costs 2.6 encryptions instead of 2.1.
 
 The checked calls (`encrypt_block_checked`, `decrypt_block_checked`, and
 their masked twins) verify the checksum, compute, decrypt the result and
@@ -294,10 +338,13 @@ a ciphertext under a wrong key would be released. With the flip in round key
 23, that ciphertext and a correct one form a differential-fault pair on the
 last S-box layer (docs/11).
 
-| Experiment (campaign 21) | Result |
+| Experiment (campaigns 12 and 21) | Result |
 |---|---|
-| A round-key bit flipped between the first check and the computation (through the analysis build's hook) | every one caught by the second check, block wiped |
-| Control: decrypt-and-compare alone, same flips | every one would have released a ciphertext under the wrong key (caught) |
+| Every two-bit fault that cancels in Σ x^i · RK_i, flipped in a cipher's stored round keys (12) | all 35,800 caught by the keyed checksum, block wiped |
+| Control: version 2's first checksum, Σ x^i · RK_i, same faults (12) | all 35,800 leave it unchanged (caught) |
+| Persistent faults of 2 to 16 random bits in the stored round keys (12) | every one caught |
+| A round-key bit flipped between the first check and the computation, through the analysis build's hook (21) | every one caught by the second check, block wiped |
+| Control: decrypt-and-compare alone, same flips (21) | every one would have released a ciphertext under the wrong key (caught) |
 | The same with a share bit of the masked cipher | every one caught |
 | One `Turing` shared by 8 threads, plain and checked calls | no result differs from a single-threaded run |
 | fork(2), masked cipher (Linux) | the child's masks differ from the parent's |
@@ -339,8 +386,11 @@ every index is public: round number × 16 for round keys, loop counters,
 the position in the public constant stream, a buffer position, or the
 input length in cSHAKE's padding. Every jump tests a public value: a fault
 check's result, the fork flag and process ID, round and loop counters,
-allocation results. Both `intact()` checks and `sec_mult` compile with no
-jump at all.
+allocation results. `sec_mult` compiles with no jump at all. After review 6
+(rechecked with rustc 1.94.1 on x86-64 Linux), the keyed checksum's
+GF(2^128) multiplication (`mul128`, `clmul64`) has neither jumps nor indexed
+accesses; the two `intact()` checks jump only on their counter over the
+round keys, which they read at round number × 16.
 
 Hertzbleed (Wang et al., USENIX Security 2022) turns power draw into remote
 timing: frequency scaling makes the CPU's speed depend on its power, and so
@@ -351,19 +401,29 @@ power is too.
 
 ## 7. Planted bugs
 
-`python tools/mutate.py --round4` plants 25 bugs in this round's code and
-checks the tests catch each one. All 25 are caught, among them:
+`python tools/mutate.py --round4` plants 34 bugs in this round's code and
+checks the tests catch each one: 24 of the first 25 (the 25th, a
+multiplication by x without reduction, went with the public checksum), and
+ten that came with the fixes of docs/08, review 6. Among them:
 
 | Planted bug | Caught by |
 |---|---|
 | key pages not locked; freed unwiped; burn writes nothing; burn only 1 KB | memory unit tests; Bombe's memory scans |
-| (Linux) pages left in core dumps; not wiped on fork; a wiped generator not reseeded | tests run in WSL |
+| (Linux) pages left in core dumps; not wiped on fork; refused advice reported as taken; a wiped generator not reseeded; a public draw (`fill`, `u64`, `block`) without the process check | tests run on Linux (in WSL from Windows) |
 | generator seed left in its state; SHA-3 padding instead of cSHAKE; fork check never reseeds; `new_key` returning the raw seed | random unit tests |
 | key shares not re-randomised; no fork check before encrypting | masked unit tests |
 | unmasked product in SecMult; missing refresh; recombined S-box output (all with correct ciphertexts) | operation-level TVLA |
 | shield refresh not re-masking; key stored in the clear | shield tests |
-| second key check removed (plain and masked); checksum skipping the last round key; multiplication by x without reduction | fault-window tests |
+| second key check removed (plain and masked); checksum skipping the last round key | fault-window tests |
+| checksum back at the public point x; its point not derived from the key, or never drawn in the masked cipher; a GF(2^128) product left unreduced, its overflow not folded back, or its high half misaligned | checksum and field unit tests |
 | scanner that never matches; scanning after the worker moves on; CPA predicting with S^-1 | Bombe's controls |
+
+The first 25 were all caught on Windows, with the Linux paths in WSL. After
+review 6 the set was run again on Linux, where 33 of the 34 apply (the
+page-locking bug is in Windows code): all caught by failing tests except
+"scanning after the worker moves on", which needs the key-schedule residue
+that only the Windows build leaves where the scanner looks (§3); it survives
+on Linux with the code as it was before review 6 too.
 
 Two of the first run's misses were in the tests, not the code. The burn
 wrote into a zero-initialised array, so removing its wiping loop changed

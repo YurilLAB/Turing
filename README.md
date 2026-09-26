@@ -15,7 +15,9 @@ The design reasoning lives in [docs/](docs/), one document per step.
   constant-time, about 4.5 µs per block; a first-order masked variant
   (`MaskedTuring`, about 20 µs), an OpenSSH-style shielded key
   (`ShieldedKey`) and key generation that leaves no copy behind
-  (`random::new_key`). Keys live in locked pages kept out of core dumps.
+  (`random::new_key`). Keys live in locked pages, kept out of core dumps
+  on Linux; `keys_locked()` and `keys_dump_excluded()` report what the
+  operating system granted.
 - `crates/bombe`: the cryptanalysis workbench, named after Turing's
   code-breaking machine. It exists to break Turing.
 
@@ -47,8 +49,8 @@ rounds).
 
 The library runs a known-answer self-test (`turing::self_test()`, call it
 at start-up) and offers fault-checked calls (`encrypt_block_checked`,
-`decrypt_block_checked`) that check the round keys' checksum before and
-after computing. Round keys and reduced-round encryption are only
+`decrypt_block_checked`) that check the round keys' keyed checksum before
+and after computing. Round keys and reduced-round encryption are only
 reachable through the `turing` crate's `analysis` feature, which only Bombe
 turns on. For the constant-time review, `tools/asm_branches.py` lists every
 conditional jump, or with `--loads` every indexed memory access, in the

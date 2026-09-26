@@ -3,8 +3,14 @@
 //! side-channel attacks like Spectre, Meltdown and Rambleed": the key is
 //! kept XORed with a mask derived from a large random "prekey" (16 KB).
 //! RAMBleed reads memory bit by bit through Rowhammer, and Spectre-style
-//! leaks are slow and noisy. To learn the key such an attacker must recover
-//! all 16,416 bytes (prekey and shielded key) without a single error.
+//! leaks are slow and noisy. Such an attacker must recover all 16,416 bytes
+//! (prekey and shielded key) with high accuracy, as OpenSSH puts it, rather
+//! than strictly without error: each bit still unknown doubles the
+//! candidates for the key, each testable against a known plaintext and
+//! ciphertext at the cost of a 16 KB cSHAKE256 and a key setup, and a wrong
+//! bit in an unknown place multiplies them by about 131,000. A few bad bits
+//! can be searched; with 256 unknown, the search is no faster than guessing
+//! the key.
 //!
 //! The key is unshielded only inside `cipher` and `masked`, into a stack
 //! buffer that is wiped straight after the key schedule has run, and the
@@ -93,6 +99,12 @@ impl ShieldedKey {
     /// Whether the operating system locked both allocations.
     pub fn locked(&self) -> bool {
         self.prekey.locked() && self.shielded.locked()
+    }
+
+    /// Whether the operating system left both allocations out of core dumps
+    /// (Linux and Android only; always false on Windows).
+    pub fn dump_excluded(&self) -> bool {
+        self.prekey.dump_excluded() && self.shielded.dump_excluded()
     }
 }
 

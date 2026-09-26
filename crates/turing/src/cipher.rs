@@ -87,8 +87,8 @@ impl Turing {
     /// glitch, Plundervolt-style undervolting) makes the two disagree; a
     /// persistent one in the stored round keys (a Rowhammer flip), which
     /// would corrupt both directions alike, fails a checksum. Either way the
-    /// block is wiped instead of released (docs/11, 13). Costs a little over
-    /// twice encrypt_block.
+    /// block is wiped instead of released (docs/11, 13). Costs about two and
+    /// a half times encrypt_block.
     pub fn encrypt_block_checked(&self, block: &mut Block) -> Result<(), FaultDetected> {
         self.guarded(block, true, || {})
     }
@@ -149,6 +149,13 @@ impl Turing {
     /// page file (docs/13).
     pub fn keys_locked(&self) -> bool {
         self.keys.locked()
+    }
+
+    /// Whether the operating system left the round keys' memory out of core
+    /// dumps: MADV_DONTDUMP, on Linux and Android only; always false on
+    /// Windows, whose full crash dumps include it (docs/13).
+    pub fn keys_dump_excluded(&self) -> bool {
+        self.keys.dump_excluded()
     }
 
     /// Flips one bit of a stored round key, as a Rowhammer-style fault would.
@@ -268,6 +275,23 @@ mod tests {
             }
         }
         assert!(Turing::new(&key(7)).keys_locked() || cfg!(not(windows)));
+    }
+
+    // Two-bit faults that left version 2's first checksum, Σ x^i · RK_i,
+    // unchanged (bit b of RK_i and bit b - 1 of RK_i+1, and alike): each
+    // released a ciphertext under the wrong keys. The keyed checksum sees them.
+    #[test]
+    fn two_bit_faults_that_cancelled_in_the_public_checksum_are_caught() {
+        for [(ra, ba), (rb, bb)] in [[(0, 1), (1, 0)], [(23, 1), (24, 0)], [(0, 23), (23, 0)], [(11, 70), (12, 69)]] {
+            let mut t = Turing::new(&key(9));
+            t.keys.flip_bit(ra, ba);
+            t.keys.flip_bit(rb, bb);
+            let mut block = [0x5au8; 16];
+            assert_eq!(t.encrypt_block_checked(&mut block), Err(FaultDetected), "RK{ra} bit {ba}, RK{rb} bit {bb}");
+            assert_eq!(block, [0u8; 16]);
+            let mut c = [0x5au8; 16];
+            assert_eq!(t.decrypt_block_checked(&mut c), Err(FaultDetected));
+        }
     }
 
     // A round key that flips after the first check, inside `between`, passes

@@ -1,4 +1,4 @@
-//! Constant-time arithmetic over GF(2) and GF(2^8).
+//! Constant-time arithmetic over GF(2), GF(2^8) and GF(2^128).
 //!
 //! "Constant-time" means the sequence of instructions and memory accesses
 //! does not depend on secret values: no secret-dependent branches and no
@@ -219,6 +219,64 @@ pub fn invert_affine(a: &Affine) -> Option<Affine> {
     Some(Affine::new(inv_rows, m_inv.apply(a.constant)))
 }
 
+// ---------------------------------------------------------------------------
+// GF(2^128), for the round keys' integrity checksum (keyschedule.rs). Bit j
+// of a u128 is the coefficient of x^j, modulo x^128 + x^7 + x^2 + x + 1 (the
+// GCM polynomial). Both operands can be secret, so carry-less products come
+// from integer multiplications of operands with "holes" (BearSSL's ctmul64,
+// also RustCrypto polyval's portable backend): no branches and no lookups.
+// Constant-time wherever the 64-bit integer multiplier is, as on every
+// x86-64 and 64-bit Arm core.
+// ---------------------------------------------------------------------------
+
+/// The low 64 bits of the carry-less product of `x` and `y`. Each operand is
+/// split into four parts whose bits sit 4 apart. In an integer product of two
+/// parts, the terms landing on one position below bit 64 number at most 15,
+/// except 16 at the top position, whose carry leaves the word; so no sum
+/// carries into the next position of its part, and the lowest bit of each
+/// 4-bit field is the XOR of its terms.
+fn clmul64_low(x: u64, y: u64) -> u64 {
+    const M0: u64 = 0x1111_1111_1111_1111;
+    const M1: u64 = 0x2222_2222_2222_2222;
+    const M2: u64 = 0x4444_4444_4444_4444;
+    const M3: u64 = 0x8888_8888_8888_8888;
+    let (x0, x1, x2, x3) = (x & M0, x & M1, x & M2, x & M3);
+    let (y0, y1, y2, y3) = (y & M0, y & M1, y & M2, y & M3);
+    let m = u64::wrapping_mul;
+    let z0 = m(x0, y0) ^ m(x1, y3) ^ m(x2, y2) ^ m(x3, y1);
+    let z1 = m(x0, y1) ^ m(x1, y0) ^ m(x2, y3) ^ m(x3, y2);
+    let z2 = m(x0, y2) ^ m(x1, y1) ^ m(x2, y0) ^ m(x3, y3);
+    let z3 = m(x0, y3) ^ m(x1, y2) ^ m(x2, y1) ^ m(x3, y0);
+    (z0 & M0) | (z1 & M1) | (z2 & M2) | (z3 & M3)
+}
+
+/// The full 128-bit carry-less product of two 64-bit values. Reversing both
+/// inputs reverses the 127-bit product, so the high half is the low half of
+/// the reversed product, reversed back.
+fn clmul64(x: u64, y: u64) -> u128 {
+    let low = clmul64_low(x, y);
+    let high = clmul64_low(x.reverse_bits(), y.reverse_bits()).reverse_bits() >> 1;
+    (u128::from(high) << 64) | u128::from(low)
+}
+
+/// Reduces low + high · x^128 using x^128 = x^7 + x^2 + x + 1. The bits that
+/// multiplying `high` pushes past x^127 are folded back the same way once;
+/// there are at most 7 of them, so the second fold cannot overflow.
+fn reduce128(low: u128, high: u128) -> u128 {
+    let over = (high >> 127) ^ (high >> 126) ^ (high >> 121);
+    low ^ high ^ (high << 1) ^ (high << 2) ^ (high << 7) ^ over ^ (over << 1) ^ (over << 2) ^ (over << 7)
+}
+
+/// a · b in GF(2^128), constant-time: Karatsuba over three carry-less 64-bit
+/// products, then one reduction.
+pub fn mul128(a: u128, b: u128) -> u128 {
+    let (a0, a1, b0, b1) = (a as u64, (a >> 64) as u64, b as u64, (b >> 64) as u64);
+    let low = clmul64(a0, b0);
+    let high = clmul64(a1, b1);
+    let middle = clmul64(a0 ^ a1, b0 ^ b1) ^ low ^ high;
+    reduce128(low ^ (middle << 64), high ^ (middle >> 64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +316,61 @@ mod tests {
                 assert_eq!(lane(inv_l, i), inv(v(i)));
             }
         }
+    }
+
+    fn times_x(v: u128) -> u128 {
+        (v << 1) ^ (0u128.wrapping_sub(v >> 127) & 0x87)
+    }
+
+    /// Bit-serial GF(2^128) product: only shifts, ANDs and XORs, so plainly
+    /// bilinear. The reference `mul128` is checked against.
+    fn mul128_reference(a: u128, b: u128) -> u128 {
+        let mut product = 0u128;
+        let mut shifted = a;
+        for i in 0..128 {
+            product ^= shifted & 0u128.wrapping_sub((b >> i) & 1);
+            shifted = times_x(shifted);
+        }
+        product
+    }
+
+    // Single bits reach every position of the product without carries; dense
+    // operands are where a carry would spill between positions (all ones puts
+    // the most terms on each), so they are checked too, then random ones.
+    #[test]
+    fn mul128_matches_the_bit_serial_product() {
+        for i in 0..128 {
+            for j in 0..128 {
+                assert_eq!(mul128(1 << i, 1 << j), mul128_reference(1 << i, 1 << j), "x^{i} x^{j}");
+            }
+        }
+        let dense = [u128::MAX, u128::MAX >> 1, u128::MAX << 1, u128::MAX << 64, u128::from(u64::MAX), u128::MAX / 3, u128::MAX / 5];
+        for a in dense {
+            for b in dense {
+                assert_eq!(mul128(a, b), mul128_reference(a, b), "{a:#x} {b:#x}");
+            }
+        }
+        let mut s = 0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c834u128;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for _ in 0..20_000 {
+            let (a, b) = (next(), next());
+            assert_eq!(mul128(a, b), mul128_reference(a, b), "{a:#x} {b:#x}");
+        }
+    }
+
+    #[test]
+    fn mul128_is_the_gcm_field() {
+        assert_eq!(mul128(1 << 127, 2), 0x87, "x^128 = x^7 + x^2 + x + 1");
+        let (a, b, c) = (0x0123_4567_89ab_cdef_fedc_ba98_7654_3210u128, u128::MAX / 7, (1u128 << 100) | 0x87);
+        assert_eq!(mul128(a, 1), a);
+        assert_eq!(mul128(a, b), mul128(b, a));
+        assert_eq!(mul128(a, b ^ c), mul128(a, b) ^ mul128(a, c));
+        assert_eq!(mul128(mul128(a, b), c), mul128(a, mul128(b, c)));
     }
 
     #[test]

@@ -17,7 +17,7 @@
 //!    neighbouring round keys have no simple relation to exploit.
 
 use crate::memory::{SecretBox, Zeroable};
-use crate::{linear, sbox, xof};
+use crate::{gf, linear, sbox, xof};
 use sha3::digest::XofReader;
 use zeroize::Zeroize;
 
@@ -27,6 +27,8 @@ use zeroize::Zeroize;
 /// through only v2's last rounds. New labels make the versions independent.
 pub const KEY_LABEL: &str = "Turing v2 key";
 pub const CONSTANTS_LABEL: &str = "Turing v2 key schedule constants";
+/// Label for the secret point of the round keys' integrity checksum.
+pub const CHECK_LABEL: &str = "Turing v2 key check";
 /// Feistel rounds before the first round keys are taken.
 pub const WARMUP_ROUNDS: usize = 13;
 /// Feistel rounds between consecutive round-key pairs.
@@ -70,30 +72,49 @@ fn feistel_round(l: &mut Block, r: &mut Block, constants: &mut impl XofReader) {
     new_l.zeroize();
 }
 
-/// Multiplication by x in GF(2^128) modulo x^128 + x^7 + x^2 + x + 1,
-/// without branches.
-fn times_x(v: u128) -> u128 {
-    (v << 1) ^ (0u128.wrapping_sub(v >> 127) & 0x87)
+/// Integrity checksum Σ_i H^(i+1) · k_i in GF(2^128) at the secret point H,
+/// by Horner's rule: a fixed number of constant-time multiplications.
+///
+/// A fault that changes the keys by E_i and the stored checksum by e goes
+/// unseen only if Σ_i H^(i+1) · E_i = e, a non-zero polynomial equation in H
+/// of degree at most N, true for at most N points. H is secret and odd
+/// (2^127 values), so a fault arranged without knowing H escapes with
+/// probability at most N / 2^127, however many bits it flips and wherever
+/// they are; a fault in H itself changes every term. The point must stay
+/// secret: at a public point the attacker can solve for faults that cancel,
+/// as flipping bit b of RK_i and bit b - 1 of RK_i+1 did in version 2's
+/// first checksum, Σ x^i · RK_i (docs/13). The checksum is linear in the
+/// keys, so the checksums of two XOR shares of the keys XOR to the checksum
+/// of the keys (the masked cipher relies on that).
+pub(crate) fn checksum(keys: &[Block], point: &Block) -> Block {
+    let h = u128::from_le_bytes(*point);
+    keys.iter().rev().fold(0u128, |acc, k| gf::mul128(acc ^ u128::from_le_bytes(*k), h)).to_le_bytes()
 }
 
-/// Integrity checksum sum over i of x^i * k_i in GF(2^128). It is linear, so
-/// the checksum of two XOR shares of the keys XORs to the checksum of the
-/// keys (the masked cipher relies on that), and since x is invertible any
-/// change confined to one round key changes it.
-pub(crate) fn checksum(keys: &[Block]) -> Block {
-    keys.iter().rev().fold(0u128, |acc, k| times_x(acc) ^ u128::from_le_bytes(*k)).to_le_bytes()
+/// The checksum's point for a key: cSHAKE256 of K' under its own label, made
+/// odd so that it is never zero. As secret as the key, and unrelated to any
+/// round key.
+fn check_point(k_left: &Block, k_right: &Block, point: &mut Block) {
+    let mut whitened = [0u8; 32];
+    whitened[..16].copy_from_slice(k_left);
+    whitened[16..].copy_from_slice(k_right);
+    xof::cshake256_secret(CHECK_LABEL, &whitened, point);
+    whitened.zeroize();
+    point[0] |= 1;
 }
 
-/// Round keys and their checksum, stored together.
+/// Round keys, their checksum and its secret point, stored together.
 pub(crate) struct KeyMaterial<const N: usize> {
     pub(crate) keys: [Block; N],
     pub(crate) check: Block,
+    pub(crate) point: Block,
 }
 
 impl<const N: usize> Zeroize for KeyMaterial<N> {
     fn zeroize(&mut self) {
         self.keys.zeroize();
         self.check.zeroize();
+        self.point.zeroize();
     }
 }
 
@@ -102,10 +123,11 @@ unsafe impl<const N: usize> Zeroable for KeyMaterial<N> {}
 
 /// Round keys, in their own locked allocation (memory.rs), wiped when
 /// dropped. Moving a `RoundKeys` moves only a pointer, so no unwiped copies
-/// are left behind (zeroize can only wipe the copy it is given). A checksum
-/// kept beside them lets `intact` detect a round key corrupted in memory, by
-/// a Rowhammer-style bit flip for instance, which decrypt-and-compare alone
-/// cannot see because both directions would use the same corrupted key.
+/// are left behind (zeroize can only wipe the copy it is given). A keyed
+/// checksum kept beside them lets `intact` detect round keys corrupted in
+/// memory, by Rowhammer-style bit flips for instance, which
+/// decrypt-and-compare alone cannot see because both directions would use
+/// the same corrupted keys.
 pub struct RoundKeys<const N: usize> {
     material: SecretBox<KeyMaterial<N>>,
 }
@@ -122,13 +144,19 @@ impl<const N: usize> RoundKeys<N> {
     /// Whether the round keys still match their checksum. Compares without
     /// branching on the data.
     pub(crate) fn intact(&self) -> bool {
-        let now = checksum(&self.material.keys);
+        let now = checksum(&self.material.keys, &self.material.point);
         now.iter().zip(&self.material.check).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
     }
 
     /// Whether the operating system locked the round keys' memory.
     pub fn locked(&self) -> bool {
         self.material.locked()
+    }
+
+    /// Whether the operating system left the round keys' memory out of core
+    /// dumps (Linux and Android only).
+    pub fn dump_excluded(&self) -> bool {
+        self.material.dump_excluded()
     }
 
     /// Round key `round`. Analysis builds only (feature `analysis`).
@@ -213,7 +241,8 @@ fn from_whitened<const N: usize>(k_left: &Block, k_right: &Block) -> RoundKeys<N
     }
     l.zeroize();
     r.zeroize();
-    material.check = checksum(&material.keys);
+    check_point(k_left, k_right, &mut material.point);
+    material.check = checksum(&material.keys, &material.point);
     RoundKeys { material }
 }
 
@@ -280,5 +309,121 @@ mod tests {
         let mut wiped = [0u8; 32];
         xof::cshake256_secret(KEY_LABEL, &k, &mut wiped);
         assert_eq!(streaming, wiped);
+    }
+
+    /// Flips bit `bit` of the stored material, numbered through the round
+    /// keys, then the stored checksum, then the point.
+    fn flip<const N: usize>(k: &mut RoundKeys<N>, bit: usize) {
+        let (block, bit) = (bit / 128, bit % 128);
+        let target = match block {
+            b if b < N => &mut k.material.keys[b],
+            b if b == N => &mut k.material.check,
+            _ => &mut k.material.point,
+        };
+        target[bit / 8] ^= 1 << (bit % 8);
+    }
+
+    /// How flipping each stored bit changes the comparison between the
+    /// recomputed and the stored checksum: a key bit by its column of the
+    /// (linear) checksum, a bit of the stored checksum by itself. A fault is
+    /// seen exactly when the XOR of its bits' columns is non-zero.
+    fn columns<const N: usize>(point: &Block) -> Vec<u128> {
+        let mut columns: Vec<u128> = (0..N * 128)
+            .map(|bit| {
+                let mut keys = [[0u8; 16]; N];
+                keys[bit / 128][bit % 128 / 8] = 1 << (bit % 8);
+                u128::from_le_bytes(checksum(&keys, point))
+            })
+            .collect();
+        columns.extend((0..128).map(|j| 1u128 << j));
+        columns
+    }
+
+    // Every fault of one or two bits in the round keys and the stored
+    // checksum is seen: no column is zero and no two are equal.
+    #[test]
+    fn every_one_and_two_bit_fault_is_seen() {
+        for seed in [1, 2, 3] {
+            let k = expand::<25>(&key(seed));
+            let mut columns = columns::<25>(&k.material.point);
+            assert!(columns.iter().all(|&c| c != 0), "a single bit goes unseen");
+            columns.sort_unstable();
+            columns.dedup();
+            assert_eq!(columns.len(), 26 * 128, "two bits cancel");
+        }
+    }
+
+    // Control: at a public point the same test finds cancelling pairs. With
+    // x, bit 1 of RK0 and bit 0 of RK1 both add x^2, as bit b of RK_i and
+    // bit b - 1 of RK_i+1 cancelled in the first checksum, Σ x^i · RK_i.
+    #[test]
+    fn control_a_public_point_lets_two_bit_faults_cancel() {
+        let columns = columns::<25>(&2u128.to_le_bytes());
+        assert_eq!(columns[1], columns[128]);
+        let mut distinct = columns.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(distinct.len() < columns.len());
+    }
+
+    // The pairs that cancelled in Σ x^i · RK_i, through `intact` itself.
+    #[test]
+    fn faults_that_cancelled_in_the_public_checksum_are_caught() {
+        let mut k = expand::<25>(&key(4));
+        for (a, b) in [(1, 128), (23 * 128 + 1, 24 * 128), (23, 23 * 128), (5, 25 * 128 + 5)] {
+            flip(&mut k, a);
+            flip(&mut k, b);
+            assert!(!k.intact(), "bits {a} and {b}");
+            flip(&mut k, a);
+            flip(&mut k, b);
+            assert!(k.intact());
+        }
+    }
+
+    #[test]
+    fn a_fault_in_the_point_is_caught() {
+        let mut k = expand::<25>(&key(5));
+        for bit in 26 * 128..27 * 128 {
+            flip(&mut k, bit);
+            assert!(!k.intact(), "point bit {}", bit % 128);
+            flip(&mut k, bit);
+        }
+        assert!(k.intact());
+    }
+
+    // Faults of 2 to 16 bits anywhere in the keys, the checksum and the point.
+    #[test]
+    fn random_multi_bit_faults_are_caught() {
+        let mut k = expand::<25>(&key(6));
+        let mut s = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s % n as u64) as usize
+        };
+        for trial in 0..3000 {
+            let mut bits: Vec<usize> = (0..2 + trial % 15).map(|_| next(27 * 128)).collect();
+            bits.sort_unstable();
+            bits.dedup();
+            bits.iter().for_each(|&b| flip(&mut k, b));
+            assert!(!k.intact(), "{bits:?}");
+            bits.iter().for_each(|&b| flip(&mut k, b));
+        }
+        assert!(k.intact());
+    }
+
+    #[test]
+    fn the_point_is_derived_from_the_key_and_odd() {
+        let (a, b) = (expand::<25>(&key(7)), expand::<25>(&key(8)));
+        assert_ne!(a.material.point, b.material.point);
+        assert_eq!(a.material.point[0] & 1, 1);
+        assert!(a.material.keys.iter().all(|rk| *rk != a.material.point));
+        let mut expected = [0u8; 16];
+        let mut whitened = [0u8; 32];
+        xof::cshake256_secret(KEY_LABEL, &key(7), &mut whitened);
+        xof::cshake256(CHECK_LABEL, &whitened).read(&mut expected);
+        expected[0] |= 1;
+        assert_eq!(a.material.point, expected, "cSHAKE256 of K' under its own label");
     }
 }

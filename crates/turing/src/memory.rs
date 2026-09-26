@@ -9,7 +9,9 @@
 //!
 //! Locking can be refused (Windows allows about the minimum working set,
 //! Unix RLIMIT_MEMLOCK). The value then lives in ordinary memory, `locked()`
-//! says so, and it is still wiped. Hibernation writes all of RAM to disk,
+//! says so, and it is still wiped. `dump_excluded()` and `wiped_on_fork()`
+//! report the kernel's answer to the madvise calls the same way, false
+//! wherever the platform has no such call. Hibernation writes all of RAM to disk,
 //! locked or not; only full-disk encryption covers that. mlock(2) is not
 //! inherited across fork(2): a child process that keeps using a cipher made
 //! before the fork holds its keys in pages that may be swapped.
@@ -40,6 +42,17 @@ pub struct SecretBox<T: Zeroable> {
     /// Bytes mapped from the OS, or 0 for the ordinary-heap fallback.
     mapped: usize,
     locked: bool,
+    dump_excluded: bool,
+    wiped_on_fork: bool,
+}
+
+/// A fresh mapping, and what the operating system granted for it.
+struct Mapping {
+    ptr: NonNull<u8>,
+    size: usize,
+    locked: bool,
+    dump_excluded: bool,
+    wiped_on_fork: bool,
 }
 
 // Owned like a Box: sending or sharing it is sending or sharing the T.
@@ -63,13 +76,13 @@ impl<T: Zeroable> SecretBox<T> {
         let bytes = core::mem::size_of::<T>();
         assert!(bytes > 0 && core::mem::align_of::<T>() <= 4096);
         match os::map(bytes, wipe_on_fork) {
-            Some((ptr, mapped, locked)) => SecretBox { ptr: ptr.cast(), mapped, locked },
+            Some(m) => SecretBox { ptr: m.ptr.cast(), mapped: m.size, locked: m.locked, dump_excluded: m.dump_excluded, wiped_on_fork: m.wiped_on_fork },
             None => {
                 let layout = std::alloc::Layout::new::<T>();
                 // SAFETY: the layout has non-zero size; zeroed memory is a valid T (Zeroable).
                 let raw = unsafe { std::alloc::alloc_zeroed(layout) };
                 let ptr = NonNull::new(raw.cast::<T>()).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
-                SecretBox { ptr, mapped: 0, locked: false }
+                SecretBox { ptr, mapped: 0, locked: false, dump_excluded: false, wiped_on_fork: false }
             }
         }
     }
@@ -78,6 +91,21 @@ impl<T: Zeroable> SecretBox<T> {
     /// page file.
     pub fn locked(&self) -> bool {
         self.locked
+    }
+
+    /// Whether the operating system agreed to leave this memory out of core
+    /// dumps (MADV_DONTDUMP, on Linux and Android). Always false elsewhere;
+    /// Windows' full crash dumps, for one, include it (docs/13).
+    pub fn dump_excluded(&self) -> bool {
+        self.dump_excluded
+    }
+
+    /// Whether a fork child finds this memory zero-filled (MADV_WIPEONFORK,
+    /// Linux 4.14 and later). Only `zeroed_fork_wiped` asks for it; where it
+    /// is refused, the mask stream's process-ID check still catches the fork
+    /// (random.rs).
+    pub fn wiped_on_fork(&self) -> bool {
+        self.wiped_on_fork
     }
 
     /// The allocation's address, for fault simulation that must write while
@@ -140,18 +168,20 @@ pub fn burn_stack() {
 
 #[cfg(windows)]
 mod os {
+    use super::Mapping;
     use core::ptr::NonNull;
     use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, VirtualLock, VirtualUnlock, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
 
     /// Committed, zero-filled pages (VirtualAlloc zeroes them), locked if
-    /// allowed. Windows has no fork(2), so there is nothing to wipe on fork.
-    pub fn map(bytes: usize, _wipe_on_fork: bool) -> Option<(NonNull<u8>, usize, bool)> {
+    /// allowed. Windows has no fork(2), so there is nothing to wipe on fork,
+    /// and no call that keeps pages out of every crash dump.
+    pub fn map(bytes: usize, _wipe_on_fork: bool) -> Option<Mapping> {
         let size = bytes.div_ceil(4096) * 4096;
         // SAFETY: plain allocation call; the result is checked for null.
         let ptr = NonNull::new(unsafe { VirtualAlloc(core::ptr::null(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) }.cast::<u8>())?;
         // SAFETY: the region was just committed.
         let locked = unsafe { VirtualLock(ptr.as_ptr().cast(), size) } != 0;
-        Some((ptr, size, locked))
+        Some(Mapping { ptr, size, locked, dump_excluded: false, wiped_on_fork: false })
     }
 
     /// # Safety
@@ -166,11 +196,12 @@ mod os {
 
 #[cfg(unix)]
 mod os {
+    use super::Mapping;
     use core::ptr::NonNull;
 
     /// Anonymous private pages (zero-filled), locked if allowed and, on
     /// Linux, excluded from core dumps and optionally wiped in fork children.
-    pub fn map(bytes: usize, wipe_on_fork: bool) -> Option<(NonNull<u8>, usize, bool)> {
+    pub fn map(bytes: usize, wipe_on_fork: bool) -> Option<Mapping> {
         // SAFETY: sysconf has no preconditions.
         let page = match unsafe { libc::sysconf(libc::_SC_PAGESIZE) } {
             p if p > 0 => p as usize,
@@ -185,18 +216,28 @@ mod os {
         // SAFETY: the region was just mapped.
         let locked = unsafe { libc::mlock(raw, size) } == 0;
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        // SAFETY: advisory calls on our own private anonymous mapping. If the
-        // kernel predates MADV_WIPEONFORK the call fails and the process-ID
-        // check in random.rs still catches the fork.
-        unsafe {
-            libc::madvise(raw, size, libc::MADV_DONTDUMP);
-            if wipe_on_fork {
-                libc::madvise(raw, size, libc::MADV_WIPEONFORK);
-            }
-        }
+        // SAFETY: our own fresh private anonymous mapping, whose contents
+        // neither advice changes. A kernel older than 4.14 refuses
+        // MADV_WIPEONFORK; the process-ID check in random.rs still catches
+        // the fork.
+        let (dump_excluded, wiped_on_fork) = unsafe { (advise(raw, size, libc::MADV_DONTDUMP), wipe_on_fork && advise(raw, size, libc::MADV_WIPEONFORK)) };
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let _ = wipe_on_fork;
-        Some((NonNull::new(raw.cast::<u8>())?, size, locked))
+        let (dump_excluded, wiped_on_fork) = {
+            let _ = wipe_on_fork;
+            (false, false)
+        };
+        Some(Mapping { ptr: NonNull::new(raw.cast::<u8>())?, size, locked, dump_excluded, wiped_on_fork })
+    }
+
+    /// madvise(2), reporting whether the kernel took the advice. It refuses
+    /// advice it does not know, such as MADV_WIPEONFORK before Linux 4.14.
+    ///
+    /// # Safety
+    /// `raw` and `size` must describe a mapping made by `map`, and `advice`
+    /// must leave its contents as they are.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub unsafe fn advise(raw: *mut libc::c_void, size: usize, advice: libc::c_int) -> bool {
+        libc::madvise(raw, size, advice) == 0
     }
 
     /// # Safety
@@ -211,9 +252,10 @@ mod os {
 
 #[cfg(not(any(windows, unix)))]
 mod os {
+    use super::Mapping;
     use core::ptr::NonNull;
 
-    pub fn map(_bytes: usize, _wipe_on_fork: bool) -> Option<(NonNull<u8>, usize, bool)> {
+    pub fn map(_bytes: usize, _wipe_on_fork: bool) -> Option<Mapping> {
         None
     }
 
@@ -241,6 +283,10 @@ mod tests {
     fn small_secrets_are_locked_on_windows() {
         let b: SecretBox<[u8; 32]> = SecretBox::zeroed();
         assert!(b.locked());
+        // Windows has no call that keeps pages out of every crash dump, and
+        // no fork, so both report false rather than a protection not given.
+        let w: SecretBox<[u8; 32]> = SecretBox::zeroed_fork_wiped();
+        assert!(!b.dump_excluded() && !w.dump_excluded() && !w.wiped_on_fork());
     }
 
     #[test]
@@ -292,7 +338,8 @@ mod tests {
     }
 
     // proc(5): "lo" pages are locked in memory, "dd" do not include area into
-    // core dump, "wf" wipe on fork.
+    // core dump, "wf" wipe on fork. What each box reports is what the kernel
+    // shows.
     #[test]
     #[cfg(target_os = "linux")]
     fn linux_pages_are_locked_and_left_out_of_dumps() {
@@ -301,11 +348,29 @@ mod tests {
         let flags = vm_flags(plain.ptr.as_ptr() as usize);
         assert!(plain.locked() && flags.contains(&"lo".into()) && flags.contains(&"dd".into()), "{flags:?}");
         assert!(!flags.contains(&"wf".into()));
+        assert!(plain.dump_excluded() && !plain.wiped_on_fork());
         let flags = vm_flags(wiped.ptr.as_ptr() as usize);
         assert!(flags.contains(&"wf".into()) && flags.contains(&"dd".into()), "{flags:?}");
+        assert!(wiped.dump_excluded() && wiped.wiped_on_fork());
         // Control: ordinary heap memory has none of these.
         let heap = vec![0u8; 1 << 20];
         let flags = vm_flags(heap.as_ptr() as usize);
         assert!(!flags.contains(&"lo".into()) && !flags.contains(&"dd".into()), "{flags:?}");
+    }
+
+    // Advice the kernel refuses (here, advice it does not know, as a kernel
+    // before 4.14 does not know MADV_WIPEONFORK) is reported as refused, so
+    // a box never claims a protection it did not get.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn refused_advice_is_reported_as_refused() {
+        let b: SecretBox<[u8; 32]> = SecretBox::zeroed();
+        assert!(b.mapped > 0, "a mapping, not the heap fallback");
+        let raw = b.ptr.as_ptr().cast::<libc::c_void>();
+        // SAFETY: the box's own mapping; neither advice changes its contents.
+        unsafe {
+            assert!(!os::advise(raw, b.mapped, -1));
+            assert!(os::advise(raw, b.mapped, libc::MADV_DONTDUMP));
+        }
     }
 }

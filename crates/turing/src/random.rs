@@ -24,8 +24,12 @@
 //! attacker who watches both sees each mask used twice, which undoes masking
 //! (Bombe's leakage tests show it). On Linux the state's pages are marked
 //! MADV_WIPEONFORK, so a child finds them zeroed and reseeds before its first
-//! mask; elsewhere `check_fork` compares the process ID, and the masked
-//! cipher calls it at the start of every operation.
+//! mask. Beyond that, `check_fork` compares the process ID: every public
+//! draw (`fill`, `u64`, `block`) runs it first, so a stream used directly is
+//! fork-safe on every platform, whatever the kernel said to
+//! MADV_WIPEONFORK. The masked cipher draws thousands of masks per block
+//! through crate-private calls that skip the system call, and runs
+//! `check_fork` once at the start of every operation instead.
 
 use crate::memory::{SecretBox, Zeroable};
 use zeroize::Zeroize;
@@ -172,7 +176,34 @@ impl MaskStream {
         self.state.pid ^= 1;
     }
 
+    /// Whether the operating system agreed to zero the stream's state in a
+    /// fork child (MADV_WIPEONFORK, Linux 4.14 and later). Either way the
+    /// public draws check the process ID.
+    pub fn wiped_on_fork(&self) -> bool {
+        self.state.wiped_on_fork()
+    }
+
+    /// Mask bytes. Reseeds first if another process seeded the stream (a
+    /// fork child), so the parent's masks are never drawn twice.
     pub fn fill(&mut self, out: &mut [u8]) {
+        self.check_fork();
+        self.draw(out);
+    }
+
+    pub fn u64(&mut self) -> u64 {
+        self.check_fork();
+        self.draw_u64()
+    }
+
+    pub fn block(&mut self) -> [u8; 16] {
+        self.check_fork();
+        self.draw_block()
+    }
+
+    /// `fill` without the process-ID check, a system call, for the masked
+    /// cipher's thousands of draws per block. Callers must run `check_fork`
+    /// themselves at the start of each operation, as `MaskedTuring` does.
+    pub(crate) fn draw(&mut self, out: &mut [u8]) {
         // Free on Linux, where a fork child finds the state zeroed.
         if self.state.seeded == 0 {
             self.check_fork();
@@ -191,15 +222,17 @@ impl MaskStream {
         }
     }
 
-    pub fn u64(&mut self) -> u64 {
+    /// `u64` without the process-ID check (see `draw`).
+    pub(crate) fn draw_u64(&mut self) -> u64 {
         let mut b = [0u8; 8];
-        self.fill(&mut b);
+        self.draw(&mut b);
         u64::from_le_bytes(b)
     }
 
-    pub fn block(&mut self) -> [u8; 16] {
+    /// `block` without the process-ID check (see `draw`).
+    pub(crate) fn draw_block(&mut self) -> [u8; 16] {
         let mut b = [0u8; 16];
-        self.fill(&mut b);
+        self.draw(&mut b);
         b
     }
 }
@@ -353,36 +386,71 @@ mod tests {
         }
     }
 
-    // Control: a stream in ordinary locked memory, used by the child without
-    // the check, repeats the parent's masks exactly. This is what the check
-    // and the wiped pages prevent.
+    // Control: a stream in ordinary locked memory, drawn from in the child
+    // without the process check, repeats the parent's masks exactly. This is
+    // what the check and the wiped pages prevent.
     #[test]
     #[cfg(unix)]
     fn control_an_unprotected_stream_repeats_after_fork() {
         let mut s = MaskStream::seeded_in(SecretBox::zeroed(), &[4; 64]);
         let child = in_child(|| {
             let mut b = [0u8; 64];
-            s.fill(&mut b);
+            s.draw(&mut b);
             b
         });
         let mut parent = [0u8; 64];
-        s.fill(&mut parent);
+        s.draw(&mut parent);
         assert_eq!(child, parent);
     }
 
+    // The public draws are fork-safe where nothing wipes the state (every
+    // Unix but Linux, or a kernel that refused MADV_WIPEONFORK): a stream in
+    // ordinary memory, drawn from directly in a child, never repeats its
+    // parent's masks, whichever call draws them.
+    #[test]
+    #[cfg(unix)]
+    fn public_draws_in_a_fork_child_never_repeat_the_parent() {
+        type Draw = fn(&mut MaskStream) -> [u8; 64];
+        let draws: [(&str, Draw); 3] = [
+            ("fill", |s| {
+                let mut b = [0u8; 64];
+                s.fill(&mut b);
+                b
+            }),
+            ("u64", |s| {
+                let mut b = [0u8; 64];
+                b.chunks_exact_mut(8).for_each(|c| c.copy_from_slice(&s.u64().to_le_bytes()));
+                b
+            }),
+            ("block", |s| {
+                let mut b = [0u8; 64];
+                b.chunks_exact_mut(16).for_each(|c| c.copy_from_slice(&s.block()));
+                b
+            }),
+        ];
+        for (name, draw) in draws {
+            let mut s = MaskStream::seeded_in(SecretBox::zeroed(), &[4; 64]);
+            assert!(!s.wiped_on_fork());
+            let child = in_child(|| draw(&mut s));
+            let parent = draw(&mut s);
+            assert_ne!(child, parent, "{name}");
+            assert_ne!(child, [0u8; 64], "{name}");
+        }
+    }
+
     // On Linux a child that never calls check_fork still reseeds, because
-    // fill finds the wiped state.
+    // the unchecked draw finds the wiped state.
     #[test]
     #[cfg(target_os = "linux")]
     fn linux_a_child_that_skips_the_check_still_reseeds() {
         let mut s = MaskStream::from_seed(&[4; 64]);
         let child = in_child(|| {
             let mut b = [0u8; 64];
-            s.fill(&mut b);
+            s.draw(&mut b);
             b
         });
         let mut parent = [0u8; 64];
-        s.fill(&mut parent);
+        s.draw(&mut parent);
         assert_ne!(child, parent);
         assert_ne!(child, [0u8; 64]);
     }
@@ -392,6 +460,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn linux_fork_children_find_the_state_wiped() {
         let s = MaskStream::new().unwrap();
+        assert!(s.wiped_on_fork(), "the kernel took MADV_WIPEONFORK");
         let child = in_child(|| {
             let mut b = [0u8; 64];
             b[0] = s.state.seeded as u8;
