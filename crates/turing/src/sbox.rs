@@ -10,7 +10,7 @@
 //! The cipher evaluates the S-box arithmetically in constant time.
 //! `TABLE` is published for analysis and tests only.
 
-use crate::gf::{self, Affine};
+use crate::gf::{self, Affine, Affine8};
 
 mod constants {
     include!("sbox_constants.rs");
@@ -23,7 +23,13 @@ pub const A_OUT: Affine = Affine::new(constants::OUT_ROWS, constants::OUT_CONST)
 const A_IN_INV: Affine = Affine::new(constants::IN_INV_ROWS, constants::IN_INV_CONST);
 const A_OUT_INV: Affine = Affine::new(constants::OUT_INV_ROWS, constants::OUT_INV_CONST);
 
-/// S(x), constant-time.
+const A_IN_8: Affine8 = Affine8::new(&A_IN);
+const A_OUT_8: Affine8 = Affine8::new(&A_OUT);
+const A_IN_INV_8: Affine8 = Affine8::new(&A_IN_INV);
+const A_OUT_INV_8: Affine8 = Affine8::new(&A_OUT_INV);
+
+/// S(x) for one byte, constant-time. The reference the fast version is
+/// checked against.
 pub fn sub(x: u8) -> u8 {
     A_OUT.apply(gf::inv(A_IN.apply(x)))
 }
@@ -31,6 +37,33 @@ pub fn sub(x: u8) -> u8 {
 /// S⁻¹(y) = A_in⁻¹( inv( A_out⁻¹(y) ) ), constant-time.
 pub fn inv_sub(y: u8) -> u8 {
     A_IN_INV.apply(gf::inv(A_OUT_INV.apply(y)))
+}
+
+/// S applied to the eight bytes in the lanes of a u64.
+pub fn sub8(x: u64) -> u64 {
+    A_OUT_8.apply(gf::inv8(A_IN_8.apply(x)))
+}
+
+/// S⁻¹ applied to eight lanes.
+pub fn inv_sub8(y: u64) -> u64 {
+    A_IN_INV_8.apply(gf::inv8(A_OUT_INV_8.apply(y)))
+}
+
+fn map_halves(block: &mut [u8; 16], f: fn(u64) -> u64) {
+    for half in block.chunks_exact_mut(8) {
+        let x = u64::from_le_bytes(half.try_into().expect("8-byte chunk"));
+        half.copy_from_slice(&f(x).to_le_bytes());
+    }
+}
+
+/// The S-box layer: S on all 16 bytes, constant-time.
+pub fn sub_bytes(block: &mut [u8; 16]) {
+    map_halves(block, sub8);
+}
+
+/// The inverse S-box layer.
+pub fn inv_sub_bytes(block: &mut [u8; 16]) {
+    map_halves(block, inv_sub8);
 }
 
 #[cfg(test)]
@@ -66,5 +99,22 @@ mod tests {
         }
         // FIPS-197 §4.2 worked example: {57} · {83} = {c1}.
         assert_eq!(gf::mul(0x57, 0x83), 0xc1);
+    }
+
+    // The block layer must equal the table at every byte position, for every
+    // value: each of the 256 values is placed in each of the 16 positions,
+    // with different values around it.
+    #[test]
+    fn block_layer_matches_table_everywhere() {
+        for x in 0..=255u8 {
+            let mut block: [u8; 16] = core::array::from_fn(|i| x.wrapping_add((i * 17) as u8));
+            let original = block;
+            sub_bytes(&mut block);
+            for i in 0..16 {
+                assert_eq!(block[i], TABLE[original[i] as usize], "value {:#04x} at {i}", original[i]);
+            }
+            inv_sub_bytes(&mut block);
+            assert_eq!(block, original);
+        }
     }
 }

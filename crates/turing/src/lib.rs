@@ -3,9 +3,12 @@
 //! EXPERIMENTAL. A new cipher is only trusted after years of public
 //! cryptanalysis. Do not use this to protect real data.
 
+pub mod cipher;
 pub mod gf;
 pub mod keyschedule;
 pub mod linear;
 pub mod sbox;
 pub mod structure;
 pub mod xof;
+
+pub use cipher::{Block, Turing};

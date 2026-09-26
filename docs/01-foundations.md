@@ -85,9 +85,10 @@ detectable pattern, however small, is a way in.
 5. Design the linear layer and prove its branch number — done (06)
 6. Design the key schedule — done (07), reviewed (08)
 7. Set the round count from proven bounds — done (09)
-8. Implement the cipher with test vectors
+8. Implement the cipher with test vectors — done (10), with the round tracer
 9. File encryption: mode, authentication, key derivation, file format
-10. Attack it ourselves
+10. Attack it ourselves — first campaign done (10): square, differential,
+    linear, avalanche, NIST battery, key checks, timing; more to add
 
 Source for the Enigma history: "Cryptanalysis of the Enigma" (Wikipedia
 overview) and J. Wilcox, "Solving the Enigma: History of the Cryptanalytic

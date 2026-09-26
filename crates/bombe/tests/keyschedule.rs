@@ -3,9 +3,6 @@
 //! measures its avalanche.
 
 use bombe::keyschedule::*;
-use bombe::matrix;
-use sha3::digest::core_api::CoreWrapper;
-use sha3::digest::{ExtendableOutput, Update, XofReader};
 use turing::keyschedule::{self as ks, expand};
 use turing::structure::ROUND_KEYS;
 
@@ -61,48 +58,12 @@ fn weak_mixing_needs_many_more_rounds() {
     assert!(rounds.unwrap_or(usize::MAX) > 3 * ks::WARMUP_ROUNDS, "{rounds:?}");
 }
 
-/// cSHAKE256 straight from the sha3 crate (not through turing::xof).
-fn cshake(label: &[u8], input: &[u8]) -> impl XofReader {
-    let mut h = CoreWrapper::from_core(sha3::CShake256Core::new(label));
-    h.update(input);
-    h.finalize_xof()
-}
-
-/// An independent model of the key schedule: table-lookup S-box, Bombe's
-/// table-based field arithmetic, same published labels, round counts
-/// written out. `feed_forward` switches the final XOR with K' off to show
-/// it matters.
+/// The independent reference key schedule (bombe::refcipher): table-lookup
+/// S-box, Bombe's own arithmetic, cSHAKE256 straight from the sha3 crate,
+/// round counts written out. `feed_forward = false` switches the final XOR
+/// with K' off to show it matters.
 fn reference(key: &[u8; 32], n: usize, feed_forward: bool) -> Vec<[u8; 16]> {
-    let mut kp = [0u8; 32];
-    cshake(b"Turing v1 key", key).read(&mut kp);
-    let (k_l, k_r) = (kp[..16].to_vec(), kp[16..].to_vec());
-    let (mut l, mut r) = (k_l.clone(), k_r.clone());
-    let mut cs = cshake(b"Turing v1 key schedule constants", &[]);
-    let m = matrix::from_array(&turing::linear::MIX_STATE);
-    let mut round = |l: &mut Vec<u8>, r: &mut Vec<u8>| {
-        let mut c = [0u8; 16];
-        cs.read(&mut c);
-        let s: Vec<u8> = (0..16).map(|i| turing::sbox::TABLE[(l[i] ^ c[i]) as usize]).collect();
-        let fo = matrix::mat_vec(&m, &s);
-        let new_l: Vec<u8> = (0..16).map(|i| r[i] ^ fo[i]).collect();
-        *r = std::mem::replace(l, new_l);
-    };
-    for _ in 0..13 {
-        round(&mut l, &mut r);
-    }
-    let mut out = Vec::new();
-    while out.len() < n {
-        if !out.is_empty() {
-            for _ in 0..8 {
-                round(&mut l, &mut r);
-            }
-        }
-        let mix = |a: &[u8], k: &[u8]| -> [u8; 16] { std::array::from_fn(|i| a[i] ^ if feed_forward { k[i] } else { 0 }) };
-        out.push(mix(&l, &k_l));
-        out.push(mix(&r, &k_r));
-    }
-    out.truncate(n);
-    out
+    bombe::refcipher::key_schedule(key, n, feed_forward)
 }
 
 fn test_key(i: u32) -> [u8; 32] {

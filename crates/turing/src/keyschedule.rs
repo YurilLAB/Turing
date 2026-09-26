@@ -48,7 +48,8 @@ fn xor(a: &Block, b: &Block) -> Block {
 
 /// F_j(x) = MixState(S(x XOR C_j)), constant-time.
 fn f(x: &Block, c: &Block) -> Block {
-    let mut t: Block = core::array::from_fn(|i| sbox::sub(x[i] ^ c[i]));
+    let mut t = xor(x, c);
+    sbox::sub_bytes(&mut t);
     let out = linear::mix_state(&t);
     t.zeroize();
     out

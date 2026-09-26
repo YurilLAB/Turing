@@ -61,33 +61,29 @@ like even static; any line, block or bright spot is exploitable structure.
   Sun et al. Every result is rechecked by exhaustive trail enumeration.
 - Compares candidate layer schedules side by side (docs/09).
 
-## Planned, in the order they become useful
+**Round tracer (step 8): `bombe trace`**
+- The state after every operation of every round, for any key, plaintext and
+  round count; with a second input (a flipped plaintext or key bit, or any
+  other plaintext or key), the XOR of the two runs and how many bits and
+  bytes differ.
 
-**Watch: the round tracer (step 8)**
-- Encrypt with any key and plaintext and print or render the state after every
-  sub-step (S-box, mixing, round key) of every round, plus the round keys.
-- Controls: run reduced-round variants, flip chosen plaintext or key bits,
-  swap in an alternative S-box or linear layer.
-- Differential view: encrypt two inputs side by side and show, round by round,
-  which bytes differ. This makes diffusion visible.
+**Attack bench (step 8): `bombe attack`**, see docs/10
+- Correctness against an independent reference implementation and the
+  known-answer vectors (`bombe vectors`).
+- Square attack: balanced-sum distinguisher and real key recovery on
+  reduced rounds.
+- Differential and linear: measured branch numbers, 1-round differential
+  probability and linear correlation against the DDT and LAT, truncated
+  differentials by round.
+- Avalanche (strict avalanche criterion) on plaintext and key bits.
+- NIST SP 800-22 (nine tests, eleven statistics) on counter-mode keystreams,
+  validated against NIST's reference results for e.
+- Key checks: suspicious keys, equivalent keys among neighbours.
+- Timing side channel, dudect-style, with a leaky control.
 
-**Cipher-level statistics (steps 8 and 10)**
-- Avalanche matrix (strict avalanche criterion): for each input bit, the
-  probability each output bit flips. Target 0.5 everywhere, with a statistical
-  test for deviation.
-- Bit independence criterion.
-- Key avalanche: the same test with key bits flipped (key schedule quality).
-- Randomness battery on ciphertext streams (counter mode): monobit, runs,
-  serial, chi-square, and a subset of the NIST SP 800-22 tests.
+## Planned
 
-**Attack bench (step 10)**
 - Integral distinguishers via the division property: the one structural
-  attack family the step 7 tools do not model yet (docs/09).
-- Reduced-round distinguishers: differential, linear, integral (square) and
-  boomerang. The number of rounds each one breaks, measured against the full
-  round count, is the security margin.
-- Slide and related-key probes against the key schedule.
-- Weak-key scan: sample keys for short cycles or fixed points of the full
-  cipher.
-- Timing test (dudect-style Welch t-test) to confirm the implementation is
-  constant-time.
+  attack family not modelled yet (docs/09).
+- Boomerang and meet-in-the-middle experiments on reduced rounds.
+- Bit independence criterion.

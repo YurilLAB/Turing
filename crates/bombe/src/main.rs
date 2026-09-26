@@ -11,6 +11,10 @@ Usage:
   bombe gen-linear [--rust <OUT.rs>]
   bombe key-schedule
   bombe rounds [ROUNDS]
+  bombe vectors [--out PATH]
+  bombe attack [--quick] [--report PATH | --no-report]
+  bombe trace [--key HEX] [--plaintext HEX] [--rounds N]
+              [--flip-plaintext-bit N | --flip-key-bit N | --key2 HEX | --plaintext2 HEX]
 
 SOURCE:
   turing       the Turing S-box
@@ -215,6 +219,122 @@ fn run_rounds(args: &[String]) -> Result<bool, String> {
     Ok(true)
 }
 
+fn parse_hex<const N: usize>(s: &str, what: &str) -> Result<[u8; N], String> {
+    let s = s.trim();
+    if s.len() != 2 * N {
+        return Err(format!("{what} must be {} hex digits", 2 * N));
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| format!("{what} is not hex"))?;
+    }
+    Ok(out)
+}
+
+fn run_trace(args: &[String]) -> Result<bool, String> {
+    let mut key: [u8; 32] = std::array::from_fn(|i| i as u8);
+    let mut plaintext: [u8; 16] = std::array::from_fn(|i| (i as u8) * 0x11);
+    let (mut key2, mut plaintext2) = (None, None);
+    let mut rounds = turing::structure::ROUNDS;
+    let mut it = args.iter();
+    let value = |it: &mut std::slice::Iter<String>, flag: &str| {
+        it.next().cloned().ok_or(format!("{flag} needs a value"))
+    };
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--key" => key = parse_hex(&value(&mut it, flag)?, "key")?,
+            "--plaintext" => plaintext = parse_hex(&value(&mut it, flag)?, "plaintext")?,
+            "--key2" => key2 = Some(parse_hex(&value(&mut it, flag)?, "key2")?),
+            "--plaintext2" => plaintext2 = Some(parse_hex(&value(&mut it, flag)?, "plaintext2")?),
+            "--flip-plaintext-bit" | "--flip-key-bit" => {
+                let bit: usize = value(&mut it, flag)?.parse().map_err(|_| "bit must be a number")?;
+                if flag == "--flip-key-bit" {
+                    if bit >= 256 {
+                        return Err("key bit must be 0..=255".into());
+                    }
+                    let mut k = key2.unwrap_or(key);
+                    k[bit / 8] ^= 1 << (bit % 8);
+                    key2 = Some(k);
+                } else {
+                    if bit >= 128 {
+                        return Err("plaintext bit must be 0..=127".into());
+                    }
+                    let mut p = plaintext2.unwrap_or(plaintext);
+                    p[bit / 8] ^= 1 << (bit % 8);
+                    plaintext2 = Some(p);
+                }
+            }
+            "--rounds" => {
+                rounds = value(&mut it, flag)?.parse().map_err(|_| "rounds must be a number")?;
+                if !(1..=turing::structure::ROUNDS).contains(&rounds) {
+                    return Err(format!("rounds must be 1..={}", turing::structure::ROUNDS));
+                }
+            }
+            other => return Err(format!("unexpected argument {other:?}")),
+        }
+    }
+    let compare = key2.is_some() || plaintext2.is_some();
+    let (k2, p2) = (key2.unwrap_or(key), plaintext2.unwrap_or(plaintext));
+    println!("Turing round tracer, {rounds} round(s)");
+    println!("key A        {}", bombe::refcipher::hex(&key));
+    println!("plaintext A  {}", bombe::refcipher::hex(&plaintext));
+    if compare {
+        println!("key B        {}", bombe::refcipher::hex(&k2));
+        println!("plaintext B  {}", bombe::refcipher::hex(&p2));
+    }
+    println!();
+    let steps = bombe::trace::trace(&key, &plaintext, compare.then_some((&k2, &p2)), rounds);
+    print!("{}", bombe::trace::render(&steps));
+    Ok(true)
+}
+
+fn run_attack(args: &[String]) -> Result<bool, String> {
+    let mut quick = false;
+    let mut report = Some("target/reports/attack-report.md".to_string());
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--quick" => quick = true,
+            "--report" => report = Some(it.next().ok_or("--report needs a path")?.clone()),
+            "--no-report" => report = None,
+            other => return Err(format!("unexpected argument {other:?}")),
+        }
+    }
+    println!("Bombe attack campaign against Turing ({} run)", if quick { "quick" } else { "full" });
+    println!("PASS = resists / holds, BROKEN = reduced rounds broken (expected), CAUGHT = control detected,");
+    println!("FAIL = a problem, INFO = measurement.");
+    let mut section = String::new();
+    let campaign = bombe::campaign::run(quick, &mut |f| {
+        if f.section != section {
+            section = f.section.to_string();
+            println!("\n{section}");
+        }
+        println!("  {:<7} {:<46} {}", format!("{:?}", f.verdict).to_uppercase(), f.test, f.result);
+    });
+    println!("\n{} findings, {} failures, {:.0} s.", campaign.findings.len(), campaign.failures(), campaign.seconds);
+    if let Some(path) = report {
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        std::fs::write(&path, campaign.to_markdown()).map_err(|e| format!("cannot write {path}: {e}"))?;
+        println!("Report written to {path}");
+    }
+    Ok(campaign.failures() == 0)
+}
+
+fn run_vectors(args: &[String]) -> Result<bool, String> {
+    let text = bombe::refcipher::render_vectors();
+    match args {
+        [flag, path] if flag == "--out" => {
+            std::fs::write(path, &text).map_err(|e| format!("cannot write {path}: {e}"))?;
+            println!("Known-answer vectors written to {path}");
+        }
+        [] => print!("{text}"),
+        _ => return Err("usage: bombe vectors [--out PATH]".into()),
+    }
+    Ok(true)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -223,6 +343,9 @@ fn main() -> ExitCode {
         Some("gen-linear") => run_gen_linear(&args[1..]),
         Some("key-schedule") => run_key_schedule(),
         Some("rounds") => run_rounds(&args[1..]),
+        Some("vectors") => run_vectors(&args[1..]),
+        Some("trace") => run_trace(&args[1..]),
+        Some("attack") => run_attack(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
