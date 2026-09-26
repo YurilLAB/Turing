@@ -1,5 +1,9 @@
 # 10 — Does it work, and does it hold up? (step 8 and the attack bench)
 
+> Numbers in this document are for version 1 (16 rounds, 17 round keys).
+> Version 2 has 24 rounds and 25 round keys (docs/13); the attacks and tools
+> are unchanged, and `bombe attack` reports the version 2 figures.
+
 Until this step Turing's parts were designed and proven one by one, but no
 block had been encrypted end to end. This step builds the cipher, checks it
 is right, lets you watch it run, and attacks it.

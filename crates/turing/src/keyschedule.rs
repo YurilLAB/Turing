@@ -3,11 +3,11 @@
 //! Three layers, each answering a known attack on AES-256's schedule
 //! (docs/07-key-schedule.md):
 //!
-//! 1. **Whitening**: K' = cSHAKE256(K, S = "Turing v1 key"). A key difference
+//! 1. **Whitening**: K' = cSHAKE256(K, S = "Turing v2 key"). A key difference
 //!    chosen by an attacker becomes a pseudorandom, unknown difference.
 //! 2. **Feistel expansion** on K' = (L, R): each round maps (L, R) to
 //!    (R XOR F_j(L), L) with F_j(x) = MixState(S(x XOR C_j)) and constants
-//!    C_j read from cSHAKE256("", S = "Turing v1 key schedule constants").
+//!    C_j read from cSHAKE256("", S = "Turing v2 key schedule constants").
 //!    Round keys are taken in pairs (L, R) after 13 warm-up rounds, then
 //!    every 8 rounds. The R half is one round behind L, so the first R round
 //!    key depends on 12 rounds, and Bombe proves any key difference crosses
@@ -16,12 +16,17 @@
 //!    half of K', so round keys cannot be run backwards to K', and
 //!    neighbouring round keys have no simple relation to exploit.
 
+use crate::memory::{SecretBox, Zeroable};
 use crate::{linear, sbox, xof};
 use sha3::digest::XofReader;
 use zeroize::Zeroize;
 
-pub const KEY_LABEL: &str = "Turing v1 key";
-pub const CONSTANTS_LABEL: &str = "Turing v1 key schedule constants";
+/// Version 2 labels. The schedule is prefix-consistent, so with version 1's
+/// labels a key would give version 2 the same first 17 round keys, and a
+/// v1 ciphertext and a v2 ciphertext of the same block would be related
+/// through only v2's last rounds. New labels make the versions independent.
+pub const KEY_LABEL: &str = "Turing v2 key";
+pub const CONSTANTS_LABEL: &str = "Turing v2 key schedule constants";
 /// Feistel rounds before the first round keys are taken.
 pub const WARMUP_ROUNDS: usize = 13;
 /// Feistel rounds between consecutive round-key pairs.
@@ -65,17 +70,65 @@ fn feistel_round(l: &mut Block, r: &mut Block, constants: &mut impl XofReader) {
     new_l.zeroize();
 }
 
-/// Round keys, kept on the heap and wiped when dropped. On the heap because a
-/// value on the stack is copied every time it moves, and zeroize can only
-/// wipe the copy it is given (the zeroize crate documents this limitation);
-/// moving a `RoundKeys` moves only a pointer.
+/// Multiplication by x in GF(2^128) modulo x^128 + x^7 + x^2 + x + 1,
+/// without branches.
+fn times_x(v: u128) -> u128 {
+    (v << 1) ^ (0u128.wrapping_sub(v >> 127) & 0x87)
+}
+
+/// Integrity checksum sum over i of x^i * k_i in GF(2^128). It is linear, so
+/// the checksum of two XOR shares of the keys XORs to the checksum of the
+/// keys (the masked cipher relies on that), and since x is invertible any
+/// change confined to one round key changes it.
+pub(crate) fn checksum(keys: &[Block]) -> Block {
+    keys.iter().rev().fold(0u128, |acc, k| times_x(acc) ^ u128::from_le_bytes(*k)).to_le_bytes()
+}
+
+/// Round keys and their checksum, stored together.
+pub(crate) struct KeyMaterial<const N: usize> {
+    pub(crate) keys: [Block; N],
+    pub(crate) check: Block,
+}
+
+impl<const N: usize> Zeroize for KeyMaterial<N> {
+    fn zeroize(&mut self) {
+        self.keys.zeroize();
+        self.check.zeroize();
+    }
+}
+
+// SAFETY: byte arrays only; all zeroes is a valid value.
+unsafe impl<const N: usize> Zeroable for KeyMaterial<N> {}
+
+/// Round keys, in their own locked allocation (memory.rs), wiped when
+/// dropped. Moving a `RoundKeys` moves only a pointer, so no unwiped copies
+/// are left behind (zeroize can only wipe the copy it is given). A checksum
+/// kept beside them lets `intact` detect a round key corrupted in memory, by
+/// a Rowhammer-style bit flip for instance, which decrypt-and-compare alone
+/// cannot see because both directions would use the same corrupted key.
 pub struct RoundKeys<const N: usize> {
-    keys: Box<[Block; N]>,
+    material: SecretBox<KeyMaterial<N>>,
 }
 
 impl<const N: usize> RoundKeys<N> {
     pub(crate) fn key(&self, round: usize) -> &Block {
-        &self.keys[round]
+        &self.material.keys[round]
+    }
+
+    pub(crate) fn keys(&self) -> &[Block; N] {
+        &self.material.keys
+    }
+
+    /// Whether the round keys still match their checksum. Compares without
+    /// branching on the data.
+    pub(crate) fn intact(&self) -> bool {
+        let now = checksum(&self.material.keys);
+        now.iter().zip(&self.material.check).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    }
+
+    /// Whether the operating system locked the round keys' memory.
+    pub fn locked(&self) -> bool {
+        self.material.locked()
     }
 
     /// Round key `round`. Analysis builds only (feature `analysis`).
@@ -87,13 +140,31 @@ impl<const N: usize> RoundKeys<N> {
     /// All round keys. Analysis builds only (feature `analysis`).
     #[cfg(feature = "analysis")]
     pub fn all(&self) -> &[Block; N] {
-        &self.keys
+        &self.material.keys
     }
-}
 
-impl<const N: usize> Drop for RoundKeys<N> {
-    fn drop(&mut self) {
-        self.keys.zeroize();
+    /// Flips one bit of a stored round key, as a Rowhammer-style fault would.
+    /// Tests and analysis builds only (feature `analysis`).
+    #[cfg(any(test, feature = "analysis"))]
+    pub fn flip_bit(&mut self, round: usize, bit: usize) {
+        self.material.keys[round][bit / 8] ^= 1 << (bit % 8);
+    }
+
+    /// The same through the allocation's raw pointer, with only `&self`: a
+    /// fault striking while the keys are in use (cipher.rs, `guarded`).
+    ///
+    /// # Safety
+    /// No reference into the round keys may be alive.
+    #[cfg(any(test, feature = "analysis"))]
+    pub(crate) unsafe fn flip_bit_raw(&self, round: usize, bit: usize) {
+        assert!(round < N && bit < 128);
+        let material = self.material.raw();
+        // SAFETY: in bounds by the assertion; the caller guarantees that no
+        // reference aliases the byte; volatile so the write is not elided.
+        unsafe {
+            let byte = core::ptr::addr_of_mut!((*material).keys).cast::<u8>().add(round * 16 + bit / 8);
+            byte.write_volatile(byte.read_volatile() ^ (1 << (bit % 8)));
+        }
     }
 }
 
@@ -126,23 +197,24 @@ fn from_whitened<const N: usize>(k_left: &Block, k_right: &Block) -> RoundKeys<N
     for _ in 0..WARMUP_ROUNDS {
         feistel_round(&mut l, &mut r, &mut constants);
     }
-    // Allocated first and filled in place: the zeroes that are copied onto
-    // the heap are not secret, and the keys are written only there.
-    let mut keys = Box::new([[0u8; 16]; N]);
+    // Allocated first and filled in place: the keys are written only into
+    // their own locked pages.
+    let mut material: SecretBox<KeyMaterial<N>> = SecretBox::zeroed();
     for pair in 0..N.div_ceil(2) {
         if pair > 0 {
             for _ in 0..ROUNDS_PER_PAIR {
                 feistel_round(&mut l, &mut r, &mut constants);
             }
         }
-        keys[2 * pair] = xor(&l, k_left);
+        material.keys[2 * pair] = xor(&l, k_left);
         if 2 * pair + 1 < N {
-            keys[2 * pair + 1] = xor(&r, k_right);
+            material.keys[2 * pair + 1] = xor(&r, k_right);
         }
     }
     l.zeroize();
     r.zeroize();
-    RoundKeys { keys }
+    material.check = checksum(&material.keys);
+    RoundKeys { material }
 }
 
 #[cfg(test)]

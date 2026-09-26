@@ -25,6 +25,26 @@ reproduces the ones marked **(reproduced)**.
 | NIST SP 800-22 spectral test examples 2.6.4/2.6.8 do not match the definition; the corrected test and NIST's reference results do | 2004-kim-umeno-hasegawa, nist-sp800-22r1a | docs/10 |
 | AES-128 key expansion: key 2b7e1516 28aed2a6 abf71588 09cf4f3c gives w4 = a0fafe17 and last round key d014f9a8 c9ee2589 e13f0cc8 b6630ca6 **(reproduced)** | nist-fips-197-upd1-aes, Appendix A.1 | docs/12 |
 
+## Implementation security (fourth campaign, docs/13)
+
+| Fact | Source | Used in |
+|---|---|---|
+| F(x) = (π(x))^-1 with π = (1 α) is differentially 4-uniform iff Tr(α) = Tr(1/α) = 1 **(reproduced on all 254 α: 72 qualify)** | 2013-li-wang (Theorem 1) | docs/13 |
+| "their composition is insecure and it is defeated by an attack of order ⌈d/2⌉ + 1" (Rivain-Prouff's mask refreshing with ISW) | 2013-coron-prouff-rivain-roche (abstract, introduction) | masked.rs, docs/13 |
+| TVLA: pass/fail at C = 4.5; "two independent experiments are required, and a device can be rejected only if the t-test statistic exceeds +/- C at the same time, in the same direction, in both experiments" | 2011-goodwill-et-al (section 2) | leakage.rs, docs/13 |
+| Higher-order TVLA combines sample points "by centered product at the second order", centred on each set's mean; \|t\| > 4.5 gives p < 0.00001 for v > 1000 | 2015-schneider-moradi (sections 3, 5) | leakage.rs, docs/13 |
+| Improved product combining C_prod* = (L(t1) − E[L(t1)]) × (L(t2) − E[L(t2)]) in the Hamming-weight model; Proposition 10: E[L(t1) L(t2) \| Z = z] = −H(z)/2 + const, so H(z) is an optimal prediction **(reproduced: second-order CPA recovers the key)** | 2009-prouff-rivain-bevan (section IV, Proposition 10) | leakage.rs, docs/13 |
+| "using secret data as an array index is a recipe for disaster"; "table lookups do not take constant time" | 2005-bernstein (sections 1, 2) | asm_branches.py, docs/13 |
+| Windows ProcessPrng: per-processor AES_CTR_DRBG; requests under 128 bytes come from a 128-byte buffer whose bytes are "wiped (zeroed)" when given out; "After a call to generate bytes, the buffered RNG state no longer has the data to reconstruct the output it provided" | 2019-ferguson (sections Buffered PRNG, Buffering) | random.rs, docs/13 |
+| Measured here, not from a source: up to the last 16 bytes of ProcessPrng's output remain readable in the process's heap (Windows 11); none after getrandom(2) (Linux) | Bombe `residue::generator_copies`, docs/13 table | random.rs, docs/13 |
+| MADV_WIPEONFORK (since Linux 4.14): "Present the child process with zero-filled memory in this range after a fork(2)", private anonymous pages only; MADV_DONTDUMP (since Linux 3.4): "Exclude from a core dump those pages" | madvise(2), man7.org | memory.rs |
+| "Memory locks are not inherited by a child created via fork(2)"; locked pages "are guaranteed to stay in RAM until later unlocked"; RLIMIT_MEMLOCK limits unprivileged processes | mlock(2), man7.org | memory.rs, docs/13 |
+| VmFlags codes: lo "pages are locked in memory", dd "do not include area into core dump", wf "wipe on fork (since Linux 4.14)" **(read back by memory.rs's Linux test)** | proc_pid_smaps(5), man7.org | memory.rs |
+| libgcrypt burns the stack after key setup (`_gcry_burn_stack (64)` in Blowfish's setkey, `(32)` in DES) and after block operations (cipher.c: `_gcry_burn_stack (burn + 4 * sizeof(void *))`) | libgcrypt `src/misc.c`, `cipher/blowfish.c`, `cipher/des.c`, `cipher/cipher.c` | memory.rs, docs/13 |
+| OpenSSH 8.1: "add protection for private keys at rest in RAM against speculation and memory side-channel attacks like Spectre, Meltdown and Rambleed"; key derived from a "relatively large 'prekey' consisting of random data (currently 16KB)" | openssh-8.1-release-notes.txt | shield.rs |
+| "Scenarios in which authenticated encryption schemes output decrypted plaintext before successful verification raise many security issues" | 2014-andreeva-et-al (abstract) | docs/13 (step 9) |
+| Hertzbleed: DVFS makes frequency depend on power, hence data, observable remotely as timing on Intel and AMD x86 | 2022-wang-et-al (abstract) | docs/13 |
+
 ## Computed here (with the check that validates each)
 
 | Result | Check |
@@ -40,3 +60,8 @@ reproduces the ones marked **(reproduced)**.
 | 2-round differential-linear: max predicted |corr| 0.01782 (byte 1, mask 0xae); measured 0.01770 there | `difflinear::predict_two_rounds` |
 | Cube testers: 16 random bits span more than 7 bytes with probability 99.65% (10.7 bytes on average) | exact count by inclusion-exclusion |
 | Square attack: 4 rounds with 2^32 texts, 2 sets, 867 s (and again under a second key) | division-property prediction |
+| Swapped inverses (all 72 good α): 37 quadratic / 21 bi-affine equations (inverse: 39 / 23), nonlinearity 110 (112); α = 0x20: boomerang uniformity 10 (6), linear bound over the MixState window more than 2^5 weaker | the Li-Wang-Yu criterion reproduced first |
+| Version 2: 24 rounds need at least 204 active S-boxes, the weakest 16-round window 121 | the trail bounder reproduces AES's published counts |
+| Stack used by key setup: key schedule 2,767 and masked key setup 3,751 bytes (release, Windows), 2,463 (release, Linux), up to 21,791 (unoptimised); the burn writes 32,768 | stack painting; a planted 1 KB burn is caught |
+| Key residue without the burn: two 8-byte pieces of K' in dead stack (Windows release), still there after encryptions and drop; none in the Linux release build; none with the burn anywhere | memscan finds planted heap and stack copies (controls) |
+| Masked cipher: 0 of 1,728 intermediate points and 0 of 768 share points leak (TVLA, two groups); repeated masks: 1,202 and 552 leak | three correctness-preserving masking bugs are each caught |

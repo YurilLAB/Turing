@@ -5,7 +5,7 @@
 //! S-box layer, the linear layer `layer(r)` (none in the last round), and
 //! round key r.
 //!
-//! The layers alternate, MixState in odd rounds (1, 3, ..., 15) and
+//! The layers alternate, MixState in odd rounds (1, 3, ..., 23) and
 //! ShiftRows + MixColumns in even rounds. Among the mixes Bombe compared
 //! (`bombe rounds`), strict alternation gives the best trail bounds for its
 //! cost: any 3 rounds have at least 18 active S-boxes, any 7 at least 52.
@@ -20,8 +20,15 @@ pub enum Layer {
     MixState,
 }
 
-pub const ROUNDS: usize = 16;
+/// Version 2: 24 rounds (version 1 had 16). The best attack found reaches 4
+/// (docs/11), and the round-count rule of docs/09 allows 8; 24 is the ceiling
+/// chosen for Turing, so more rounds are never added.
+pub const ROUNDS: usize = 24;
+pub const MAX_ROUNDS: usize = 24;
 pub const ROUND_KEYS: usize = ROUNDS + 1;
+const _: () = assert!(ROUNDS <= MAX_ROUNDS, "24 rounds is Turing's ceiling");
+// An odd number of layered rounds keeps MixState at both ends (docs/09).
+const _: () = assert!(ROUNDS.is_multiple_of(2), "rounds 1 and ROUNDS - 1 must both use MixState");
 
 /// The linear layer after the S-box layer of `round` (1-based), or `None`
 /// for the last round.

@@ -73,7 +73,7 @@ fn measure(samples: usize, bytes: usize, label: &str, row: impl Fn(&mut Rng) -> 
     Relations { columns, samples, rank: rank(rows, columns) }
 }
 
-/// Turing: the 256-bit key and all 17 round keys.
+/// Turing: the 256-bit key and all 25 round keys.
 pub fn turing(extra_samples: usize, label: &str) -> Relations {
     let bytes = 32 + 16 * ROUND_KEYS;
     measure(8 * bytes + 1 + extra_samples, bytes, label, |rng| {
@@ -83,7 +83,7 @@ pub fn turing(extra_samples: usize, label: &str) -> Relations {
     })
 }
 
-/// The Feistel stage alone: K' = (L, R) and all 17 round keys.
+/// The Feistel stage alone: K' = (L, R) and all 25 round keys.
 pub fn turing_feistel(extra_samples: usize, label: &str) -> Relations {
     let bytes = 32 + 16 * ROUND_KEYS;
     measure(8 * bytes + 1 + extra_samples, bytes, label, |rng| {

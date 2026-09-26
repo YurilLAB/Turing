@@ -1,1 +1,2 @@
-* text=auto eol=lf
+# cmd.exe expects CRLF line endings in batch files.
+*.cmd text eol=crlf

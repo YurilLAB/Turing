@@ -76,9 +76,10 @@ Handled in step 6: the feed-forward removes simple relations between round
 keys, and round keys are wiped when dropped. Step 10 closed three gaps
 (review 3 below): key bytes left in the cSHAKE state, round keys copied
 when the cipher value moved, and round keys readable through the public API.
-Wiping cannot protect keys while they are in use, and copies made by the
-compiler or OS (swap, hibernation) are outside the cipher's control; the
-file tool must lock its key pages (docs/11).
+The fourth campaign (review 5) locks the key pages out of swap and core
+dumps, burns the stack after key setup, and checks the whole process with a
+memory-dump attacker (docs/13). Hibernation and registers remain outside the
+cipher's control.
 
 ## Timing side channels
 
@@ -89,7 +90,10 @@ dudect-style test finds no data-dependent timing (step 8, docs/10), and in
 step 10 the release build's assembly was read: no conditional jump in the
 cipher's secret paths depends on data. The compiler *did* turn the masks of
 the reference `mat_vec` into branches on state bits, which is why it is now
-compiled for tests only (docs/11).
+compiled for tests only (docs/11). The fourth campaign extends both checks:
+dudect covers decryption, the checked calls, the masked cipher and key
+shielding too, and the assembly is also read for indexed memory accesses,
+none of which depends on secret data (docs/13).
 
 ## Block size and data limits
 
@@ -137,6 +141,19 @@ Beierle et al. citations, the biclique complexity (2^254.4).
 | 5 | This document | The timing test was still "planned" (done in step 8) and bicliques "to be tested in step 10" | Accuracy | Updated |
 | 6 | Doc 10 | "The best attack breaks 3 rounds" and "division property not covered" | Accuracy | The division property predicts, and a 2^32-plaintext run confirms, a 4-round key recovery; doc 10 now points to doc 11 |
 | 7 | New structured square attack | With two fixed sets, a correct attack is reported as failed about 6% of the time (a wrong key byte guess survives both sets with probability 2^-16) | Tooling | Adds sets until every byte is unique |
+
+## Review 5 (step 10, fourth campaign): version 2 and the library
+
+| # | Where | Problem | Severity | Fix |
+|---|---|---|---|---|
+| 1 | Key schedule | Prefix-consistent: with unchanged labels, version 2's first 17 round keys would equal version 1's | Cross-version relation | Labels "Turing v2 key", "Turing v2 key schedule constants" |
+| 2 | Key setup | The release build left two 8-byte pieces of K' in dead stack, surviving encryptions and drop | Key residue | `burn_stack` after key setup; the memory scan finds nothing |
+| 3 | Callers' keys | Windows' `ProcessPrng` leaves up to the last 16 bytes of its output in process memory | Key residue (platform) | `random::new_key`: cSHAKE256 of a 64-byte seed; nothing found |
+| 4 | Checked calls | A key fault between the checksum check and use passed decrypt-and-compare and released output under a wrong key | Fault window (TOCTOU) | A second checksum check after the computation |
+| 5 | Mask generator | A fork child would reuse the parent's masks | Masking defeated | MADV_WIPEONFORK state and a process-ID check; tested on Linux |
+| 6 | `impossible::find` | Iterated `HashMap`s, so the witness it reported changed from run to run | Reproducibility | Ordered maps |
+| 7 | Truncated propagation | The rule for one certain non-zero byte beside unknown ones had no test; a wrong version survived the planted-bug run | Test gap | Soundness test against real differences |
+| 8 | Docs | Docs 10–12 give version 1's numbers | Accuracy | Marked as version 1; doc 13 has version 2's |
 
 ## Review 4 (step 10, third campaign): earlier claims and tooling
 

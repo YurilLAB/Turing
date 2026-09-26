@@ -7,14 +7,16 @@
 use crate::invariant::LinearMap;
 use crate::refcipher::Reference;
 use crate::rng::Rng;
+use crate::leakage::{self, View};
+use crate::residue::{self, Snapshot};
 use crate::{
     avalanche, battery, boomerang, cube, difflinear, differential, fault, integral, interpolation, invariant, keycheck, keyrelations, power, provable,
-    relatedkey, symmetry, timing,
+    relatedkey, symmetry, timing, toctou,
 };
 use std::fmt::Write;
 use std::time::Instant;
 use turing::structure::{Layer, ROUNDS};
-use turing::Turing;
+use turing::{MaskedTuring, ShieldedKey, Turing};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
@@ -126,6 +128,23 @@ fn pass_if(ok: bool) -> Verdict {
     } else {
         Verdict::Fail
     }
+}
+
+fn caught_if(ok: bool) -> Verdict {
+    if ok {
+        Verdict::Caught
+    } else {
+        Verdict::Fail
+    }
+}
+
+/// One memory scan, in words.
+fn describe(snap: &Snapshot) -> String {
+    let mut out = format!("{} key fragments where they belong, {} anywhere else", snap.expected, snap.stray.len());
+    if !snap.stray.is_empty() {
+        let _ = write!(out, " ({} in the stack of the thread that ran it: {})", snap.on_stack, snap.stray_secrets.join(", "));
+    }
+    out
 }
 
 /// Runs everything. `progress` sees each finding as it is made.
@@ -435,6 +454,43 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         std::hint::black_box(Turing::new(input.try_into().expect("32")));
     });
     log.add(s, "key setup, fixed vs random key", format!("max |t| {:.2}", r.max_t), pass_if(!r.leaks()));
+    let r = timing::dudect("Turing decryption", n, 16, |input| {
+        let mut b: [u8; 16] = input.try_into().expect("16");
+        t.decrypt_block(&mut b);
+        std::hint::black_box(b);
+    });
+    log.add(s, "decryption, fixed vs random ciphertext", format!("max |t| {:.2} over {} runs", r.max_t, n), pass_if(!r.leaks()));
+    let checked_runs = scale(200_000, 50_000);
+    let r = timing::dudect("checked encryption", checked_runs, 16, |input| {
+        let mut b: [u8; 16] = input.try_into().expect("16");
+        let _ = std::hint::black_box(t.encrypt_block_checked(&mut b));
+        std::hint::black_box(b);
+    });
+    log.add(s, "checked encryption (two key checks, decrypt-and-compare)", format!("max |t| {:.2} over {} runs", r.max_t, checked_runs), pass_if(!r.leaks()));
+    let r = timing::dudect("checked decryption", checked_runs, 16, |input| {
+        let mut b: [u8; 16] = input.try_into().expect("16");
+        let _ = std::hint::black_box(t.decrypt_block_checked(&mut b));
+        std::hint::black_box(b);
+    });
+    log.add(s, "checked decryption", format!("max |t| {:.2} over {} runs", r.max_t, checked_runs), pass_if(!r.leaks()));
+    let mut m = MaskedTuring::new(&[0x42; 32]).expect("OS randomness");
+    let masked_runs = scale(60_000, 15_000);
+    let r = timing::dudect("masked encryption", masked_runs, 16, |input| {
+        let mut b: [u8; 16] = input.try_into().expect("16");
+        m.encrypt_block(&mut b);
+        std::hint::black_box(b);
+    });
+    log.add(s, "masked encryption, fixed vs random plaintext", format!("max |t| {:.2} over {} runs", r.max_t, masked_runs), pass_if(!r.leaks()));
+    let setup_runs = scale(20_000, 6_000);
+    let r = timing::dudect("masked key setup", setup_runs, 32, |input| {
+        std::hint::black_box(MaskedTuring::new(input.try_into().expect("32")).expect("OS randomness"));
+    });
+    log.add(s, "masked key setup, fixed vs random key", format!("max |t| {:.2} over {} runs", r.max_t, setup_runs), pass_if(!r.leaks()));
+    let r = timing::dudect("shielded key", setup_runs, 32, |input| {
+        let k = ShieldedKey::new(input.try_into().expect("32")).expect("OS randomness");
+        std::hint::black_box(k.cipher());
+    });
+    log.add(s, "shielding a key, then unshielding it into a cipher", format!("max |t| {:.2} over {} runs", r.max_t, setup_runs), pass_if(!r.leaks()));
     let r = timing::dudect("leaky S-box (control)", scale(200_000, 60_000), 16, |input| {
         let mut b: [u8; 16] = input.try_into().expect("16");
         timing::leaky_sub_bytes(&mut b);
@@ -504,7 +560,7 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
     let f = fault::last_round_key(6, "campaign dfa");
     log.add(
         s,
-        "byte fault in round 15, unprotected implementation",
+        format!("byte fault in round {}, unprotected implementation", ROUNDS - 1),
         format!(
             "{} last round key from {} faulty ciphertexts (candidates after each: {:?})",
             if f.correct { "RECOVERED the" } else { "did not recover the" },
@@ -597,7 +653,7 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
     log.add(
         s,
         "countermeasure",
-        "masking, not implemented (not in the desktop threat model): the S-box's x^254 is Rivain-Prouff's 4-multiplication chain, maskable at any order",
+        "first-order masking: MaskedTuring computes x^254 on shares with Rivain-Prouff's chain; attacked in section 19",
         Verdict::Info,
     );
 
@@ -707,6 +763,155 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
             if d.distinguishes() { Verdict::Broken } else { Verdict::Pass },
         );
     }
+
+    // --- Masked implementation ------------------------------------------------------------------
+    let s = "19. Masked implementation (first-order Boolean masking: ISW 2003, Rivain-Prouff 2010)";
+    let mut rng = Rng::new("campaign masked");
+    let trials = scale(200, 50);
+    let mut mismatches = 0;
+    for _ in 0..trials {
+        let key: [u8; 32] = rng.bytes();
+        let (t, mut m) = (Turing::new(&key), MaskedTuring::new(&key).expect("OS randomness"));
+        let p: [u8; 16] = rng.bytes();
+        let (mut a, mut b) = (p, p);
+        t.encrypt_block(&mut a);
+        m.encrypt_block(&mut b);
+        let mut d = b;
+        m.decrypt_block(&mut d);
+        mismatches += usize::from(a != b || d != p);
+    }
+    log.add(s, "equals the plain cipher", format!("{trials} random keys and blocks, {mismatches} mismatches"), pass_if(mismatches == 0));
+    let mut m = MaskedTuring::new(&[7; 32]).expect("OS randomness");
+    let blocks = scale(40_000, 10_000);
+    let mut b = [0u8; 16];
+    let timer = Instant::now();
+    for _ in 0..blocks {
+        m.encrypt_block(&mut b);
+    }
+    log.add(s, "speed", format!("{:.2} us per block", timer.elapsed().as_secs_f64() * 1e6 / blocks as f64), Verdict::Info);
+    let sigma = 2f64.sqrt();
+    let key: [u8; 32] = rng.bytes();
+    let n = scale(8000, 4000);
+    let traces = leakage::collect(&key, n, &mut rng);
+    let (s0, s1) = (leakage::cpa(&traces, View::Share(0), sigma, "campaign share 0"), leakage::cpa(&traces, View::Share(1), sigma, "campaign share 1"));
+    log.add(
+        s,
+        "first-order CPA on one share (SNR 1; weight and 8 bit predictions)",
+        format!("{s0} and {s1} of 16 key bytes ranked first from {n} traces (chance: 0.06)"),
+        pass_if(s0 <= 2 && s1 <= 2),
+    );
+    let unmasked = leakage::cpa(&traces, View::Unmasked, sigma, "campaign unmasked");
+    log.add(s, "control: the same attack on the unmasked value", format!("{unmasked} of 16 key bytes"), caught_if(unmasked == 16));
+    let second = leakage::cpa(&traces, View::Product, sigma, "campaign product");
+    log.add(
+        s,
+        "second-order CPA (centred product of both shares)",
+        format!("{second} of 16 key bytes from {n} traces: order-1 masking does not claim order 2"),
+        if second >= 12 { Verdict::Exposed } else { Verdict::Info },
+    );
+    let r = leakage::tvla(&key, scale(40_000, 20_000), sigma, false, "campaign tvla");
+    log.add(
+        s,
+        "TVLA, every share byte after every S-box layer",
+        format!("{} of {} points leak in both groups (max |t| {:.2}, {} traces)", r.shares.confirmed, r.shares.points, r.shares.max_t, r.traces),
+        pass_if(!r.shares.leaks()),
+    );
+    log.add(s, "control: TVLA on the unmasked values", format!("{} of {} points leak (max |t| {:.0})", r.unmasked.confirmed, r.unmasked.points, r.unmasked.max_t), caught_if(r.unmasked.leaks()));
+    let rep = leakage::tvla(&key, scale(8000, 4000), sigma, true, "campaign tvla repeat");
+    log.add(
+        s,
+        "control: masks repeated in every trace (fixed seed)",
+        format!("{} of {} share points leak (max |t| {:.0}): why masks are fresh and fork-safe", rep.shares.confirmed, rep.shares.points, rep.shares.max_t),
+        caught_if(rep.shares.leaks()),
+    );
+    log.add(
+        s,
+        "TVLA second order (centred products of both shares)",
+        format!("{} of {} points leak (max |t| {:.1}), as expected at order 1", r.product.confirmed, r.product.points, r.product.max_t),
+        if r.product.leaks() { Verdict::Exposed } else { Verdict::Info },
+    );
+
+    // --- Keys in memory -------------------------------------------------------------------------
+    let s = "20. Keys in memory (a memory-dump attacker: cold boot, crash dumps, RAMBleed)";
+    let (hits, there) = residue::planted();
+    log.add(s, "control: a key planted in the heap", format!("found at its address ({hits} fragment hits in all)"), caught_if(there && hits == 4));
+    let plant = residue::stack_plant(false);
+    log.add(s, "control: a key copy left in a dead stack frame", format!("{} of 4 fragments found in that thread's stack", plant.on_stack), caught_if(plant.on_stack == 4));
+    let burned = residue::stack_plant(true);
+    log.add(s, "the same copy, then burn_stack", describe(&burned), pass_if(burned.clean()));
+    let (found, all) = residue::round_keys_found_in_their_page();
+    log.add(s, "the scanner reads locked pages", format!("{found} of {all} round-key fragments found in the cipher's locked page"), pass_if(found == all));
+    let (dirty, fragments) = residue::generator_copies(false, 8);
+    log.add(
+        s,
+        "a key taken straight from the OS generator",
+        format!(
+            "{dirty} of 8 keys left {fragments} fragments elsewhere ({})",
+            if cfg!(windows) { "Windows' ProcessPrng often leaves up to the last 16 bytes of its output in memory" } else { "getrandom(2) writes straight into the buffer" }
+        ),
+        Verdict::Info,
+    );
+    let (dirty, _) = residue::generator_copies(true, 8);
+    log.add(s, "turing::random::new_key (cSHAKE256 of a 64-byte OS seed)", format!("{dirty} of 8 keys left a copy"), pass_if(dirty == 0));
+    for snap in [residue::plain(true), residue::masked(), residue::shielded()].into_iter().flatten() {
+        let verdict = pass_if(snap.clean());
+        log.add(s, snap.scenario, describe(&snap), verdict);
+    }
+    let unburned = residue::plain(false);
+    let (at_once, after_drop) = (&unburned[0], &unburned[2]);
+    log.add(
+        s,
+        "control: the same key schedule without the stack burn",
+        format!("{}; after the cipher is dropped: {} stray", describe(at_once), after_drop.stray.len()),
+        if at_once.clean() { Verdict::Info } else { Verdict::Caught },
+    );
+    let depths = residue::stack_depths();
+    let deepest = depths.iter().map(|d| d.1).max().unwrap_or(0);
+    log.add(
+        s,
+        "stack the burn must cover",
+        format!("{} bytes at most ({}); the burn writes {}", deepest, depths.iter().map(|(n, d)| format!("{n} {d}")).collect::<Vec<_>>().join(", "), turing::memory::BURN_BYTES),
+        pass_if(deepest > 0 && deepest < turing::memory::BURN_BYTES),
+    );
+    let locked = Turing::new(&[1; 32]).keys_locked()
+        && MaskedTuring::new(&[1; 32]).expect("OS randomness").keys_locked()
+        && ShieldedKey::new(&[1; 32]).expect("OS randomness").locked();
+    log.add(
+        s,
+        "key pages locked out of the page file",
+        if locked { "Turing, MaskedTuring and ShieldedKey: all locked" } else { "the OS refused to lock (fallback: ordinary memory, still wiped)" },
+        if locked { Verdict::Pass } else { Verdict::Info },
+    );
+
+    // --- Time of check to time of use, concurrency ----------------------------------------------
+    let s = "21. Time of check to time of use, and concurrency";
+    let (caught, released, trials) = toctou::plain_flip_in_window(scale(400, 100), "campaign toctou");
+    log.add(s, "round-key bit flipped between the key check and its use", format!("{caught} of {trials} caught by the second check, block wiped"), pass_if(caught == trials));
+    log.add(
+        s,
+        "control: decrypt-and-compare alone, same flips",
+        format!("{released} of {trials} would have released a ciphertext under the wrong key"),
+        caught_if(released == trials),
+    );
+    let (caught, trials) = toctou::masked_flip_in_window(scale(100, 30), "campaign toctou masked");
+    log.add(s, "masked cipher, a share bit flipped in the same window", format!("{caught} of {trials} caught"), pass_if(caught == trials));
+    let (bad, total) = toctou::shared_across_threads(8, scale(5000, 1000), "campaign threads");
+    log.add(s, "one Turing shared by 8 threads (plain and checked calls)", format!("{bad} of {total} results differ from a single-threaded run"), pass_if(bad == 0));
+    match toctou::fork_draws_fresh_masks() {
+        Some(fresh) => log.add(
+            s,
+            "fork(2): masks in the child and the parent",
+            if fresh { "different: the child reseeded" } else { "IDENTICAL: the child reused the parent's masks" },
+            pass_if(fresh),
+        ),
+        None => log.add(s, "fork(2): masks in the child and the parent", "no fork(2) here; run the campaign on Linux (tools/wsl_linux.py)", Verdict::Info),
+    }
+    log.add(
+        s,
+        "compile-time guarantees",
+        "all key types are Send + Sync; MaskedTuring is not Clone and needs &mut for every call (doc tests E0277, E0596); checked calls take &mut Block, so nothing can rewrite it mid-call",
+        Verdict::Info,
+    );
 
     Campaign { findings: log.findings, quick, seconds: start.elapsed().as_secs_f64() }
 }

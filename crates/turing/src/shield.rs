@@ -1,0 +1,128 @@
+//! A key at rest in memory, shielded the way OpenSSH has shielded private
+//! keys since version 8.1 (2019). There it is "against speculation and memory
+//! side-channel attacks like Spectre, Meltdown and Rambleed": the key is
+//! kept XORed with a mask derived from a large random "prekey" (16 KB).
+//! RAMBleed reads memory bit by bit through Rowhammer, and Spectre-style
+//! leaks are slow and noisy. To learn the key such an attacker must recover
+//! all 16,416 bytes (prekey and shielded key) without a single error.
+//!
+//! The key is unshielded only inside `cipher` and `masked`, into a stack
+//! buffer that is wiped straight after the key schedule has run, and the
+//! stack below it is burned (memory.rs). `refresh` replaces the prekey and
+//! re-masks by XORing in the combined mask difference, so the plain key
+//! never appears.
+
+use crate::masked::MaskedTuring;
+use crate::memory::{self, SecretBox};
+use crate::random::{os_random, RandomnessError};
+use crate::{xof, Turing};
+use core::hint::black_box;
+use zeroize::Zeroize;
+
+/// The prekey size OpenSSH uses (16 KB).
+pub const PREKEY_BYTES: usize = 16 * 1024;
+const SHIELD_LABEL: &str = "Turing v2 key shield";
+
+fn mask(prekey: &[u8; PREKEY_BYTES]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    xof::cshake256_secret(SHIELD_LABEL, prekey, &mut out);
+    out
+}
+
+pub struct ShieldedKey {
+    prekey: SecretBox<[u8; PREKEY_BYTES]>,
+    shielded: SecretBox<[u8; 32]>,
+}
+
+impl ShieldedKey {
+    /// Shields `key` under a fresh random prekey; the caller should wipe its
+    /// own copy of `key` afterwards. Fails closed without OS randomness.
+    pub fn new(key: &[u8; 32]) -> Result<ShieldedKey, RandomnessError> {
+        let mut prekey: SecretBox<[u8; PREKEY_BYTES]> = SecretBox::zeroed();
+        os_random(&mut prekey[..])?;
+        let mut m = mask(&prekey);
+        let mut shielded: SecretBox<[u8; 32]> = SecretBox::zeroed();
+        for (s, (k, mk)) in shielded.iter_mut().zip(key.iter().zip(&m)) {
+            *s = k ^ mk;
+        }
+        m.zeroize();
+        memory::burn_stack();
+        Ok(ShieldedKey { prekey, shielded })
+    }
+
+    /// Runs `f` on the unshielded key, then wipes it.
+    fn with_key<R>(&self, f: impl FnOnce(&[u8; 32]) -> R) -> R {
+        let mut m = mask(&self.prekey);
+        let mut key: [u8; 32] = core::array::from_fn(|i| self.shielded[i] ^ m[i]);
+        m.zeroize();
+        let out = f(&key);
+        key.zeroize();
+        memory::burn_stack();
+        out
+    }
+
+    /// An ordinary cipher for this key (round keys in locked memory).
+    pub fn cipher(&self) -> Turing {
+        self.with_key(Turing::new)
+    }
+
+    /// A masked cipher for this key.
+    pub fn masked(&self) -> Result<MaskedTuring, RandomnessError> {
+        self.with_key(MaskedTuring::new)
+    }
+
+    /// Replaces the prekey and re-masks the key. The old and new masks are
+    /// combined first and that difference is XORed in, so no intermediate
+    /// value is the key itself.
+    pub fn refresh(&mut self) -> Result<(), RandomnessError> {
+        let mut fresh: SecretBox<[u8; PREKEY_BYTES]> = SecretBox::zeroed();
+        os_random(&mut fresh[..])?;
+        let (mut old, mut new) = (mask(&self.prekey), mask(&fresh));
+        let mut delta: [u8; 32] = black_box(core::array::from_fn(|i| old[i] ^ new[i]));
+        for (s, d) in self.shielded.iter_mut().zip(&delta) {
+            *s ^= d;
+        }
+        old.zeroize();
+        new.zeroize();
+        delta.zeroize();
+        self.prekey = fresh;
+        memory::burn_stack();
+        Ok(())
+    }
+
+    /// Whether the operating system locked both allocations.
+    pub fn locked(&self) -> bool {
+        self.prekey.locked() && self.shielded.locked()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shielded_key_encrypts_like_the_key() {
+        let key = [0x3cu8; 32];
+        let mut s = ShieldedKey::new(&key).unwrap();
+        let mut expected = [7u8; 16];
+        Turing::new(&key).encrypt_block(&mut expected);
+        let mut b = [7u8; 16];
+        s.cipher().encrypt_block(&mut b);
+        assert_eq!(b, expected);
+        let before = *s.shielded;
+        s.refresh().unwrap();
+        assert_ne!(*s.shielded, before, "the stored bytes change");
+        let mut c = [7u8; 16];
+        s.masked().unwrap().encrypt_block(&mut c);
+        assert_eq!(c, expected, "and still hold the same key");
+    }
+
+    // What sits in memory is neither the key nor anything simple of it.
+    #[test]
+    fn memory_does_not_hold_the_key() {
+        let key = [0x11u8; 32];
+        let s = ShieldedKey::new(&key).unwrap();
+        assert_ne!(*s.shielded, key);
+        assert!(s.prekey.windows(32).all(|w| w != key));
+    }
+}

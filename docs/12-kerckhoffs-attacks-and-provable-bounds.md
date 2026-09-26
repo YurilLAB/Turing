@@ -1,5 +1,9 @@
 # 12 — Attacks by someone who knows everything (step 10, third campaign)
 
+> Numbers in this document are for version 1 (16 rounds, 17 round keys).
+> Version 2 has 24 rounds and 25 round keys (docs/13); the attacks and tools
+> are unchanged, and `bombe attack` reports the version 2 figures.
+
 Kerckhoffs's principle (doc 01): a cipher must stay secure when the
 attacker knows everything except the key. That means the source code,
 every constant, how the S-box was derived and why the matrices look the way

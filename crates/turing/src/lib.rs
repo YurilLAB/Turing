@@ -7,10 +7,27 @@ pub mod cipher;
 pub mod gf;
 pub mod keyschedule;
 pub mod linear;
+pub mod masked;
+pub mod memory;
+pub mod random;
 pub mod sbox;
 pub mod selftest;
+pub mod shield;
 pub mod structure;
 pub mod xof;
 
 pub use cipher::{Block, FaultDetected, Turing};
+pub use masked::MaskedTuring;
+pub use random::RandomnessError;
+pub use shield::ShieldedKey;
 pub use selftest::{self_test, SelfTestError};
+
+// Every type that holds a key can move to another thread and be shared:
+// the ones used through `&self` are safe to call concurrently, and
+// MaskedTuring needs `&mut` for every call (docs/13).
+const _: () = {
+    const fn send_sync<T: Send + Sync>() {}
+    send_sync::<Turing>();
+    send_sync::<MaskedTuring>();
+    send_sync::<ShieldedKey>();
+};

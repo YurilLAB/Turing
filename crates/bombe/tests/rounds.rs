@@ -97,18 +97,18 @@ fn impossible_witnesses_have_no_trail() {
 #[test]
 fn turing_layer_schedule() {
     use turing::structure::{layer, schedule, ROUNDS, ROUND_KEYS};
-    assert_eq!((ROUNDS, ROUND_KEYS), (16, 17));
+    assert_eq!((ROUNDS, ROUND_KEYS), (24, 25));
     assert_eq!(layer(0), None);
     assert_eq!(layer(ROUNDS), None, "the last round has no linear layer");
     assert_eq!(layer(1), Some(M), "MixState first");
     assert_eq!(layer(ROUNDS - 1), Some(M), "and last");
     let s = schedule();
     assert!(s.windows(2).all(|w| w[0] != w[1]), "the layers alternate");
-    assert_eq!(s.iter().filter(|&&l| l == M).count(), 8);
+    assert_eq!(s.iter().filter(|&&l| l == M).count(), 12);
 }
 
 // The measured security of the chosen structure, over every window of
-// consecutive rounds inside the 16-round cipher.
+// consecutive rounds inside the 24-round cipher.
 #[test]
 fn turing_structure_bounds() {
     let s = turing::structure::schedule();
@@ -119,10 +119,13 @@ fn turing_structure_bounds() {
     assert_eq!(e.impossible, 4);
     assert_eq!(e.diffusion, Some(3));
     assert_eq!(e.aes_like_run, 1);
-    // The whole cipher: the 16 rounds split into 8 pairs (1-2, 3-4, ...),
+    // The whole cipher: the 24 rounds split into 12 pairs (1-2, 3-4, ...),
     // each around one MixState layer, so the two-round theorem gives
-    // 8 x 17 = 136; the bounder shows that is also the exact minimum.
-    assert_eq!(trail::weakest_window(&s, 16), 136);
+    // 12 x 17 = 204; the bounder shows that is also the exact minimum.
+    assert_eq!(trail::weakest_window(&s, 24), 204);
+    // Version 1's 16 rounds, now a window that can start on either layer: a
+    // window starting with ShiftRows+MixColumns holds one pair fewer.
+    assert_eq!(trail::weakest_window(&s, 16), 121);
 }
 
 // The round-count rule (docs/09): the longest attack we can build from these
@@ -172,4 +175,44 @@ fn trail_exists(layers: &[Layer], input: u32, output: u32) -> bool {
         reachable = next;
     }
     reachable[output as usize]
+}
+
+// The propagation rules are sound on real differences, including patterns
+// that mix certain and unknown bytes (which the search itself rarely
+// builds): a concrete difference that fits the input pattern always fits
+// the predicted output, through Turing's real layers in both directions,
+// and `consistent` never rules out a transition that really happens.
+#[test]
+fn truncated_rules_hold_for_real_differences() {
+    use bombe::rng::Rng;
+    let mut rng = Rng::new("truncated soundness");
+    let fits = |t: Trunc, d: &[u8; 16]| (0..16).all(|i| (t.nz >> i & 1 == 0 || d[i] != 0) && (t.z >> i & 1 == 0 || d[i] == 0));
+    for _ in 0..20_000 {
+        let (mut nz, mut z) = (0u32, 0u32);
+        for i in 0..16 {
+            match rng.below(3) {
+                0 => nz |= 1 << i,
+                1 => z |= 1 << i,
+                _ => {}
+            }
+        }
+        let t = Trunc { nz, z };
+        for layer in [A, M] {
+            let (ahead, behind) = (impossible::forward(layer, t), impossible::backward(layer, t));
+            for _ in 0..4 {
+                let d: [u8; 16] = std::array::from_fn(|i| match (nz >> i & 1, z >> i & 1) {
+                    (1, _) => 1 + rng.below(255) as u8,
+                    (_, 1) => 0,
+                    _ if rng.below(2) == 0 => 0,
+                    _ => rng.below(256) as u8,
+                });
+                let y = turing::linear::apply_layer(layer, &d);
+                assert!(fits(ahead, &y), "forward {layer:?}: {t:?} -> {ahead:?}, but {d:02x?} -> {y:02x?}");
+                let x = turing::linear::invert_layer(layer, &d);
+                assert!(fits(behind, &x), "backward {layer:?}: {t:?} -> {behind:?}, but {d:02x?} <- {x:02x?}");
+                let definite = |v: &[u8; 16]| Trunc::definite((0..16).filter(|&i| v[i] != 0).fold(0, |p, i| p | 1 << i));
+                assert!(impossible::consistent(layer, t, definite(&y)), "consistent rejects a real transition");
+            }
+        }
+    }
 }

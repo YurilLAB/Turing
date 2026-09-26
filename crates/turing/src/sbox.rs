@@ -23,10 +23,10 @@ pub const A_OUT: Affine = Affine::new(constants::OUT_ROWS, constants::OUT_CONST)
 const A_IN_INV: Affine = Affine::new(constants::IN_INV_ROWS, constants::IN_INV_CONST);
 const A_OUT_INV: Affine = Affine::new(constants::OUT_INV_ROWS, constants::OUT_INV_CONST);
 
-const A_IN_8: Affine8 = Affine8::new(&A_IN);
-const A_OUT_8: Affine8 = Affine8::new(&A_OUT);
-const A_IN_INV_8: Affine8 = Affine8::new(&A_IN_INV);
-const A_OUT_INV_8: Affine8 = Affine8::new(&A_OUT_INV);
+pub(crate) const A_IN_8: Affine8 = Affine8::new(&A_IN);
+pub(crate) const A_OUT_8: Affine8 = Affine8::new(&A_OUT);
+pub(crate) const A_IN_INV_8: Affine8 = Affine8::new(&A_IN_INV);
+pub(crate) const A_OUT_INV_8: Affine8 = Affine8::new(&A_OUT_INV);
 
 /// S(x) for one byte, constant-time. The reference the fast version is
 /// checked against.

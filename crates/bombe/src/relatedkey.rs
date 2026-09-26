@@ -1,7 +1,7 @@
 //! Related-key experiments: what an attacker who can ask for encryptions
 //! under K and K ^ Delta (the 2009 AES-256 attack model) actually gets.
 //! The attack needs round-key differences it can predict; here every
-//! one-bit key difference is traced into all 17 round keys, with and without
+//! one-bit key difference is traced into all 25 round keys, with and without
 //! the cSHAKE256 whitening in front of the Feistel stage.
 
 use crate::rng::Rng;
@@ -47,7 +47,7 @@ fn summarise(label: &'static str, weights: &[u32]) -> RoundKeyDiffs {
 }
 
 /// Flip each of the 256 key bits of `keys` random keys: round-key
-/// difference weights over all 17 round keys.
+/// difference weights over all 25 round keys.
 pub fn master_key_bits(keys: usize, label: &str) -> RoundKeyDiffs {
     let mut rng = Rng::new(label);
     let mut weights = Vec::new();

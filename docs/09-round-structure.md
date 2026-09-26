@@ -1,16 +1,17 @@
-# 09 — Round structure and round count (step 7)
+# 09 — Round structure and round count (step 7; version 2 in step 10)
 
 ## The round
 
-Encryption adds round key 0, then runs 16 rounds. Each round is:
+Encryption adds round key 0, then runs 24 rounds (version 2; version 1
+had 16). Each round is:
 
 1. the S-box layer (16 S-boxes),
-2. a linear layer, **MixState in odd rounds (1, 3, …, 15)** and
-   **ShiftRows + MixColumns in even rounds (2, 4, …, 14)**, none in round 16,
+2. a linear layer, **MixState in odd rounds (1, 3, …, 23)** and
+   **ShiftRows + MixColumns in even rounds (2, 4, …, 22)**, none in round 24,
 3. the round key.
 
-That makes 17 round keys and 8 MixState layers. It is defined in
-`crates/turing/src/structure.rs`.
+That makes 25 round keys and 12 MixState layers. It is defined in
+`crates/turing/src/structure.rs`, which also fixes 24 as the maximum.
 
 The last round has no linear layer for the same reason AES drops its last
 MixColumns: a public linear map after the final key addition can be undone by
@@ -83,7 +84,9 @@ consecutive rounds anywhere in the cipher:
 
 "to 22" and "to 43" are the rounds after which every window has at least 22
 active S-boxes (probability ≤ 2^-132) or 43 (≤ 2^-258). Cost counts field
-multiplications in the constant-time code.
+multiplications in the constant-time code. For version 2's 24 rounds
+(`rounds` with no argument) the window figures are the same and every cost
+grows by half: Turing 10304 against 8000 for the AES-like structure.
 
 What the table shows:
 
@@ -105,7 +108,8 @@ What the table shows:
 ### Why MixState in the odd rounds
 
 Odd-round and even-round alternation have identical bounds. Odd rounds put
-MixState in round 1 and round 15, the last linear layer. An attack extended
+MixState in round 1 and in the last linear layer (round 15 in version 1,
+23 in version 2). An attack extended
 by a round at either end then has to guess a whole 16-byte round key to
 follow one active byte, instead of one 4-byte column. It costs one more
 MixState layer.
@@ -122,17 +126,24 @@ MixState layer.
 | 6 | 36 | ≤ 2^-216 |
 | 7 | 52 | ≤ 2^-312 |
 | 8 | 53 | ≤ 2^-318 |
-| 16 (whole cipher) | 136 | ≤ 2^-816 |
+| 16 (version 1's whole cipher) | 136 | ≤ 2^-816 |
+| 16 (weakest window of version 2) | 121 | ≤ 2^-726 |
+| 24 (version 2's whole cipher) | 204 | ≤ 2^-1224 |
 
-For the whole cipher, the 16 rounds split into 8 pairs, each around one
-MixState, so the two-round theorem gives 8 × 17 = 136. The bounder confirms
+For the whole cipher, the 24 rounds split into 12 pairs, each around one
+MixState, so the two-round theorem gives 12 × 17 = 204. The bounder confirms
 that is the exact minimum. Differential and linear bounds are the same.
 
 - Longest impossible differential: 4 rounds.
 - Full diffusion: every output byte depends on every input byte after 3
   rounds (2 starting from a MixState round).
 
-## Round count: 16
+## Round count: 16, then 24
+
+Version 1 chose 16 by the rule below. Version 2 raised it to 24 (docs/13):
+the published ways to make the S-box less algebraic weakened it on every
+other count, so the extra strength comes from rounds, with 24 fixed as the
+maximum. The rule:
 
 1. A differential or linear distinguisher is usable only if its trail
    probability is above 2^-128, since the attacker cannot get more than the
@@ -145,10 +156,11 @@ that is the exact minimum. Differential and linear bounds are the same.
    both ends makes each of those rounds cost a full 16-byte key guess.
 4. So the longest attack these techniques can build is max(3, 4) + 4 =
    **8 rounds**.
-5. Turing has **twice that: 16 rounds**, more than AES-256's 14.
+5. Version 1 had **twice that: 16 rounds**, more than AES-256's 14.
+   Version 2 has **three times that: 24 rounds**.
 
 Cross-check: even trails that a 2^256 budget could not use (≥ 43 active
-S-boxes) run out after 7 rounds, and 7 + 4 = 11 is well below 16.
+S-boxes) run out after 7 rounds, and 7 + 4 = 11 is well below 16, let alone 24.
 
 For comparison, the best single-key attacks on AES-256 reach 9 of its 14
 rounds with practical-model meet-in-the-middle techniques, and 10 rounds with
@@ -181,9 +193,10 @@ is there for them.
 
 ## Cost
 
-In the constant-time code (field multiplications, each 8 steps), a 16-round
-Turing encryption costs 6848 units against 5312 for an AES-like 16-round
-structure: 29% more for 50–100% more active S-boxes in 3–7 round windows.
+In the constant-time code (field multiplications, each 8 steps), a 24-round
+Turing encryption costs 10304 units against 8000 for an AES-like 24-round
+structure (16 rounds: 6848 against 5312): 29% more for 50–100% more active
+S-boxes in 3–7 round windows.
 
 ## Sources
 

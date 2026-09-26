@@ -6,6 +6,8 @@ description = "Turing: an experimental 128-bit block cipher with a 256-bit key"
 publish = false
 
 [dependencies]
+getrandom = "0.4.3"
+keccak = "0.1.6"
 sha3 = { version = "0.10", features = ["zeroize"] }
 zeroize = "1.9.0"
 
@@ -13,3 +15,9 @@ zeroize = "1.9.0"
 # Reduced-round encryption and round-key access, for the Bombe analysis
 # workbench only. A normal build of the cipher cannot expose round keys.
 analysis = []
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Memory", "Win32_Foundation"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"

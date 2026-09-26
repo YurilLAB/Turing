@@ -1,6 +1,6 @@
-//! The Turing block cipher: 128-bit block, 256-bit key, 16 rounds.
+//! The Turing block cipher, version 2: 128-bit block, 256-bit key, 24 rounds.
 //!
-//! Encryption: XOR round key 0, then for rounds r = 1..=16: the S-box layer,
+//! Encryption: XOR round key 0, then for rounds r = 1..=24: the S-box layer,
 //! the round's linear layer (none in the last round), and round key r.
 //! Decryption runs the same steps backwards with the inverse layers.
 //!
@@ -43,15 +43,34 @@ fn checked(block: &mut Block, forward: impl Fn(&mut Block), backward: impl Fn(&m
     }
 }
 
-/// A Turing key, expanded into its 17 round keys. The round keys are wiped
+/// A Turing key, expanded into its 25 round keys. The round keys are wiped
 /// from memory when this is dropped.
 pub struct Turing {
     keys: RoundKeys<ROUND_KEYS>,
 }
 
 impl Turing {
+    /// Expands the key into round keys in their own locked memory, then
+    /// overwrites the stack the key schedule used (memory.rs).
     pub fn new(key: &[u8; 32]) -> Turing {
+        let t = Turing::expanded(key);
+        crate::memory::burn_stack();
+        t
+    }
+
+    /// The key schedule alone. Never inlined, so `new` and
+    /// `new_without_stack_burn` run the same machine code and differ only in
+    /// the burn that follows.
+    #[inline(never)]
+    fn expanded(key: &[u8; 32]) -> Turing {
         Turing { keys: keyschedule::expand(key) }
+    }
+
+    /// `new` without the stack burn, so Bombe can show what the key schedule
+    /// leaves behind. Analysis builds only (feature `analysis`).
+    #[cfg(feature = "analysis")]
+    pub fn new_without_stack_burn(key: &[u8; 32]) -> Turing {
+        Turing::expanded(key)
     }
 
     pub fn encrypt_block(&self, block: &mut Block) {
@@ -62,20 +81,81 @@ impl Turing {
         self.decrypt_n(block, ROUNDS);
     }
 
-    /// Encrypts, then decrypts the result and compares it with the input. A
-    /// transient fault in either computation (a voltage or clock glitch,
-    /// Plundervolt-style undervolting) makes them disagree, and the faulty
-    /// ciphertext is wiped instead of released: the countermeasure to
-    /// differential fault analysis (docs/11). Costs twice encrypt_block. It
-    /// cannot catch a persistent fault in the stored round keys, which
-    /// corrupts both directions alike.
+    /// Checks the stored round keys against their checksum, encrypts, decrypts
+    /// the result and compares it with the input, then checks the round keys
+    /// again. A transient fault in either computation (a voltage or clock
+    /// glitch, Plundervolt-style undervolting) makes the two disagree; a
+    /// persistent one in the stored round keys (a Rowhammer flip), which
+    /// would corrupt both directions alike, fails a checksum. Either way the
+    /// block is wiped instead of released (docs/11, 13). Costs a little over
+    /// twice encrypt_block.
     pub fn encrypt_block_checked(&self, block: &mut Block) -> Result<(), FaultDetected> {
-        checked(block, |b| self.encrypt_block(b), |b| self.decrypt_block(b))
+        self.guarded(block, true, || {})
     }
 
-    /// The same for decryption: decrypts, re-encrypts and compares.
+    /// The same for decryption: checks the keys, decrypts, re-encrypts,
+    /// compares and checks the keys again.
     pub fn decrypt_block_checked(&self, block: &mut Block) -> Result<(), FaultDetected> {
-        checked(block, |b| self.decrypt_block(b), |b| self.encrypt_block(b))
+        self.guarded(block, false, || {})
+    }
+
+    /// The checked calls. The second key check closes a time-of-check to
+    /// time-of-use gap: a round key that flips after the first check, before
+    /// the computation reads it, corrupts both directions alike, passes
+    /// decrypt-and-compare and would release a block computed under a wrong
+    /// key. A flip at any time between the two checks now fails the second.
+    /// `between` runs right after the first check; outside Bombe's fault
+    /// tests it does nothing.
+    fn guarded(&self, block: &mut Block, encrypt: bool, between: impl FnOnce()) -> Result<(), FaultDetected> {
+        if !self.keys.intact() {
+            block.zeroize();
+            return Err(FaultDetected);
+        }
+        between();
+        let result = if encrypt {
+            checked(block, |b| self.encrypt_block(b), |b| self.decrypt_block(b))
+        } else {
+            checked(block, |b| self.decrypt_block(b), |b| self.encrypt_block(b))
+        };
+        if result.is_err() || !self.keys.intact() {
+            block.zeroize();
+            return Err(FaultDetected);
+        }
+        Ok(())
+    }
+
+    /// `encrypt_block_checked` with `between` run after the first key check,
+    /// where Bombe injects a fault to test the second one. Analysis builds
+    /// only (feature `analysis`).
+    #[cfg(feature = "analysis")]
+    pub fn encrypt_block_checked_with(&self, block: &mut Block, between: impl FnOnce()) -> Result<(), FaultDetected> {
+        self.guarded(block, true, between)
+    }
+
+    /// Flips one bit of a stored round key through the allocation's raw
+    /// pointer, so it can be called with only `&self`: a fault that strikes
+    /// while the cipher is in use. Analysis builds only.
+    ///
+    /// # Safety
+    /// No reference into the round keys may be alive: call it only from the
+    /// `between` hook of `encrypt_block_checked_with`, or while no other
+    /// method of this cipher is running.
+    #[cfg(feature = "analysis")]
+    pub unsafe fn flip_round_key_bit_in_use(&self, round: usize, bit: usize) {
+        self.keys.flip_bit_raw(round, bit);
+    }
+
+    /// Whether the operating system locked the round keys' memory out of the
+    /// page file (docs/13).
+    pub fn keys_locked(&self) -> bool {
+        self.keys.locked()
+    }
+
+    /// Flips one bit of a stored round key, as a Rowhammer-style fault would.
+    /// Analysis builds only (feature `analysis`).
+    #[cfg(feature = "analysis")]
+    pub fn flip_round_key_bit(&mut self, round: usize, bit: usize) {
+        self.keys.flip_bit(round, bit);
     }
 
     /// The first `rounds` rounds only, with the last of them missing its
@@ -93,7 +173,7 @@ impl Turing {
         self.decrypt_n(block, rounds);
     }
 
-    /// Round key `index` (0..=16), for the round tracer and attack
+    /// Round key `index` (0..=ROUNDS), for the round tracer and attack
     /// experiments. Analysis builds only.
     #[cfg(feature = "analysis")]
     pub fn round_key(&self, index: usize) -> &Block {
@@ -166,6 +246,52 @@ mod tests {
 
     // Faults are injected into the forward or the backward computation; both
     // must be caught, and the faulty output must not be released.
+    // A bit flipped in a stored round key (Rowhammer) corrupts encryption and
+    // decryption alike, so decrypt-and-compare cannot see it; the checksum
+    // does, for every round key and every bit position tried.
+    #[test]
+    fn checked_calls_catch_corrupted_round_keys() {
+        for round in [0, 1, 12, ROUNDS] {
+            for bit in [0, 63, 127] {
+                let mut t = Turing::new(&key(7));
+                t.keys.flip_bit(round, bit);
+                let mut block = [0x55u8; 16];
+                let mut plain = block;
+                t.encrypt_block(&mut plain);
+                let mut back = plain;
+                t.decrypt_block(&mut back);
+                assert_eq!(back, block, "the corrupted key still inverts itself");
+                assert_eq!(t.encrypt_block_checked(&mut block), Err(FaultDetected));
+                assert_eq!(block, [0u8; 16]);
+                let mut c = [0x66u8; 16];
+                assert_eq!(t.decrypt_block_checked(&mut c), Err(FaultDetected));
+            }
+        }
+        assert!(Turing::new(&key(7)).keys_locked() || cfg!(not(windows)));
+    }
+
+    // A round key that flips after the first check, inside `between`, passes
+    // decrypt-and-compare because both directions read the flipped key; the
+    // second check catches it.
+    #[test]
+    fn a_key_flip_between_check_and_use_is_caught() {
+        for (round, bit) in [(0, 5), (13, 64), (ROUNDS, 127)] {
+            let t = Turing::new(&key(8));
+            let mut expected = [0x21u8; 16];
+            t.encrypt_block(&mut expected);
+            let mut block = [0x21u8; 16];
+            // SAFETY: no reference into the round keys is alive in `between`.
+            let result = t.guarded(&mut block, true, || unsafe { t.keys.flip_bit_raw(round, bit) });
+            assert_eq!(result, Err(FaultDetected));
+            assert_eq!(block, [0u8; 16], "wiped, not released");
+            // Control: decrypt-and-compare alone passes the flipped key and
+            // releases a ciphertext under the wrong key.
+            let mut c = [0x21u8; 16];
+            assert_eq!(checked(&mut c, |b| t.encrypt_block(b), |b| t.decrypt_block(b)), Ok(()));
+            assert_ne!(c, expected);
+        }
+    }
+
     #[test]
     fn checked_calls_catch_faults() {
         let t = Turing::new(&key(6));
@@ -202,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn full_cipher_is_sixteen_rounds() {
+    fn full_cipher_runs_every_round() {
         let t = Turing::new(&key(1));
         let mut a = [0x42u8; 16];
         let mut b = a;

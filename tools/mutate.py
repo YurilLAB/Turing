@@ -5,10 +5,12 @@ tests caught it and always restores the original file (and verifies it). A
 test run that exceeds the time limit has not passed either: it counts as
 caught, and the whole process tree is killed.
 
-    python tools/mutate.py [--step8 | --step9 | --round3] [--check] [NAME ...]
+    python tools/mutate.py [--step8 | --step9 | --round3 | --round4] [--check] [NAME ...]
 
 --check only verifies that every pattern still matches the current code
 exactly once, without running any tests. NAME filters mutations by name.
+Test arguments that start with "--wsl" run the tests on Linux in WSL
+(tools/wsl_linux.py), for the Linux-only code paths.
 """
 import os
 import pathlib
@@ -185,9 +187,96 @@ MUTATIONS = [
     ("structure: MixState in even rounds", "crates/turing/src/structure.rs",
      "} else if round % 2 == 1 {", "} else if round % 2 == 0 {",
      ["-p", "bombe", "--test", "rounds"]),
-    ("structure: 14 rounds", "crates/turing/src/structure.rs",
-     "pub const ROUNDS: usize = 16;", "pub const ROUNDS: usize = 14;",
+    ("structure: 22 rounds", "crates/turing/src/structure.rs",
+     "pub const ROUNDS: usize = 24;", "pub const ROUNDS: usize = 22;",
      ["-p", "bombe", "--test", "rounds"]),
+]
+
+TURING = ["-p", "turing", "--lib"]
+MUTATIONS_ROUND4 = [
+    # Keys in memory
+    ("memory: key pages not locked", "crates/turing/src/memory.rs",
+     "let locked = unsafe { VirtualLock(ptr.as_ptr().cast(), size) } != 0;", "let locked = false;",
+     TURING),
+    ("memory: drop skips the wipe", "crates/turing/src/memory.rs",
+     "        (**self).zeroize();\n        // SAFETY: the value's bytes", "        // SAFETY: the value's bytes",
+     TURING),
+    ("memory: burn_stack writes nothing", "crates/turing/src/memory.rs",
+     "        unsafe { words.add(i).write_volatile(0) };", "        let _ = unsafe { words.add(i) };",
+     TURING),
+    ("memory: burn covers 1 KB", "crates/turing/src/memory.rs",
+     "pub const BURN_BYTES: usize = 32 * 1024;", "pub const BURN_BYTES: usize = 1024;",
+     ["-p", "bombe", "--release", "--test", "memory", "--", "--test-threads=1"]),
+    ("memory (Linux): pages left in core dumps", "crates/turing/src/memory.rs",
+     "            libc::madvise(raw, size, libc::MADV_DONTDUMP);\n", "",
+     ["--wsl", "-p", "turing", "--lib"]),
+    ("memory (Linux): pages not wiped on fork", "crates/turing/src/memory.rs",
+     "                libc::madvise(raw, size, libc::MADV_WIPEONFORK);", "",
+     ["--wsl", "-p", "turing", "--lib"]),
+    # Randomness
+    ("random: seed left in the stream state", "crates/turing/src/random.rs",
+     "        keccak::f1600(&mut st.lanes);\n        st.block.zeroize();", "        keccak::f1600(&mut st.lanes);",
+     TURING),
+    ("random: stream padded like SHA-3 instead of cSHAKE", "crates/turing/src/random.rs",
+     "st.lanes[SEED_BYTES / 8] ^= 0x04 << (8 * (SEED_BYTES % 8));", "st.lanes[SEED_BYTES / 8] ^= 0x06 << (8 * (SEED_BYTES % 8));",
+     TURING),
+    ("random: check_fork never reseeds", "crates/turing/src/random.rs",
+     "if self.state.seeded == 0 || self.state.pid != u64::from(std::process::id()) {", "if false {",
+     TURING),
+    ("random (Linux): a wiped state is not reseeded", "crates/turing/src/random.rs",
+     "        if self.state.seeded == 0 {\n            self.check_fork();\n        }", "",
+     ["--wsl", "-p", "turing", "--lib"]),
+    ("random: new_key is the raw OS seed", "crates/turing/src/random.rs",
+     "    crate::xof::cshake256_secret(KEY_LABEL, seed, &mut key[..]);", "    key.copy_from_slice(&seed[..32]);",
+     TURING),
+    # Masking
+    ("masked: key shares not re-randomised per call", "crates/turing/src/masked.rs",
+     "        self.stream.check_fork();\n        self.refresh();\n        let mask = halves(&self.stream.block());\n        let data = halves(block);\n        let mut st = State { s: [[data[0] ^ mask[0], data[1] ^ mask[1]], mask] };\n        st.add_key(&self.shares, 0);",
+     "        self.stream.check_fork();\n        let mask = halves(&self.stream.block());\n        let data = halves(block);\n        let mut st = State { s: [[data[0] ^ mask[0], data[1] ^ mask[1]], mask] };\n        st.add_key(&self.shares, 0);",
+     TURING),
+    ("masked: no fork check before encrypting", "crates/turing/src/masked.rs",
+     "    fn encrypt_inner(&mut self, block: &mut Block, mut probe: Probe) {\n        self.stream.check_fork();", "    fn encrypt_inner(&mut self, block: &mut Block, mut probe: Probe) {",
+     TURING),
+    ("masked: SecMult forms the unmasked product (same output)", "crates/turing/src/masked.rs",
+     "    let r10 = cross ^ mul(a.1, b.0);", "    let r10 = r ^ mul(a.0 ^ a.1, b.0 ^ b.1) ^ mul(a.0, b.0) ^ mul(a.1, b.1);",
+     ["-p", "bombe", "--release", "--test", "leakage", "intermediate"]),
+    ("masked: SecExp254 skips the first refresh (same output)", "crates/turing/src/masked.rs",
+     "    let z = refresh(square(x), stream); // x^2", "    let z = square(x); // x^2",
+     ["-p", "bombe", "--release", "--test", "leakage", "intermediate"]),
+    ("masked: S-box output recombined, then re-shared as (y, 0) (same output)", "crates/turing/src/masked.rs",
+     "    noted((map_out.apply(y.0), map_out.apply(y.1) ^ map_out.apply(0)))", "    noted((map_out.apply(y.0 ^ y.1), 0))",
+     ["-p", "bombe", "--release", "--test", "leakage"]),
+    # Shielding
+    ("shield: refresh does not re-mask", "crates/turing/src/shield.rs",
+     "        for (s, d) in self.shielded.iter_mut().zip(&delta) {\n            *s ^= d;\n        }\n", "",
+     TURING),
+    ("shield: key stored in the clear", "crates/turing/src/shield.rs",
+     "            *s = k ^ mk;", "            *s = *k;",
+     TURING),
+    # Integrity and time of check to time of use
+    ("cipher: no key check after the computation", "crates/turing/src/cipher.rs",
+     "        if result.is_err() || !self.keys.intact() {", "        if result.is_err() {",
+     TURING),
+    ("masked: no share check after the computation", "crates/turing/src/masked.rs",
+     "        if diff != 0 || !self.intact() {", "        if diff != 0 {",
+     TURING),
+    ("checksum: last round key left out", "crates/turing/src/keyschedule.rs",
+     "keys.iter().rev().fold(0u128,", "keys[..keys.len() - 1].iter().rev().fold(0u128,",
+     TURING),
+    ("checksum: multiplication by x without reduction", "crates/turing/src/keyschedule.rs",
+     "    (v << 1) ^ (0u128.wrapping_sub(v >> 127) & 0x87)", "    v << 1",
+     TURING),
+    # The attackers themselves
+    ("memscan: fragments never match", "crates/bombe/src/memscan.rs",
+     "        let masked = window ^ self.pad;", "        let masked = window;",
+     ["-p", "bombe", "--release", "--test", "memory", "--", "--test-threads=1"]),
+    ("memscan: the setup thread is scanned after it moves on", "crates/bombe/src/memscan.rs",
+     "            out.push(at_step(step, stack));\n            parker.release.store(step, Ordering::Release);",
+     "            parker.release.store(step, Ordering::Release);\n            out.push(at_step(step, stack));",
+     ["-p", "bombe", "--release", "--test", "memory", "--", "--test-threads=1"]),
+    ("leakage: CPA predicts with the inverse S-box", "crates/bombe/src/leakage.rs",
+     "let s = sbox::TABLE[v ^ k as usize];", "let s = turing::sbox::inv_sub((v ^ k as usize) as u8);",
+     ["-p", "bombe", "--release", "--test", "leakage"]),
 ]
 
 
@@ -202,7 +291,10 @@ def kill_tree(p):
 def run(args):
     # No -q: the default output prints one "test <name> ... FAILED" line per
     # failing test, which is what tells us which test caught the bug.
-    cmd = ["cargo", "test", *args]
+    if args and args[0] == "--wsl":
+        cmd = [sys.executable, str(ROOT / "tools" / "wsl_linux.py"), "test", *args[1:]]
+    else:
+        cmd = ["cargo", "test", *args]
     group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **group)
     try:
@@ -218,7 +310,7 @@ def run(args):
 
 
 def main():
-    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3}
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4}
     check_only = "--check" in sys.argv
     only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
     mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)

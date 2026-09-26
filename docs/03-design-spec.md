@@ -19,7 +19,9 @@ schedule, round count, AEAD) are filled in by steps 4–9.
   end. The file format reserves space for them (versioned header).
 - Constants and key-derived values: **cSHAKE256** (NIST SP 800-185) with the
   input as X and an ASCII label of the form `"Turing v1 <purpose>"` as the
-  customization string S (`crates/turing/src/xof.rs`). cSHAKE encodes the
+  customization string S (`crates/turing/src/xof.rs`); version 2 renamed
+  the key-schedule labels to `"Turing v2 ..."` (docs/13), while the S-box
+  and matrices keep the v1 labels they were generated with. cSHAKE encodes the
   label's length, so no two labels can ever produce the same hash input;
   plain SHAKE256(label || input), used until step 7, only had that property
   because the lengths happened to differ. It produces any output length, so
@@ -35,8 +37,10 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 | S-box | A_out∘inv∘A_in over GF(2^8), affine layers from cSHAKE256 (docs/05) | Best known 8-bit strength, reproducible constants |
 | Linear layer | 16×16 Cauchy MixState (branch 17) in odd rounds, ShiftRows + 4×4 Cauchy MixColumns (branch 5) in even rounds, none in the last (docs/06, 09) | Guarantees active S-boxes |
 | Key schedule | cSHAKE256 whitening, then a Feistel of S-box + MixState rounds with feed-forward, 13 warm-up rounds (docs/07) | Every round key sits behind >= 53 active S-boxes; no local collisions |
-| Rounds | 16 (docs/09) | Twice the longest attack our tools can build (8 rounds); AES-256 uses 14 |
-| Implementation | Constant-time, no secret-indexed table lookups | Cache-timing side channels |
+| Rounds | 24 (version 2; docs/09, 13); 24 is the maximum | Three times the longest attack our tools can build (8 rounds); AES-256 uses 14 |
+| Implementation | Constant-time, no secret-indexed table lookups (checked in the release assembly) | Cache-timing side channels |
+| Keys in memory | Round keys in locked, dump-excluded pages with an integrity checksum, checked before and after every checked call; stack burned after key setup (docs/13) | Cold boot, crash dumps, RAMBleed; Rowhammer faults |
+| Masked variant | `MaskedTuring`: first-order Boolean masking, round-key shares re-randomised every call (docs/13) | Power, EM and frequency side channels |
 
 ### S-box acceptance criteria (checked by our step 3 tools)
 
@@ -66,7 +70,12 @@ constants that turned out to enable a backdoor.
 
 ## Layer 2: file encryption
 
-- Each file gets a fresh random 256-bit **file key** from the OS CSPRNG.
+- Each file gets a fresh random 256-bit **file key** from
+  `turing::random::new_key` (cSHAKE256 of a 64-byte OS seed: raw OS output
+  can leave a copy in the generator's memory, docs/13).
+- Each chunk is read into private memory once, its tag verified on that
+  copy, and that same copy decrypted; no plaintext is released before its
+  tag verifies (docs/13, section 8).
 - Data is split into chunks (e.g. 64 KiB). Each chunk is encrypted and
   authenticated with a Turing-based AEAD, using a nonce that encodes the chunk
   counter and a "last chunk" flag (STREAM construction). This prevents

@@ -15,11 +15,11 @@
 //! proved is the limit for S-box-independent impossible differentials.
 
 use crate::trail::{shift_rows_pattern, Layer};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// What is certain about each byte of a difference: bits of `nz` are
 /// non-zero bytes, bits of `z` are zero bytes, the rest are unknown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Trunc {
     pub nz: u32,
     pub z: u32,
@@ -129,16 +129,26 @@ pub struct Witness {
 
 pub fn find(layers: &[Layer]) -> Option<Witness> {
     let m = layers.len();
-    // Distinct states at each S-box layer, each with one pattern producing it.
-    let definite: HashMap<Trunc, u32> = (1..=ALL).map(|p| (Trunc::definite(p), p)).collect();
+    // Distinct states at each S-box layer, each with the smallest pattern
+    // producing it. Ordered maps, so the witness reported is the same on
+    // every run (a HashMap's order is randomised per process).
+    let definite: BTreeMap<Trunc, u32> = (1..=ALL).map(|p| (Trunc::definite(p), p)).collect();
+    let step = |from: &BTreeMap<Trunc, u32>, f: &dyn Fn(Trunc) -> Trunc| {
+        let mut next = BTreeMap::new();
+        for (&t, &p) in from {
+            let e = next.entry(f(t)).or_insert(p);
+            *e = (*e).min(p);
+        }
+        next
+    };
     let mut fw = vec![definite.clone()];
     for &layer in layers {
-        let next = fw.last().unwrap().iter().map(|(&t, &p)| (forward(layer, t), p)).collect();
+        let next = step(fw.last().unwrap(), &|t| forward(layer, t));
         fw.push(next);
     }
     let mut bw = vec![definite];
     for &layer in layers.iter().rev() {
-        let next = bw.last().unwrap().iter().map(|(&t, &q)| (backward(layer, t), q)).collect();
+        let next = step(bw.last().unwrap(), &|t| backward(layer, t));
         bw.push(next);
     }
     bw.reverse();

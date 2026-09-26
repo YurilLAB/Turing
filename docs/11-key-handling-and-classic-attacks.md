@@ -1,5 +1,9 @@
 # 11 — Key handling, and the attacks that broke other ciphers (step 10, second campaign)
 
+> Numbers in this document are for version 1 (16 rounds, 17 round keys).
+> Version 2 has 24 rounds and 25 round keys (docs/13); the attacks and tools
+> are unchanged, and `bombe attack` reports the version 2 figures.
+
 Two questions for this round. How safely does the implementation handle keys?
 And does Turing survive the attacks that broke real ciphers: MISTY1,
 COCONUT98, Trivium variants, AES-256's key schedule, PRINTcipher, Midori-64,

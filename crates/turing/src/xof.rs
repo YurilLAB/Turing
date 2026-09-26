@@ -2,12 +2,15 @@
 //!
 //! All derivations use cSHAKE256 from NIST SP 800-185 with the function name
 //! N empty (reserved for NIST) and the customization string S set to a
-//! "Turing v1 ..." label. cSHAKE encodes S with its length before the input,
-//! so two derivations with different labels can never be fed the same bytes,
-//! whatever the input lengths. Plain SHAKE256(label || input) only has that
-//! property while every label/input combination happens to differ in length.
+//! "Turing v1 ..." label (the S-box and matrices) or a "Turing v2 ..." one
+//! (the key schedule, key generation, masks and key shielding, docs/13).
+//! cSHAKE encodes S with its length before the input, so two derivations
+//! with different labels can never be fed the same bytes, whatever the input
+//! lengths. Plain SHAKE256(label || input) only has that property while
+//! every label/input combination happens to differ in length.
 
-use sha3::digest::core_api::{Buffer, CoreWrapper, ExtendableOutputCore, XofReaderCore};
+use sha3::digest::core_api::{BlockSizeUser, Buffer, CoreWrapper, ExtendableOutputCore, UpdateCore, XofReaderCore};
+use sha3::digest::generic_array::GenericArray;
 use sha3::digest::{ExtendableOutput, Update};
 use sha3::{CShake256Core, CShake256Reader};
 use zeroize::Zeroize;
@@ -25,28 +28,33 @@ pub fn cshake256(label: &str, input: &[u8]) -> CShake256Reader {
     h.finalize_xof()
 }
 
-/// The same function for secret input and output (key whitening), leaving no
-/// copy behind. The high-level API above keeps the input and the last output
-/// block in the digest crate's buffers, which are never wiped. Here the
-/// buffers are ours: the input goes into a block buffer we wipe, the output
-/// block is wiped after copying, and the Keccak state itself is wiped on
-/// drop by the sha3 crate (its `zeroize` feature, enabled in Cargo.toml).
-///
-/// Handles input shorter than one block (136 bytes) and output of at most
-/// one block, which covers a 32-byte key.
+/// The same function for secret input and output (key whitening, key
+/// shielding), leaving no copy behind. The high-level API above keeps the
+/// input and the last output block in the digest crate's buffers, which are
+/// never wiped. Here full input blocks are absorbed straight from the
+/// caller's slice (cSHAKE's buffer is "eager", so this is exactly what the
+/// high-level API does), the partial last block goes into a block buffer we
+/// wipe, every output block is wiped after copying, and the Keccak state
+/// itself is wiped on drop by the sha3 crate (its `zeroize` feature).
 pub fn cshake256_secret(label: &str, input: &[u8], out: &mut [u8]) {
     assert!(!label.is_empty(), "cSHAKE label must not be empty");
     let mut core = CShake256Core::new(label.as_bytes());
-    let mut buffer = Buffer::<CShake256Core>::new(input);
+    let block_len = CShake256Core::block_size();
+    let (full, rest) = input.split_at(input.len() - input.len() % block_len);
+    for chunk in full.chunks_exact(block_len) {
+        core.update_blocks(core::slice::from_ref(GenericArray::from_slice(chunk)));
+    }
+    let mut buffer = Buffer::<CShake256Core>::new(rest);
     let mut reader = core.finalize_xof_core(&mut buffer);
-    let mut block = reader.read_block();
-    assert!(out.len() <= block.len(), "at most one block of output");
-    out.copy_from_slice(&block[..out.len()]);
-    block.as_mut_slice().zeroize();
     // SAFETY: a BlockBuffer is a byte array, a u8 position and a PhantomData:
     // no references, no Drop impl, and all zeroes is a valid (empty) buffer.
     // It is not used again.
     unsafe { zeroize::zeroize_flat_type(&mut buffer) };
+    for chunk in out.chunks_mut(block_len) {
+        let mut block = reader.read_block();
+        chunk.copy_from_slice(&block[..chunk.len()]);
+        block.as_mut_slice().zeroize();
+    }
 }
 
 #[cfg(test)]
@@ -98,14 +106,16 @@ mod tests {
     }
 
     // The wiping version computes exactly the same function, for every input
-    // length it accepts and every output length.
+    // length up to three blocks, the 16 KB shielding prekey, and output
+    // lengths within and across block boundaries.
     #[test]
     fn secret_version_matches() {
-        let data: Vec<u8> = (0..136u32).map(|i| (i * 7 + 3) as u8).collect();
-        for len in 0..136 {
-            let mut expected = [0u8; 136];
+        let data: Vec<u8> = (0..16384u32).map(|i| (i * 7 + 3) as u8).collect();
+        let lengths = (0..=409usize).chain([16384]);
+        for len in lengths {
+            let mut expected = [0u8; 300];
             cshake256("Turing v1 test", &data[..len]).read(&mut expected);
-            for out_len in [1usize, 16, 32, 135, 136] {
+            for out_len in [1usize, 16, 32, 135, 136, 137, 272, 300] {
                 let mut got = vec![0u8; out_len];
                 cshake256_secret("Turing v1 test", &data[..len], &mut got);
                 assert_eq!(got, expected[..out_len], "input {len}, output {out_len}");

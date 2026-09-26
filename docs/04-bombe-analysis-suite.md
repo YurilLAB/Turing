@@ -108,6 +108,19 @@ docs/12
 - Differential-linear distinguishers with an exact 2-round prediction.
 - `tools/mutate.py`: the planted-bug harness, now in the repository.
 
+**Version 2 and the library (step 10, fourth campaign)**, see docs/13
+- `memscan` and `residue`: a memory-dump attacker that reads every readable
+  page of the process for key fragments, with planted-key controls.
+- `leakage`: CPA on single shares and second-order CPA, and TVLA with
+  Goodwill et al.'s two-group rule on every share and on every value the
+  masked S-box computes.
+- `toctou`: key faults injected between the checksum check and use;
+  concurrency and fork(2) tests.
+- `tools/asm_branches.py --loads`: indexed memory accesses (table lookups)
+  in the release assembly.
+- `tools/wsl_linux.py`: builds for Linux on Windows and runs the tests in WSL.
+- `tools/mutate.py --round4`: 25 planted bugs in this round's code.
+
 ## Planned
 
 - Keliher and Sui's upper-bound search, to pin Turing's exact 2-round MEDP

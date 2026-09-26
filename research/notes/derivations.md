@@ -92,3 +92,49 @@ so there are 1536 + 1 − 449 = 1088 relations.
 A random function from 256 to 256 bits hits about 1 − 1/e of its range, so
 about 2^255.34 distinct K′. Collisions exist but take a cSHAKE256 collision
 (about 2^128) to find.
+
+## Masking and leakage (docs/13)
+
+**Why the centred product predicts HW(v).** With v = m ⊕ (v ⊕ m) and m
+uniform on 8 bits, write HW(m) − 4 = Σ_i (m_i − 1/2) and likewise for
+v ⊕ m. For one bit, (m_i − 1/2)((v_i ⊕ m_i) − 1/2) is +1/4 when v_i = 0
+and −1/4 when v_i = 1; bits at different positions are independent with
+zero mean. So E[(HW(m) − 4)(HW(v ⊕ m) − 4)] = Σ_i (1 − 2v_i)/4 =
+−(HW(v) − 4)/2. Prouff, Rivain and Bévan's Proposition 10 gives the same,
+−H(z)/2 plus a constant. With independent noise of variance σ² on each leak,
+the correlation with HW(v) is −1/(√2 (2 + σ²)): −0.354 without noise, −0.177
+at SNR 1 (σ² = 2), which a few thousand traces resolve among 256 guesses.
+
+**ISW at d = 1.** c0 = a0 b0 ⊕ r and c1 = a1 b1 ⊕ ((r ⊕ a0 b1) ⊕ a1 b0), so
+c0 ⊕ c1 = (a0 ⊕ a1)(b0 ⊕ b1). Share c0 is uniform because r is fresh, and
+c1 = ab ⊕ c0. Each intermediate involves at most one share of each input,
+or is masked by r. If the cross terms were summed before r is added, the
+intermediate (a0 ⊕ a1)(b0 ⊕ b1) = ab would be the secret itself: the planted
+bug the operation-level TVLA catches.
+
+**A mutant that is too weak to see.** Leaving c0 = a0 b0 unmasked keeps the
+output correct and gives c1 = v ⊕ a0 b0. A product of two uniform bytes is
+0 with probability 511/65,536 and each non-zero value with probability
+255/65,536, so E[HW(c1)] = (255 · 1024 + 256 · HW(v))/65,536, which moves by
+only 0.0039 per unit of HW(v). Fixed-versus-random classes differ by under
+0.01 against a standard deviation of 1.4: t ≈ 0.3 at 20,000 traces. It is a
+real first-order leak, but it would need millions of traces, so the planted
+recombination bug was used instead.
+
+**TVLA false alarms.** For a normal statistic, P(|t| > 4.5) = 6.8 × 10^-6. One
+group over 768 independent points raises a false alarm with probability
+about 0.5% (1.2% over 1,728 points). Goodwill et al.'s rule needs both
+groups past 4.5 in the same direction: 2 × (3.4 × 10^-6)^2 per point, under
+10^-7 over all points.
+
+## Integrity checksum (keyschedule.rs)
+
+The checksum C = Σ_i x^i · RK_i over GF(2^128) is linear. An error E_i in
+round key i changes C by Σ_i x^i · E_i. If only one E_j is non-zero, the
+change is x^j · E_j, which is non-zero because x is invertible modulo the
+irreducible polynomial x^128 + x^7 + x^2 + x + 1. Errors in several round
+keys go unseen only if Σ x^i E_i = 0 exactly. Linearity is also why the
+masked cipher can keep the checksum as shares: C(k0) ⊕ C(k1) = C(k0 ⊕ k1),
+and re-randomising both key shares with the same masks moves both sides of
+the comparison by the same amount.
+

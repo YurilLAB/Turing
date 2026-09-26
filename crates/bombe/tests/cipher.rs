@@ -48,8 +48,8 @@ fn decryption_inverts_encryption() {
 // turing crate reproduces every vector in it.
 #[test]
 fn known_answer_vectors() {
-    let committed = include_str!("../../../vectors/turing-v1.txt").replace("\r\n", "\n");
-    assert_eq!(refcipher::render_vectors(), committed, "vectors/turing-v1.txt is stale");
+    let committed = include_str!("../../../vectors/turing-v2.txt").replace("\r\n", "\n");
+    assert_eq!(refcipher::render_vectors(), committed, "vectors/turing-v2.txt is stale");
     let vectors = refcipher::parse_vectors(&committed).unwrap();
     assert_eq!(vectors.len(), 8);
     for v in vectors {
