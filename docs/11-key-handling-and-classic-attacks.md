@@ -117,7 +117,10 @@ The 2^120 structure keeps the set balanced for four full rounds, so its
 key recovery would reach 5 rounds, with more chosen plaintexts than any
 attacker could collect. The rule behind the round count (docs/09) was
 max(3, 4) + 4 = 8. Counting this 4-round integral distinguisher it is
-max(3, 4, 4) + 4 = 8: unchanged, and still half of 16.
+max(3, 4, 4) + 4 = 8: unchanged, and still half of 16. (docs/14 later
+placed a 2^32 set at round 2 by guessing all of round key 0; it stays
+balanced for four rounds too, and the attack reaches 7 rounds on paper,
+with the full codebook.)
 
 ### Boomerang (Wagner 1999): broke COCONUT98
 

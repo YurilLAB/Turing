@@ -35,12 +35,15 @@ bytes together and adding a round key.
 
 ## What has been tested
 
-- `bombe attack` runs 21 sections of attacks against the real cipher:
+- `bombe attack` runs 23 sections of attacks against the real cipher:
   differential, linear, square and division-property, boomerang, cube,
-  related-key, differential-linear, interpolation, invariant and symmetry
-  attacks, plus the implementation attacks below. The best of them break 4
-  of the 24 rounds, and the longest impossible differential found by
-  `bombe rounds` also spans 4. Counting every trail, any 3 rounds have
+  related-key, differential-linear, interpolation, invariant, symmetry,
+  yoyo and meet-in-the-middle attacks, plus the implementation attacks
+  below. The best of them break 4 of the 24 rounds in practice, and the
+  longest impossible differential found by `bombe rounds` also spans 4. On
+  paper, the square attack with all of round key 0 guessed reaches 7
+  rounds, but needs every possible plaintext-ciphertext pair and about
+  2^174 encryptions (docs/14). Counting every trail, any 3 rounds have
   differential probability at most 2^-102.0 and linear hulls at most
   2^-99.6, and from 3 rounds on the output passes the NIST SP 800-22
   statistical battery.
@@ -75,8 +78,8 @@ All of this is our own analysis, which is why Turing stays experimental.
 ## Bombe commands
 
 ```
-cargo run --release -p bombe -- attack             # attack the real cipher: 21 sections, 0 failures expected
-cargo run --release -p bombe -- attack --deep      # adds the long runs (2^33-encryption square attack, NIST at scale), about 20 min
+cargo run --release -p bombe -- attack             # attack the real cipher: 23 sections, 0 failures expected
+cargo run --release -p bombe -- attack --deep      # adds the long runs (2^33-encryption square attack, 2^32 structures through 7 rounds, NIST at scale), about an hour on 4 threads
 cargo run --release -p bombe -- trace --flip-plaintext-bit 0
 cargo run --release -p bombe -- sbox turing --html sbox.html
 cargo run --release -p bombe -- rounds             # compare round structures
@@ -92,11 +95,12 @@ a memory-dump attacker, simulated power analysis and injected faults.
 `python tools/wsl_linux.py test -p turing --lib` runs the Linux code paths
 (mlock, MADV_DONTDUMP, MADV_WIPEONFORK, fork) from Windows, in WSL.
 
-`cargo test --release -- --include-ignored` also runs the slow test (Turing's
-exact best 2-round differential, about a minute). `python tools/mutate.py
---round4` plants bugs in the latest code and checks the tests catch each
-one (`--step8`, `--step9`, `--round3` and the default set cover the earlier
-rounds).
+`cargo test --release -- --include-ignored` also runs the slow tests
+(Turing's exact best 2-round differential, about a minute, and the 6- and
+7-round square attack steps on 2^32-text structures, about 20 minutes on 4
+threads). `python tools/mutate.py --round5` plants bugs in the latest code
+and checks the tests catch each one (`--step8`, `--step9`, `--round3`,
+`--round4` and the default set cover the earlier rounds).
 
 The library runs a known-answer self-test (`turing::self_test()`, call it
 at start-up) and offers fault-checked calls (`encrypt_block_checked`,

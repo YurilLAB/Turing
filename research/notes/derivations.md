@@ -187,3 +187,83 @@ C(3328, 2) = 5,536,128 two-bit faults, 0.70%. Enumerating all two-bit faults
 through `encrypt_block_checked` reproduces 35,800 exactly for the round
 keys, and finds 0 with the keyed checksum.
 
+
+## Fifth campaign: attacks from the AES-256 literature (docs/14)
+
+### The keyed square structure
+
+Round 1 is S-box layer, MixState, RK1. For a guess g of RK0, the plaintext
+P = S^-1(MixState^-1(z)) ⊕ g gives MixState(S(P ⊕ RK0)) ⊕ RK1 = z ⊕ RK1 at
+round 2's S-box input exactly when g = RK0. RK1 only adds a constant, so a
+set of z with the diagonal (bytes 0, 5, 10, 15) taking all 2^32 values and
+the other bytes fixed lands on the same kind of set.
+
+Division property by hand (word level, Todo 2015). Input vector: 8 on the
+diagonal. S-box layer 2 keeps it; ShiftRows moves the diagonal into column
+0; MixColumns spreads the total 32 over the column, and S-box layer 3 can
+only return (8, 8, 8, 8), since a column total of 32 has no other split.
+MixState spreads 32 over all 16 bytes. A byte below 8 holds at most 7, so
+after S-box layer 4 the smallest vectors are five 1s, four 1s and an 8,
+three 1s and two 8s, two 1s and three 8s, or four 8s. ShiftRows +
+MixColumns cannot put five nonzero bytes in one column, and a column
+holding an 8 keeps an 8 or two nonzero bytes through S-box layer 5, so at
+least two bytes stay nonzero there; MixState keeps that total of 2 at the
+input of S-box layer 6: balanced there. S-box layer 6 can turn a 2 into a
+1: balance ends. `bombe::division` gives the
+same (window starting at round 2, `balanced_until` 5 = layer 6), and the
+run confirms it: two 2^32 structures balanced at the inputs of S-box layers
+2 to 6 in all 16 bytes, not at layer 7 (0 of 16 bytes).
+
+With 1 to 3 diagonal bytes the column total is at most 24 and S-box layer
+3 can leave a single 1: balanced to layer 4 only (measured: 2^8, 2^16 and
+2^24 texts balanced at layers 2-4, not 5).
+
+### Costs
+
+- 6 rounds: per guess g, one structure of 2^32 codebook lookups, then 16
+  bytes × 2^8 guesses of RK6. A byte of a wrong g keeps at least one of 256
+  guesses with probability 1 − (1 − 2^-8)^256 ≈ 0.632, all 16 with 2^-10.6,
+  so almost every wrong g dies on its first structure: 2^128 · 2^32 = 2^160
+  lookups.
+- 7 rounds: a byte of the S-box layer 6 input is
+  S^-1(Σ_i M^-1[r][i] · S^-1(C[4c + i] ⊕ RK7[4c + i]) ⊕ e) with
+  e = ShiftRows^-1(MixColumns^-1(RK6)): 5 key bytes, 2^40 guesses. Ferguson
+  et al.'s partial sums (FSE 2000, section 2.3) cost 2^48 steps, about 2^50
+  S-box lookups, per structure for all 2^40. A wrong g keeps 2^(40 − 8s)
+  guesses after s structures, so it dies after about 6: 2^128 · 6 · 2^50 =
+  2^180.6 S-box lookups, 2^173.8 seven-round encryptions (112 S-boxes each).
+  About 5 + 16 = 21 structures single out g, as for Ferguson et al.'s
+  7-round AES-256 attack (21 · 2^32 texts, 2^172), whose cost ours matches
+  but with the full codebook, since every g needs its own plaintexts.
+- 6 rounds from plaintexts: the 2^120 structure of docs/11 keeps the S-box
+  layer 5 input balanced; one byte of it needs all of RK6 and a byte of
+  MixState^-1(RK5), 17 bytes. Partial sums over 16 ciphertext bytes cost
+  2^(8(m+1)) · 2^(8(17 − m)) = 2^144 at each of about 15 stages, 2^148 per
+  structure; 17 structures single out 136 bits: 2^152 S-box lookups with
+  about 2^124 chosen plaintexts.
+- 8 rounds: one byte of the S-box layer 6 input through rounds 6-8 needs
+  all of RK8 (round 7 has MixState): 2^128 more on top of RK0, 2^256.
+
+### Yoyo words
+
+For E = S2 ∘ L ∘ S1, swapping words of the S2 layer between two ciphertexts
+keeps the XOR of the pair before S2, L^-1 keeps it, and S1^-1 keeps which of
+its words are zero. So the swap is in S2's words and the pattern is in S1's:
+they need not match. Rounds 1-3 of Turing are S (bytes) ∘ MixState ∘ S ∘
+ShiftRows ∘ MixColumns ∘ S; ShiftRows commutes with the S-box layer before
+it, so the last two S-box layers and MixColumns form super-boxes on columns.
+Rounds 2-5 are ShiftRows, then super-boxes, ShiftRows ∘ MixState, super-boxes:
+the first ShiftRows makes the words at round 2's S-box input its diagonals.
+
+### Meet-in-the-middle counts
+
+Parameters of a δ-set sequence: the bytes of each S-box layer between the
+δ-set and the output byte that are both active and needed (Derbez-Fouque
+FSE 2013, Property 5: 4 + 16 + 4 = 24 for AES, 25 with the output value).
+After round 2's S-boxes, Turing: 4 (a column), 16 (after MixState),
+16 (all of them are needed, because the output byte comes out of
+MixState) = 36. Differential enumeration counted as for AES's 10 bytes
+(δ-set 1 + S-box outputs before the meeting layer + S-box inputs after it +
+output 1): AES 1 + 4 + 4 + 1 = 10; Turing 1 + 4 + 16 + 1 = 22, because
+MixState^-1 of a one-byte difference has all 16 bytes active. The pair must
+end 16 -> 1 through MixState: 15 bytes forced to zero, 2^-120.

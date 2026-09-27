@@ -32,6 +32,7 @@ source; the primary PDF is.
 
 | File in `papers/` | Reference | Used for | Where |
 |---|---|---|---|
+| 2000-ferguson-et-al-improved-cryptanalysis-of-rijndael.pdf | Ferguson, Kelsey, Lucks, Schneier, Stay, Wagner, Whiting. FSE 2000. [schneier.com](https://www.schneier.com/wp-content/uploads/2016/02/paper-rijndael.pdf) | partial sums (2^50 S-box lookups per 2^32 structure), 7 rounds of AES-256 for 2^172 | docs/14 |
 | 2003-park-sung-lee-lim-upper-bound-medp-melp-spn.pdf | Park, Sung, Lee, Lim. FSE 2003. [iacr.org/archive/fse2003](https://www.iacr.org/archive/fse2003/28870263/28870263.pdf) | Theorems 1-2: provable 2-round MEDP/MELP bounds | docs/12 |
 | 2003-rosenthal-polynomial-description-of-rijndael.pdf | Rosenthal. J. Algebra Appl. 2003, [arXiv cs/0205002](https://arxiv.org/abs/cs/0205002) | AES S-box polynomial (9 terms) | docs/11 |
 | 2004-kim-umeno-hasegawa-corrections-nist-test-suite.pdf | Kim, Umeno, Hasegawa. [ePrint 2004/018](https://eprint.iacr.org/2004/018) | NIST spectral test corrections | docs/10 |
@@ -50,6 +51,7 @@ source; the primary PDF is.
 | 2014-andreeva-et-al-release-of-unverified-plaintext.pdf | Andreeva, Bogdanov, Luykx, Mennink, Mouha, Yasuda. ASIACRYPT 2014, [ePrint 2014/144](https://eprint.iacr.org/2014/144) | no plaintext before verification (step 9) | docs/13 |
 | 2014-equivalent-condition-switching-4-uniform-from-inverse.pdf | An equivalent condition for the switching construction (background to Li-Wang-Yu) | background | — |
 | 2014-new-construction-4-uniform-permutations-arxiv-1407-4884.pdf | [arXiv 1407.4884](https://arxiv.org/abs/1407.4884): a further 4-uniform construction from the inverse | background | — |
+| 2013-derbez-fouque-exhausting-demirci-selcuk-mitm.pdf | Derbez, Fouque. FSE 2013. [di.ens.fr](https://www.di.ens.fr/~fouque/pub/fse13b.pdf) | Property 5 (25 parameters, 24 for differences), the 10-parameter table of Derbez-Fouque-Jean | docs/14 |
 | 2015-banik-et-al-midori.pdf | Banik et al. ASIACRYPT 2015, [ePrint 2015/1142](https://eprint.iacr.org/2015/1142) | Midori-64 layer for the invariant-attack check | docs/11 |
 | 2015-schneider-moradi-leakage-assessment-methodology.pdf | Schneider, Moradi. CHES 2015, [ePrint 2015/207](https://eprint.iacr.org/2015/207) | higher-order TVLA, centred product | docs/13 |
 | 2015-todo-integral-cryptanalysis-full-misty1.pdf | Todo. CRYPTO 2015, [ePrint 2015/682](https://eprint.iacr.org/2015/682) | first attack on full MISTY1 | docs/11 |
@@ -60,6 +62,7 @@ source; the primary PDF is.
 | 2017-beierle-canteaut-leander-rotella-invariant-attacks-round-constants.pdf | Beierle, Canteaut, Leander, Rotella. CRYPTO 2017, [ePrint 2017/463](https://eprint.iacr.org/2017/463) | W_L(D) criterion, Midori invariant factors | docs/08, 11 |
 | 2017-reparaz-balasch-verbauwhede-dudect.pdf | Reparaz, Balasch, Verbauwhede. DATE 2017, [ePrint 2016/1123](https://eprint.iacr.org/2016/1123) | timing test | docs/10 |
 | 2017-wang-et-al-double-fetch.pdf | Wang, Krinke, Lu, Li, Dodier-Lazaro. USENIX Security 2017 | double fetch: verify and use one private copy (step 9) | docs/13 |
+| 2017-ronjom-bardeh-helleseth-yoyo-tricks-with-aes.pdf | Rønjom, Bardeh, Helleseth. ASIACRYPT 2017, [ePrint 2017/980](https://eprint.iacr.org/2017/980) | the yoyo game: Theorem 2, Algorithms 2 and 3 | docs/08, 14 |
 | 2018-cid-huang-peyrin-sasaki-song-boomerang-connectivity-table.pdf | Cid et al. EUROCRYPT 2018, [ePrint 2018/161](https://eprint.iacr.org/2018/161) | the BCT | docs/11 |
 | 2018-zhang-et-al-persistent-fault-analysis.pdf | Zhang et al. TCHES 2018(3), [tches.iacr.org](https://tches.iacr.org/index.php/TCHES/article/view/7272) | persistent faults | docs/11 |
 | 2019-ferguson-windows-10-rng-infrastructure.pdf | Ferguson. The Windows 10 random number generation infrastructure. Microsoft 2019, [download.microsoft.com](https://download.microsoft.com/download/1/c/9/1c9813b8-089c-4fef-b2ad-ad80e79403ba/Whitepaper%20-%20The%20Windows%2010%20random%20number%20generation%20infrastructure.pdf) | ProcessPrng's design; the copy measured outside it | random.rs, docs/13 |

@@ -11,6 +11,9 @@
 //! cost: any 3 rounds have at least 18 active S-boxes, any 7 at least 52.
 //! Starting and ending on MixState means an attack extended by a round at
 //! either end must guess a whole 16-byte round key, not one 4-byte column.
+//! Against a 256-bit key those 2^128 guesses are affordable on paper: the
+//! square attack extended that way reaches 7 rounds, with the full
+//! codebook (docs/14).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Layer {
@@ -20,9 +23,10 @@ pub enum Layer {
     MixState,
 }
 
-/// Version 2: 24 rounds (version 1 had 16). The best attack found reaches 4
-/// (docs/11), and the round-count rule of docs/09 allows 8; 24 is the ceiling
-/// chosen for Turing, so more rounds are never added.
+/// Version 2: 24 rounds (version 1 had 16). The best attack run reaches 4
+/// (docs/11), the best on paper 7 with the full codebook (docs/14), and the
+/// round-count rule of docs/09 allows 8; 24 is the ceiling chosen for
+/// Turing, so more rounds are never added.
 pub const ROUNDS: usize = 24;
 pub const MAX_ROUNDS: usize = 24;
 pub const ROUND_KEYS: usize = ROUNDS + 1;

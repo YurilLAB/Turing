@@ -3,7 +3,7 @@
 //! break, or its verdict on the rest means nothing.
 
 use bombe::invariant::LinearMap;
-use bombe::{boomerang, cube, fault, integral, interpolation, invariant, power, relatedkey};
+use bombe::{boomerang, cube, fault, integral, interpolation, invariant, keyedsquare, power, relatedkey};
 use turing::structure::{Layer, ROUNDS};
 use turing::Turing;
 
@@ -58,6 +58,25 @@ fn structured_square_attack_follows_the_division_property() {
     assert!(integral::structured_square_attack(3, &[0, 1], 4, "test structured 3").correct);
     let four = integral::structured_square_attack(4, &[0, 1], 4, "test structured 4");
     assert!(four.recovered.is_none());
+}
+
+// Round key 0 guessed right: the diagonal at round 2's S-box input (2^32
+// texts per structure) stays balanced to S-box layer 6, round key 6 comes
+// out byte by byte (6 rounds) and the partial sums single out the rest of
+// round key 7's column and 4 bytes of the equivalent round key 6 (7 rounds);
+// a random guess loses the balance. About 20 minutes on 4 threads: run
+// with `cargo test --release -- --ignored`.
+#[test]
+#[ignore]
+fn keyed_square_attack_on_6_and_7_rounds() {
+    let t = Turing::new(&[0x42; 32]);
+    let a = keyedsquare::attack(&t, t.round_key(0), 4, "test keyed attack");
+    assert!(a.structures.iter().all(|s| keyedsquare::balanced_to(s) == 6 && s.mismatches == 0));
+    assert!(a.rk6_right, "{:?}", a.rk6);
+    assert!(a.column_right, "{} candidates", a.column.len());
+    let guess = [0x17; 16];
+    let off = keyedsquare::structure(&t, &guess, &[0; 16], 0, [0, 0], 32);
+    assert!(keyedsquare::balanced_to(&off) < 6);
 }
 
 // Related keys: one-bit key differences give random-looking round-key

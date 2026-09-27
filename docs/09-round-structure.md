@@ -154,6 +154,9 @@ maximum. The rule:
    best impossible-differential attacks on AES add 3 rounds to a 4-round
    distinguisher. We allow **4** (2 at each end), even though MixState at
    both ends makes each of those rounds cost a full 16-byte key guess.
+   That allowance was needed: against a 256-bit key the 2^128 guess is
+   affordable on paper, and the square attack spends one such round at
+   the front and two at the back, 4 + 3 = 7 rounds (docs/14).
 4. So the longest attack these techniques can build is max(3, 4) + 4 =
    **8 rounds**.
 5. Version 1 had **twice that: 16 rounds**, more than AES-256's 14.
@@ -187,9 +190,13 @@ part (docs/11): the word-level division
 property keeps a 2^120-plaintext set balanced through 4 rounds, and a 4-round
 key recovery with 2^32 plaintexts was run and works: max(3, 4, 4) + 4 = 8,
 so the rule above is unchanged. Cube testers stop at 2 rounds, and the
-interpolation attack finds no sparse polynomial to start from. Hulls,
-meet-in-the-middle and bit-level models remain, and the factor-of-two margin
-is there for them.
+interpolation attack finds no sparse polynomial to start from. The fifth
+campaign (docs/14) measured meet-in-the-middle: Demirci-Selçuk sequences
+over 4 rounds need 36 parameters (AES 24), so that family stops at 5
+rounds, as does the yoyo game; and the square attack with round key 0
+guessed reaches 7 rounds on paper (the full codebook, about 2^174
+encryptions), within the rule's 8. Hulls and bit-level models remain, and
+the factor-of-two margin is there for them.
 
 ## Cost
 

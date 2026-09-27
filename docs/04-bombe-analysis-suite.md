@@ -128,12 +128,26 @@ docs/12
   and two-bit fault that moves the checksum's secret point (434,240), and
   `fault::multi_bit_key_faults` for random faults of 2 to 16 bits anywhere
   the check reads.
-- `tools/mutate.py --round4`: 25 planted bugs in this round's code.
+- `tools/mutate.py --round4`: 35 planted bugs in this round's code.
+
+**Attacks from the AES-256 literature (step 10, fifth campaign)**, see
+docs/14
+- `fast`: table-driven rounds for 2^32-text experiments, checked block for
+  block against the real cipher.
+- `keyedsquare`: the square attack with round key 0 guessed, placing a
+  2^32 structure at round 2 (balanced to S-box layer 6, run on two
+  structures), the 6-round last step and Ferguson et al.'s partial sums
+  for 7 rounds, with wrong-guess controls; `attack --deep` runs it.
+- `yoyo` and `aes`: the yoyo game, validated on AES-128 (3 and 4 rounds
+  always, 5 never; FIPS-197 vector for the AES code).
+- `mitm`: Demirci-Selçuk parameter counts and differential enumeration,
+  reproducing Derbez-Fouque's 25/24 and Derbez-Fouque-Jean's 10 for AES.
+- `tools/mutate.py --round5`: 14 planted bugs in the new tools.
 
 ## Planned
 
 - Keliher and Sui's upper-bound search, to pin Turing's exact 2-round MEDP
   between 57/2^35 and 79/2^34.
-- Meet-in-the-middle experiments on reduced rounds.
-- Bit-level division property (MILP or SAT) to check the word-level results.
+- Bit-level division property (MILP or SAT) to check the word-level results,
+  in particular that nothing stays balanced past S-box layer 6.
 - Bit independence criterion.

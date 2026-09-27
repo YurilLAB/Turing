@@ -25,6 +25,10 @@ reproduces the ones marked **(reproduced)**.
 | NIST SP 800-22 spectral test examples 2.6.4/2.6.8 do not match the definition; the corrected test and NIST's reference results do | 2004-kim-umeno-hasegawa, nist-sp800-22r1a | docs/10 |
 | AES-128 key expansion: key 2b7e1516 28aed2a6 abf71588 09cf4f3c gives w4 = a0fafe17 and last round key d014f9a8 c9ee2589 e13f0cc8 b6630ca6 **(reproduced)** | nist-fips-197-upd1-aes, Appendix A.1 | docs/12 |
 
+| Partial sums: for 2^32 ciphertexts and 5 key bytes, each phase costs 2^48, "about 2^50 S-box applications" per structure; 6 rounds of Rijndael with 6 · 2^32 chosen plaintexts and 2^44 work (2^52 S-box lookups at 2^8 per encryption). 7 rounds, 256-bit key: 21 · 2^32 chosen plaintexts, 2^172; all key sizes with 2^128 − 2^119 texts, 2^120; 8 rounds, 256-bit key: 2^204 | 2000-ferguson-et-al (Table 1, sections 2.3-2.6) | docs/14 |
+| Yoyo, Theorem 2: for G2 = S ∘ L ∘ S, ciphertext words swapped between c0 and c1 decrypt to p0', p1' with ν(p0' ⊕ p1') = ν(p0 ⊕ p1). AES "without first SR and last SR ∘ MC": 3 rounds with 2 chosen plaintexts and 1 adaptive ciphertext (Algorithm 2), 4 rounds with 2 and 2 (Algorithm 3), 5 rounds 2^25.8 adaptive texts **(3 and 4 reproduced; the plain game fails on 5, as it should)** | 2017-ronjom-bardeh-helleseth (Theorem 2, sections 3.1-3.3, Table 2) | docs/14 |
+| Demirci-Selçuk, Property 5: the 256 values of a byte after 4 AES rounds of a δ-set are "fully determined by just 25 byte parameters" (2^200 sequences), 24 for differences; Derbez, Fouque and Jean's table "can be described by 10 parameters" **(25, 24 and 10 reproduced)** | 2013-derbez-fouque (sections 1, 3.1, 3.2) | docs/14 |
+
 ## Implementation security (fourth campaign, docs/13)
 
 | Fact | Source | Used in |
@@ -65,3 +69,6 @@ reproduces the ones marked **(reproduced)**.
 | Stack used by key setup: key schedule 2,767 and masked key setup 3,751 bytes (release, Windows), 2,463 (release, Linux), up to 21,791 (unoptimised); the burn writes 32,768 | stack painting; a planted 1 KB burn is caught |
 | Key residue without the burn: two 8-byte pieces of K' in dead stack (Windows release), still there after encryptions and drop; none in the Linux release build; none with the burn anywhere | memscan finds planted heap and stack copies (controls) |
 | Masked cipher: 0 of 1,728 intermediate points and 0 of 768 share points leak (TVLA, two groups); repeated masks: 1,202 and 552 leak | three correctness-preserving masking bugs are each caught |
+| Round key 0 guessed right, the diagonal at round 2's S-box input (2^32 texts, two structures): balanced at the inputs of S-box layers 2-6 in all 16 bytes, not 7; one byte of round key 0 wrong: layers 2-3 only; random: layer 2 only. Round key 6 unique and right after 2 structures; with 2 bytes of round key 7's column given, the other 2 and 4 bytes of the equivalent round key 6 unique and right after 2 structures | the division property (validated on AES) predicts layer 6; partial sums equal the plain sum on random data; 4,096 blocks per structure rechecked by the real cipher |
+| Yoyo on Turing: 2 rounds (bytes) and 3 rounds (bytes in, columns out) always; 4 rounds never; rounds 2-5 with round key 0 right always, one bit wrong never | AES 3 and 4 rounds always, 5 never (Rønjom et al.) |
+| Demirci-Selçuk parameters, Turing: 3 rounds 32 or 8, 4 rounds 36, 5 rounds 64 or 40 (δ-set after round 1's or round 2's S-boxes); enumeration 22 bytes, pair 2^-120 | AES 24/25 (Property 5) and 10 (Derbez-Fouque-Jean) |

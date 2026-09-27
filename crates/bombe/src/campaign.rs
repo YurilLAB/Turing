@@ -4,14 +4,15 @@
 //! all of them; negative controls must fail, or the test that missed them
 //! is useless.
 
+use crate::aes::{Aes, Shape as AesShape};
 use crate::invariant::LinearMap;
 use crate::refcipher::Reference;
 use crate::rng::Rng;
 use crate::leakage::{self, View};
 use crate::residue::{self, Snapshot};
 use crate::{
-    avalanche, battery, boomerang, cube, difflinear, differential, fault, integral, interpolation, invariant, keycheck, keyrelations, power, provable,
-    relatedkey, symmetry, timing, toctou,
+    avalanche, battery, boomerang, cube, difflinear, differential, fast, fault, integral, interpolation, invariant, keycheck, keyedsquare, keyrelations, mitm,
+    power, provable, relatedkey, symmetry, timing, toctou, yoyo,
 };
 use std::fmt::Write;
 use std::time::Instant;
@@ -294,12 +295,100 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
     } else {
         log.add(s, "key recovery, 4 rounds, 4 active bytes", "not run (2^33 encryptions, about 15 min): use --deep", Verdict::Info);
     }
+    // Guess all of round key 0 and a structure can start at round 2, whose
+    // ShiftRows + MixColumns turns a diagonal into a column (docs/14).
+    let from_round_2 = |bytes: &[usize]| crate::division::balanced_until(&crate::division::active(bytes), &schedule[1..]).map_or(0, |l| l + 1);
+    log.add(
+        s,
+        "division property: structures at round 2's S-box input (round key 0 guessed)",
+        format!(
+            "1 byte: balanced to S-box layer {}; the diagonal (2^32): to layer {}, where 2^32 plaintexts chosen at round 1 reach layer {}",
+            from_round_2(&[0]),
+            from_round_2(&keyedsquare::DIAGONAL),
+            reach(4).unwrap_or(0)
+        ),
+        Verdict::Info,
+    );
+    let mut rng = Rng::new("campaign keyed square");
+    let t = Turing::new(&rng.bytes());
+    let z: [u8; 16] = rng.bytes();
+    let rk0 = *t.round_key(0);
+    let small = keyedsquare::structure(&t, &rk0, &z, 0, [0, 0], 8);
+    let reached = keyedsquare::balanced_to(&small);
+    log.add(
+        s,
+        "keyed structure: 1 byte at round 2, round key 0 right (2^8 texts)",
+        format!("balanced to S-box layer {reached} (predicted {}); {} blocks rechecked on the real cipher, {} mismatches", from_round_2(&[0]), small.checked, small.mismatches),
+        pass_if(reached == from_round_2(&[0]) && small.mismatches == 0),
+    );
+    let mut wrong = rk0;
+    wrong[3] ^= 0x5a;
+    let off = keyedsquare::balanced_to(&keyedsquare::structure(&t, &wrong, &z, 0, [0, 0], 8));
+    log.add(s, "control: the same with round key 0 one byte wrong", format!("balanced to S-box layer {off} only"), caught_if(off < reached));
+    let seven_rounds = if deep {
+        let a = keyedsquare::attack(&t, &rk0, 4, "campaign keyed attack");
+        let layers: Vec<usize> = a.structures.iter().map(keyedsquare::balanced_to).collect();
+        let (checked, mismatches) = a.structures.iter().fold((0, 0), |(c, m), st| (c + st.checked, m + st.mismatches));
+        let predicted = from_round_2(&keyedsquare::DIAGONAL);
+        log.add(
+            s,
+            "keyed structure: the diagonal at round 2, round key 0 right (2^32 texts, --deep)",
+            format!("{} structures balanced to S-box layer {layers:?} (predicted {predicted}); {checked} blocks rechecked on the real cipher, {mismatches} mismatches", a.structures.len()),
+            pass_if(layers.iter().all(|&l| l == predicted) && mismatches == 0),
+        );
+        log.add(
+            s,
+            "6 rounds, given round key 0: round key 6 byte by byte (--deep)",
+            format!(
+                "{} with {} structures (guesses left per byte: {:?})",
+                if a.rk6_right { "RECOVERED round key 6" } else { "not recovered" },
+                a.structures.len(),
+                a.rk6.iter().map(Vec::len).collect::<Vec<_>>()
+            ),
+            if a.rk6_right { Verdict::Broken } else { Verdict::Fail },
+        );
+        log.add(
+            s,
+            "7 rounds, given round key 0 and 2 bytes of round key 7: partial sums (--deep)",
+            format!(
+                "{} of the 2^16 guesses of the column's other 2 bytes left, {}, with the 4 equivalent round key 6 bytes",
+                a.column.len(),
+                if a.column_right { "the right one" } else { "not the right one alone" }
+            ),
+            if a.column_right { Verdict::Broken } else { Verdict::Fail },
+        );
+        let guess: [u8; 16] = rng.bytes();
+        let control = keyedsquare::structure(&t, &guess, &z, 0, [0, 0], 32);
+        let depth = keyedsquare::balanced_to(&control);
+        let kept = keyedsquare::rk6_candidates(&[&control]).iter().enumerate().filter(|(j, c)| c.contains(&t.round_key(6)[*j])).count();
+        log.add(
+            s,
+            "control: a random guess of round key 0 (2^32 texts, --deep)",
+            format!("balanced to S-box layer {depth} only; the right round key 6 byte survives in {kept} of 16 positions"),
+            caught_if(depth < predicted && kept < 16),
+        );
+        a.rk6_right && a.column_right
+    } else {
+        log.add(s, "keyed structure: the diagonal at round 2 (2^32 texts)", "not run (3 structures of 2^32 texts through 7 rounds, about 20 min on 4 threads): use --deep", Verdict::Info);
+        false
+    };
+    let costs = keyedsquare::costs();
+    log.add(
+        s,
+        "cost of those attacks over every guess of round key 0",
+        format!(
+            "6 rounds: 2^{:.0} codebook lookups; 7 rounds: 2^{:.1} S-box lookups (2^{:.1} 7-round encryptions); both need all 2^128 texts; trying every key is 2^256",
+            costs.six_lookups, costs.seven_sbox_lookups, costs.seven_encryptions
+        ),
+        Verdict::Info,
+    );
     log.add(
         s,
         "security margin against this attack",
         format!(
-            "1-byte distinguisher reaches {broken_through} rounds; key recovery 3 rounds (2^8 texts), 4 rounds (2^32 texts, predicted{}); {ROUNDS} rounds in the cipher",
-            if deep { " and run above" } else { "; --deep runs it" }
+            "1-byte distinguisher reaches {broken_through} rounds; key recovery 3 rounds (2^8 texts), 4 rounds (2^32 texts, predicted{}); 7 rounds with round key 0 guessed (the full codebook{}); {ROUNDS} rounds in the cipher",
+            if deep { " and run above" } else { "; --deep runs it" },
+            if seven_rounds { ", last steps run above" } else { "" }
         ),
         Verdict::Info,
     );
@@ -947,6 +1036,134 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         s,
         "compile-time guarantees",
         "all key types are Send + Sync; MaskedTuring is not Clone and needs &mut for every call (doc tests E0277, E0596); checked calls take &mut Block, so nothing can rewrite it mid-call",
+        Verdict::Info,
+    );
+
+    // --- Yoyo game ------------------------------------------------------------
+    let s = "22. Yoyo game (Rønjom-Bardeh-Helleseth, ASIACRYPT 2017)";
+    let trials = scale(1000, 200);
+    let aes = Aes::new(&Rng::new("campaign yoyo aes").bytes());
+    let aes_game = |rounds: usize, single: bool| {
+        let (enc, dec) = (|p: &[u8; 16]| aes.encrypt(p, rounds, AesShape::Yoyo), |c: &[u8; 16]| aes.decrypt(c, rounds, AesShape::Yoyo));
+        let label = format!("campaign yoyo aes {rounds}");
+        if single {
+            yoyo::single_game(enc, dec, &yoyo::columns(), &yoyo::columns(), trials, &label)
+        } else {
+            yoyo::pair_game(enc, dec, &yoyo::columns(), &yoyo::columns(), trials, &label)
+        }
+    };
+    for (rounds, single, published) in [(3, true, "their Algorithm 2: always"), (4, false, "Algorithm 3: always"), (5, false, "not of the form S-L-S: never")] {
+        let g = aes_game(rounds, single);
+        let expected = if rounds < 5 { g.always() } else { g.kept == 0 };
+        log.add(s, format!("AES, {rounds} rounds (validation; {published})"), format!("pattern returned in {} of {} games", g.kept, g.trials), pass_if(expected));
+    }
+    let t = Turing::new(&Rng::new("campaign yoyo turing").bytes());
+    let turing_game = |rounds: usize, cipher: &yoyo::Words| {
+        yoyo::pair_game(
+            |p| {
+                let mut c = *p;
+                t.encrypt_rounds(&mut c, rounds);
+                c
+            },
+            |c| {
+                let mut p = *c;
+                t.decrypt_rounds(&mut p, rounds);
+                p
+            },
+            &yoyo::bytes(),
+            cipher,
+            trials,
+            &format!("campaign yoyo turing {rounds}"),
+        )
+    };
+    for (rounds, cipher, words) in [(2, yoyo::bytes(), "bytes"), (3, yoyo::columns(), "columns")] {
+        let g = turing_game(rounds, &cipher);
+        log.add(
+            s,
+            format!("{rounds} rounds, swapping ciphertext {words}"),
+            format!("pattern returned in {} of {} games (a random permutation: never)", g.kept, g.trials),
+            if g.always() { Verdict::Broken } else { Verdict::Fail },
+        );
+    }
+    let kept4: usize = [yoyo::bytes(), yoyo::columns(), yoyo::diagonals()].iter().map(|w| turing_game(4, w).kept).sum();
+    log.add(s, "4 rounds (MixState on both sides of a super-box layer)", format!("pattern returned in {kept4} of {} games (bytes, columns, diagonals)", 3 * trials), pass_if(kept4 == 0));
+    let rk0 = *t.round_key(0);
+    let keyed = |guess: &[u8; 16], rounds: usize| {
+        let g = fast::to_u128(guess);
+        yoyo::pair_game(
+            |u| {
+                let mut c = fast::to_block(keyedsquare::plaintext_for(fast::to_u128(u), g));
+                t.encrypt_rounds(&mut c, rounds);
+                c
+            },
+            |c| {
+                let mut p = *c;
+                t.decrypt_rounds(&mut p, rounds);
+                fast::to_block(fast::sub_then(Layer::MixState, fast::to_u128(&p) ^ g))
+            },
+            &yoyo::diagonals(),
+            &yoyo::columns(),
+            trials,
+            &format!("campaign keyed yoyo {rounds}"),
+        )
+    };
+    let right = keyed(&rk0, 5);
+    let mut wrong = rk0;
+    wrong[7] ^= 1;
+    let (off, six) = (keyed(&wrong, 5), keyed(&rk0, 6));
+    log.add(
+        s,
+        "5 rounds with round key 0 guessed (rounds 2-5: super-box, linear, super-box)",
+        format!(
+            "right guess: {} of {}; one bit wrong: {}; 6 rounds even with the right guess: {}. Over 2^128 guesses: about 2^130 work and the full codebook, more than the square attack needs for 5 rounds (two 2^120 structures)",
+            right.kept, right.trials, off.kept, six.kept
+        ),
+        if right.always() && off.kept == 0 && six.kept == 0 { Verdict::Broken } else { Verdict::Fail },
+    );
+
+    // --- Demirci-Selçuk meet-in-the-middle -----------------------------------
+    let s = "23. Demirci-Selçuk meet-in-the-middle (FSE 2008; the best single-key attacks on AES-256)";
+    let aes4 = mitm::parameters(&[Layer::ShiftMixColumns; 4], 0, 0);
+    log.add(
+        s,
+        "AES, 4 rounds (validation: 25 parameters, 24 for differences; Derbez-Fouque FSE 2013, Property 5)",
+        format!("{} and {} ({:?} per S-box layer)", aes4.values, aes4.differences, aes4.per_layer),
+        pass_if((aes4.values, aes4.differences) == (25, 24)),
+    );
+    let windows: Vec<String> = (3..=5)
+        .map(|rounds| {
+            let first = mitm::best(&schedule[..rounds]).differences;
+            let second = mitm::best(&schedule[1..=rounds]).differences;
+            format!("{rounds} rounds: {first} after round 1's S-boxes, {second} after round 2's (AES {})", mitm::best(&[Layer::ShiftMixColumns; 5][..rounds]).differences)
+        })
+        .collect();
+    log.add(s, "fewest parameters of a δ-set sequence (differences)", windows.join("; "), Verdict::Info);
+    let four = mitm::best(&schedule[1..5]).differences.min(mitm::best(&schedule[..4]).differences);
+    log.add(
+        s,
+        "4-round property",
+        format!("{four} parameters: 2^{} sequences, more than the 2^256 keys; AES needs 24 (2^192)", 8 * four),
+        pass_if(8 * four > 256),
+    );
+    let aes_table = mitm::enumerated(&[Layer::ShiftMixColumns; 4], 0, 0);
+    let turing_table = mitm::enumerated(&schedule[1..5], 0, 0);
+    log.add(
+        s,
+        "differential enumeration (validation: AES's 4-round table has 10 bytes, Derbez-Fouque-Jean 2013)",
+        format!(
+            "AES {} bytes (pair costs 2^-{}); Turing {} bytes, 2^{} sequences (pair costs 2^-{}: MixState turns 16 active bytes into 1)",
+            aes_table.free,
+            aes_table.cost,
+            turing_table.free,
+            8 * turing_table.free,
+            turing_table.cost
+        ),
+        pass_if(aes_table.free == 10 && 8 * turing_table.free > 128),
+    );
+    log.add(
+        s,
+        "best attack from it",
+        "the 3-round property (8 parameters) starts after round 2's S-boxes, so building a δ-set needs round key 0 (2^128 guesses) and reading its output a byte of round key 5: 5 rounds at about 2^144 S-box lookups with the full codebook, weaker than the square attack's 5 rounds with a 2^120 structure",
         Verdict::Info,
     );
 

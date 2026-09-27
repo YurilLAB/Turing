@@ -5,7 +5,7 @@ tests caught it and always restores the original file (and verifies it). A
 test run that exceeds the time limit has not passed either: it counts as
 caught, and the whole process tree is killed.
 
-    python tools/mutate.py [--step8 | --step9 | --round3 | --round4] [--check] [NAME ...]
+    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5] [--check] [NAME ...]
 
 --check only verifies that every pattern still matches the current code
 exactly once, without running any tests. NAME filters mutations by name.
@@ -309,6 +309,56 @@ MUTATIONS_ROUND4 = [
      ["-p", "bombe", "--release", "--test", "leakage"]),
 ]
 
+BOMBE_LIB = ["-p", "bombe", "--release", "--lib"]
+MUTATIONS_ROUND5 = [
+    # Table-driven rounds
+    ("fast: tables built from the inverse S-box", "crates/bombe/src/fast.rs",
+     "for (v, &y) in sbox.iter().enumerate() {", "for (v, &y) in inv_sbox.iter().enumerate() {",
+     BOMBE_LIB + ["fast"]),
+    ("fast: the last round keeps a linear layer", "crates/bombe/src/fast.rs",
+     "        sub(x) ^ self.keys[rounds]", "        sub_then(Layer::MixState, x) ^ self.keys[rounds]",
+     BOMBE_LIB + ["fast"]),
+    # The square attack with round key 0 guessed
+    ("keyed square: plaintexts skip the inverse S-box", "crates/bombe/src/keyedsquare.rs",
+     "fast::inv_sub(fast::invert(Layer::MixState, z)) ^ rk0", "fast::invert(Layer::MixState, z) ^ rk0",
+     BOMBE_LIB + ["keyedsquare"]),
+    ("keyed square: ShiftRows undone the wrong way", "crates/bombe/src/keyedsquare.rs",
+     "let p = 4 * ((c + 4 - r) % 4) + r;", "let p = 4 * ((c + r) % 4) + r;",
+     BOMBE_LIB + ["keyedsquare"]),
+    ("keyed square: partial sums drop k3", "crates/bombe/src/keyedsquare.rs",
+     "let x3 = x2 ^ s[3][c3 as usize ^ k3];", "let x3 = x2 ^ s[3][c3 as usize];",
+     BOMBE_LIB + ["keyedsquare"]),
+    ("keyed square: a column survives with one target", "crates/bombe/src/keyedsquare.rs",
+     "        if es.iter().all(|e| !e.is_empty()) {", "        if es.iter().any(|e| !e.is_empty()) {",
+     BOMBE_LIB + ["keyedsquare"]),
+    ("keyed square: round key 6 guesses face one structure", "crates/bombe/src/keyedsquare.rs",
+     "                structures.iter().all(|s| {", "                structures.iter().take(1).all(|s| {",
+     BOMBE_LIB + ["keyedsquare"]),
+    ("keyed square: the diagonal misses a byte", "crates/bombe/src/keyedsquare.rs",
+     "pub const DIAGONAL: [usize; 4] = [0, 5, 10, 15];", "pub const DIAGONAL: [usize; 4] = [0, 5, 10, 14];",
+     BOMBE_LIB + ["keyedsquare"]),
+    # Yoyo
+    ("yoyo: swap a word where the texts agree", "crates/bombe/src/yoyo.rs",
+     "let first = zeros.iter().position(|&z| !z)?;", "let first = zeros.iter().position(|&z| z).unwrap_or(0);",
+     BOMBE_LIB + ["yoyo"]),
+    ("yoyo: zero pattern reads one byte per word", "crates/bombe/src/yoyo.rs",
+     "words.iter().map(|w| w.iter().all(|&i| a[i] == b[i])).collect()", "words.iter().map(|w| a[w[0]] == b[w[0]]).collect()",
+     BOMBE_LIB + ["yoyo"]),
+    ("aes: yoyo shape keeps round 1's ShiftRows", "crates/bombe/src/aes.rs",
+     "Shape::Yoyo => (round > 1 && round < rounds, round < rounds),", "Shape::Yoyo => (round < rounds, round < rounds),",
+     ["-p", "bombe", "--release", "--test", "yoyo"]),
+    # Meet-in-the-middle
+    ("mitm: MixColumns reads the wrong diagonal", "crates/bombe/src/mitm.rs",
+     "(0..4).fold(0, |acc, r| acc | 1 << (4 * ((c + r) % 4) + r))", "(0..4).fold(0, |acc, r| acc | 1 << (4 * ((c + 4 - r) % 4) + r))",
+     BOMBE_LIB + ["mitm"]),
+    ("mitm: active bytes counted whether needed or not", "crates/bombe/src/mitm.rs",
+     ".map(|(a, n)| (a & n).count_ones())", ".map(|(a, _)| a.count_ones())",
+     BOMBE_LIB + ["mitm"]),
+    ("mitm: enumeration forgets the output byte", "crates/bombe/src/mitm.rs",
+     "Enumerated { free: 2 + before + after, cost }", "Enumerated { free: 1 + before + after, cost }",
+     BOMBE_LIB + ["mitm"]),
+]
+
 
 def kill_tree(p):
     """Kills cargo and the test binary it started."""
@@ -340,7 +390,7 @@ def run(args):
 
 
 def main():
-    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4}
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5}
     check_only = "--check" in sys.argv
     only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
     mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)

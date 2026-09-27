@@ -4,6 +4,7 @@
 //! validated against AES, whose values are published, before they are trusted
 //! on anything of ours.
 
+pub mod aes;
 pub mod analysis;
 pub mod avalanche;
 pub mod battery;
@@ -13,6 +14,7 @@ pub mod cube;
 pub mod differential;
 pub mod difflinear;
 pub mod division;
+pub mod fast;
 pub mod fault;
 pub mod gen;
 pub mod gf256;
@@ -22,11 +24,13 @@ pub mod integral;
 pub mod interpolation;
 pub mod invariant;
 pub mod keycheck;
+pub mod keyedsquare;
 pub mod keyrelations;
 pub mod keyschedule;
 pub mod leakage;
 pub mod matrix;
 pub mod memscan;
+pub mod mitm;
 pub mod nist;
 pub mod power;
 pub mod provable;
@@ -42,3 +46,4 @@ pub mod timing;
 pub mod toctou;
 pub mod trace;
 pub mod trail;
+pub mod yoyo;

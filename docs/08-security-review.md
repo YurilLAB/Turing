@@ -62,6 +62,14 @@ MixState every 4th or 5th round gives no more active S-boxes than AES over 7–8
 rounds. Turing now alternates the two layers, so no two ShiftRows +
 MixColumns rounds are ever adjacent (docs/09).
 
+**Measured in the fifth campaign (docs/14):** the yoyo game needs no
+subspace to survive the linear layer, only S ∘ L ∘ S with word-wise S
+layers, and MixState can be that L. It returns its pattern every time on 3
+rounds from the plaintext (bytes in, columns out) and on the 4 rounds from
+round 2 to round 5, which an attacker reaches only by guessing all of round
+key 0: 5 rounds for about 2^130 with the full codebook, less than the square
+attack reaches.
+
 ## Chosen-key and known-key settings
 
 The same 2009 work showed AES-256 is not an "ideal cipher" when an attacker
@@ -141,6 +149,15 @@ Beierle et al. citations, the biclique complexity (2^254.4).
 | 5 | This document | The timing test was still "planned" (done in step 8) and bicliques "to be tested in step 10" | Accuracy | Updated |
 | 6 | Doc 10 | "The best attack breaks 3 rounds" and "division property not covered" | Accuracy | The division property predicts, and a 2^32-plaintext run confirms, a 4-round key recovery; doc 10 now points to doc 11 |
 | 7 | New structured square attack | With two fixed sets, a correct attack is reported as failed about 6% of the time (a wrong key byte guess survives both sets with probability 2^-16) | Tooling | Adds sets until every byte is unique |
+
+## Review 7 (step 10, fifth campaign): earlier claims against the new attacks
+
+| # | Where | Problem | Severity | Fix |
+|---|---|---|---|---|
+| 1 | `structure.rs`, docs/09 | "An attack extended by a round at either end must guess a whole 16-byte round key": true, but with a 256-bit key 2^128 guesses are affordable on paper, and the square attack extended that way reaches 7 rounds | Accuracy (the rule's 8 rounds still hold) | Both now say what the guess costs and what it buys; docs/14 |
+| 2 | This document | Yoyo attacks listed among those MixState's full diffusion breaks; the yoyo game passes through MixState | Accuracy | Measured result added above |
+| 3 | README, `structure.rs` | "The best attack found reaches 4 rounds" | Accuracy | 4 run in practice, 7 on paper (docs/14) |
+| 4 | Doc 09 | Meet-in-the-middle listed as unmodelled | Gap | Demirci-Selçuk counts, validated on AES (docs/14): 4-round sequences need 36 parameters |
 
 ## Review 6 (after version 2): an outside review
 
