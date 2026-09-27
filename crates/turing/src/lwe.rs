@@ -163,6 +163,42 @@ pub fn keygen(p: &Params, seed_a: &[u8; SEED_A_BYTES], noise: &mut SecretXof, s:
     b.iter_mut().for_each(|x| *x &= mask);
 }
 
+/// Whether `b` is A S + E for this `s` with every entry of E in [-eta, eta]:
+/// B - A S recomputed row by row, each entry centred and range-checked
+/// without branching on it (E is secret). A key corrupted after it was made
+/// fails this whatever the corruption: an S entry changed by d changes
+/// column j of A S by A[i][k] d in all n rows, and a uniform A puts some of
+/// them far outside [-eta, eta] (probability about (37/32768)^1026 that none
+/// does). This is the deterministic check Fahr et al. recommend for FrodoKEM
+/// ("When Frodo Flips", CCS 2022, section 8.2), where a one-ciphertext
+/// pair-wise check misses about 2^-8 of single-bit faults in S (research/
+/// reviews/2026-09-28 R5). As costly as key generation's A S.
+pub fn check_key(p: &Params, seed_a: &[u8; SEED_A_BYTES], s: &[u16], b: &[u16]) -> bool {
+    p.validate();
+    assert!(s.len() == p.n * p.nbar && b.len() == p.n * p.nbar);
+    let (mask, eta) = (p.q_mask(), p.eta as u16);
+    let mut row = vec![0u16; p.n];
+    let mut acc = vec![0u16; p.nbar];
+    let mut bad = 0u32;
+    for i in 0..p.n {
+        matrix_row(p, seed_a, i, &mut row);
+        acc.fill(0);
+        for (k, &a) in row.iter().enumerate() {
+            for (x, &y) in acc.iter_mut().zip(&s[k * p.nbar..(k + 1) * p.nbar]) {
+                *x = x.wrapping_add(a.wrapping_mul(y));
+            }
+        }
+        for (x, &bi) in acc.iter().zip(&b[i * p.nbar..(i + 1) * p.nbar]) {
+            // e + eta lies in [0, 2 eta] exactly when e is in range; outside
+            // it, 2 eta - (e + eta) borrows into bit 31 (any log_q <= 16).
+            let shifted = u32::from(bi.wrapping_sub(*x).wrapping_add(eta) & mask);
+            bad |= (2 * u32::from(eta)).wrapping_sub(shifted) >> 31;
+        }
+    }
+    acc.zeroize();
+    core::hint::black_box(bad) == 0
+}
+
 /// Encrypts `msg` (message_bytes() bytes, bit i of the message in
 /// coefficient i of C, least significant bit of each byte first) under the
 /// public key (seed_a, B). S', E', E'' are drawn from `noise` in that order.
@@ -385,6 +421,30 @@ mod tests {
             }
         }
         assert!(s.iter().all(|&v| (v as i16).unsigned_abs() as u32 <= p.eta));
+    }
+
+    // check_key accepts the key it made and refuses every single-bit change
+    // of S that matters mod q: all 512 entries, all 12 bits, exhaustively.
+    #[test]
+    fn check_key_catches_every_single_bit_fault_in_s() {
+        let p = TOY;
+        let seed_a = [5u8; 32];
+        let mut s = vec![0u16; p.n * p.nbar];
+        let mut b = vec![0u16; p.n * p.nbar];
+        keygen(&p, &seed_a, &mut stream("Turing-1026 v1 test", 3), &mut s, &mut b);
+        assert!(check_key(&p, &seed_a, &s, &b), "control: the key as made passes");
+        for entry in 0..s.len() {
+            for bit in 0..p.log_q {
+                s[entry] ^= 1 << bit;
+                assert!(!check_key(&p, &seed_a, &s, &b), "S[{entry}] bit {bit} passed");
+                s[entry] ^= 1 << bit;
+            }
+        }
+        // A public key that is not A S + small noise for this S fails too.
+        let mut other = b.clone();
+        other[7] = other[7].wrapping_add(1 << (p.log_q - 1)) & p.q_mask();
+        assert!(!check_key(&p, &seed_a, &s, &other));
+        assert!(!check_key(&p, &[6u8; 32], &s, &b), "another matrix");
     }
 
     #[test]

@@ -167,9 +167,15 @@ impl<const N: usize> RoundKeys<N> {
     /// Whether the round keys still match their checksum, at a point that is
     /// still odd (CHECK_CONSTANT explains why both are needed). Compares
     /// without branching on the data.
+    ///
+    /// The recomputed check is wiped here, and the checked calls burn the
+    /// stack afterwards: the point H is as secret as the key, and until the
+    /// review of 2026-09-28 (R4) every checked call left H and the check in
+    /// dead stack, where they tell an attacker which faults would pass.
     pub(crate) fn intact(&self) -> bool {
-        let now = sealed_check(&self.material.keys, &self.material.point);
+        let mut now = sealed_check(&self.material.keys, &self.material.point);
         let diff = now.iter().zip(&self.material.check).fold(0u8, |acc, (a, b)| acc | (a ^ b));
+        now.zeroize();
         let even = !self.material.point[0] & 1;
         (diff | even) == 0
     }
@@ -208,6 +214,12 @@ impl<const N: usize> RoundKeys<N> {
     #[cfg(feature = "analysis")]
     pub fn all(&self) -> &[Block; N] {
         &self.material.keys
+    }
+
+    /// The checksum's point and the stored check, for the residue tests.
+    #[cfg(test)]
+    pub(crate) fn point_and_check(&self) -> (Block, Block) {
+        (self.material.point, self.material.check)
     }
 
     /// Bits of stored material that the integrity check reads: the round

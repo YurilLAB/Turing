@@ -39,7 +39,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PY = sys.executable
 PROFILES = ["quick", "full", "deep"]
 ITERS = {"quick": "1", "full": "5", "deep": "25"}
-MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7", "--review1", "--mlkem"]
+MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7", "--review1", "--mlkem", "--review2"]
 SIM = ROOT / "research" / "workfiles" / "sim"
 SIM_STATE, NOISE_STATE = str(SIM / "failures-state.json"), str(SIM / "noise-state.txt")
 
@@ -66,6 +66,8 @@ def stages(profile):
          "the whole test suite, optimised (as the docs run it)"),
         ("overflow", "quick", [t_ovf], ["cargo", "test", "--workspace"], 3600, False,
          "the whole suite with overflow checks and debug assertions, which --release turns off"),
+        ("production", "quick", [["CARGO_TARGET_DIR", "target/ci-production"]], ["cargo", "test", "--release", "-p", "turing"], 1800, False,
+         "the library alone, without the analysis feature a workspace build turns on: what users build, where inlining differs"),
         ("robustness", "quick", [t_rel, ["TURING_CI_ITERS", ITERS[profile]]],
          ["cargo", "test", "--release", "-p", "bombe", "--test", "robustness"], 1800, False,
          "rare, boundary and out-of-range inputs against the independent references"),

@@ -41,7 +41,7 @@ quantum collision finding weakens most.
 | Even rounds | ShiftRows (rows rotate left by 0, 1, 3, 4) + Turing's 4 x 4 MixColumns on all 8 columns | Rijndael's offsets for 8 columns: each column's bytes go to four different columns |
 | Last round | no linear layer | as Turing |
 | Key schedule | cSHAKE256(K, "Turing-256 v1 key") to 64 bytes; Feistel on 32-byte halves with F(x) = MixState256(S(x ⊕ C_j)); 9 warm-up rounds, then a pair of round keys every 8 rounds; feed-forward | Turing's schedule (docs/07) on wider halves |
-| Fault check | Turing's keyed checksum over the 50 stored 16-byte blocks, point from "Turing-256 v1 key check" | unchanged (docs/13) |
+| Fault check | Turing's keyed checksum over the 50 stored 16-byte blocks, point from "Turing-256 v1 key check" | docs/13's construction; over 50 blocks the bound is 50/2^127, twice Turing's 25/2^127 |
 
 MixState256 comes from cSHAKE256(X = counter, S = "Turing-256 v1
 MixState"): the first 64 distinct bytes are the points x_0..x_31, y_0..y_31
@@ -105,7 +105,8 @@ Section 24 of `bombe attack` (and `tests/turing256.rs`):
   the full cipher passes all 11 statistics.
 - **Faults.** Random bit flips anywhere in the stored round keys, checksum
   and point: every one caught by the checked calls, block wiped.
-- **Memory.** Round keys in locked pages excluded from core dumps; the
+- **Memory.** Round keys in locked pages (excluded from core dumps on Linux
+  and Android; Windows has no such call); the
   memory-dump scan finds key material only in the caller's key buffer and
   the round keys' page, after key setup, after encryptions and after drop.
 - **Timing.** dudect on encryption, decryption and key setup.

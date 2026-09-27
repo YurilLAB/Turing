@@ -12,9 +12,9 @@
 //! can be searched; with 256 unknown, the search is no faster than guessing
 //! the key.
 //!
-//! The key is unshielded only inside `cipher` and `masked`, into a stack
-//! buffer that is wiped straight after the key schedule has run, and the
-//! stack below it is burned (memory.rs). `refresh` replaces the prekey and
+//! The key is unshielded only inside `cipher` and `masked`, into a locked
+//! allocation of its own (`with_key`) that is wiped straight after the key
+//! schedule has run, and the stack below it is burned (memory.rs). `refresh` replaces the prekey and
 //! re-masks by XORing in the combined mask difference, so the plain key
 //! never appears.
 

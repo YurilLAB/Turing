@@ -7,24 +7,49 @@
 //! would unlock any other secret on the same page: hence one allocation per
 //! secret. Contents are wiped before the memory goes back to the system.
 //!
-//! Locking can be refused (Windows allows about the minimum working set,
-//! Unix RLIMIT_MEMLOCK). The value then lives in ordinary memory, `locked()`
-//! says so, and it is still wiped. `dump_excluded()` and `wiped_on_fork()`
-//! report the kernel's answer to the madvise calls the same way, false
-//! wherever the platform has no such call. Hibernation writes all of RAM to disk,
-//! locked or not; only full-disk encryption covers that. mlock(2) is not
-//! inherited across fork(2): a child process that keeps using a cipher made
-//! before the fork holds its keys in pages that may be swapped.
+//! Locking is limited: Windows lets a process lock about its minimum working
+//! set (200 KB by default, measured: two Turing-1026 keys), Linux its
+//! RLIMIT_MEMLOCK. When a lock is refused for that reason, the allocation
+//! grows the limit and tries once more: on Windows the minimum and maximum
+//! working set, as Microsoft's VirtualLock documentation says an application
+//! that locks more pages must ("must first call the SetProcessWorkingSetSize
+//! function"), by at most 64 MB in all; on Linux the soft RLIMIT_MEMLOCK, up
+//! to the hard limit. Locking can still be refused (a hard limit, or no
+//! memory to spare). The value then lives in ordinary memory, `locked()` says
+//! so, `unlocked_allocations()` counts it for the whole process, and it is
+//! still wiped. `dump_excluded()` and `wiped_on_fork()` report the kernel's
+//! answer to the madvise calls the same way, false wherever the platform has
+//! no such call. Hibernation writes all of RAM to disk, locked or not; only
+//! full-disk encryption covers that. mlock(2) is not inherited across
+//! fork(2): a child process that keeps using a cipher made before the fork
+//! holds its keys in pages that may be swapped.
 //!
 //! Values computed on the way to a key (the whitened key, Feistel halves,
 //! Keccak states) pass through the stack, and compiler temporaries there are
 //! out of reach of `zeroize`. `burn_stack` overwrites the stack below the
 //! caller after key setup, as libgcrypt's `_gcry_burn_stack` does after its
 //! key schedules; Bombe's memory scan (docs/13) checks that nothing is left.
+//! It reaches only the frames *below* its caller, so every public operation
+//! that handles a secret is an outer function that calls an
+//! `#[inline(never)]` worker and then burns: the worker's frame, and every
+//! frame it called, lie below the burn.
 
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroize;
+
+/// Allocations the operating system refused to lock, since the process
+/// started (see the module notes).
+static UNLOCKED: AtomicU64 = AtomicU64::new(0);
+
+/// How many `SecretBox` allocations, over the whole process so far, ended up
+/// in memory the operating system would not lock (and may page out). Zero
+/// means every secret, long-lived keys and per-operation scratch alike, was
+/// locked. The per-box answer is `SecretBox::locked`.
+pub fn unlocked_allocations() -> u64 {
+    UNLOCKED.load(Ordering::Relaxed)
+}
 
 /// Plain data for which all-zero bytes are a valid value, so fresh zeroed
 /// pages can hold it, and which contains no pointers.
@@ -76,7 +101,7 @@ impl<T: Zeroable> SecretBox<T> {
     fn allocate(wipe_on_fork: bool) -> SecretBox<T> {
         let bytes = core::mem::size_of::<T>();
         assert!(bytes > 0 && core::mem::align_of::<T>() <= 4096);
-        match os::map(bytes, wipe_on_fork) {
+        let b = match os::map(bytes, wipe_on_fork) {
             Some(m) => SecretBox { ptr: m.ptr.cast(), mapped: m.size, locked: m.locked, dump_excluded: m.dump_excluded, wiped_on_fork: m.wiped_on_fork },
             None => {
                 let layout = std::alloc::Layout::new::<T>();
@@ -85,7 +110,11 @@ impl<T: Zeroable> SecretBox<T> {
                 let ptr = NonNull::new(raw.cast::<T>()).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
                 SecretBox { ptr, mapped: 0, locked: false, dump_excluded: false, wiped_on_fork: false }
             }
+        };
+        if !b.locked {
+            UNLOCKED.fetch_add(1, Ordering::Relaxed);
         }
+        b
     }
 
     /// Whether the operating system agreed to keep this memory out of the
@@ -167,11 +196,78 @@ pub fn burn_stack() {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
+/// The most the lock limit is ever raised, in total, and the smallest step.
+const MAX_LOCK_GROWTH: usize = 64 << 20;
+const LOCK_GROWTH_STEP: usize = 1 << 20;
+
+/// Test support for the residue tests: what an attacker who reads the stack
+/// after an operation would see.
+#[cfg(test)]
+pub(crate) mod residue {
+    /// Bytes of dead stack a snapshot covers: every public operation of
+    /// this crate uses less (research/reviews/2026-09-28: 2.7 KB to 24 KB).
+    pub const SCAN: usize = 24 * 1024;
+
+    /// Runs `op` in a frame of its own, so that a `snapshot` taken next from
+    /// the same caller reads exactly the stack `op` used.
+    #[inline(never)]
+    pub fn run(op: &mut dyn FnMut()) {
+        op();
+    }
+
+    /// Copies the `out.len()` bytes just below this function's frame into
+    /// `out` with volatile loads and no calls (not even a panic path, which
+    /// would enlarge this frame over the region it reads), so nothing
+    /// overwrites that region while it is read. Call it right after `run`,
+    /// from the same function, with a buffer of `SCAN` bytes.
+    #[inline(never)]
+    pub fn snapshot(out: &mut [u8]) {
+        let marker = 0u8;
+        let top = core::hint::black_box(&marker as *const u8 as usize) & !7;
+        let base = top - out.len();
+        for (i, o) in out.iter_mut().enumerate() {
+            // SAFETY: this thread's stack below the live frame, which stays
+            // mapped (the tests run on threads with megabytes of stack).
+            *o = unsafe { ((base + i) as *const u8).read_volatile() };
+        }
+    }
+
+    /// Whether `needle` occurs anywhere in `hay`.
+    pub fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Whether any of the lanes a Keccak state keeps out of every output
+    /// (17..25, the capacity of a 136-byte rate and part of SHA3-512's) is
+    /// in `hay`: a copy of the state, or of enough of it to invert.
+    pub fn contains_state(hay: &[u8], lanes: &[u64; 25]) -> bool {
+        lanes[17..].iter().any(|l| contains(hay, &l.to_le_bytes()))
+    }
+
+    /// Copies a value into a callee's frame, 32 times over a kilobyte-deep
+    /// array as a real operation's deeper frames would hold it, and returns:
+    /// the control that shows a snapshot finds what an operation left behind.
+    #[inline(never)]
+    pub fn leave<T: Copy>(value: &T) {
+        let copies = [*value; 32];
+        core::hint::black_box(&copies);
+        let deeper = [0u8; 1024];
+        core::hint::black_box(&deeper);
+    }
+}
+
 #[cfg(windows)]
 mod os {
-    use super::Mapping;
+    use super::{Mapping, LOCK_GROWTH_STEP, MAX_LOCK_GROWTH};
     use core::ptr::NonNull;
+    use std::sync::Mutex;
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_WORKING_SET_QUOTA};
     use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, VirtualLock, VirtualUnlock, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessWorkingSetSize, SetProcessWorkingSetSize};
+
+    /// Bytes this library has added to the working set so far. The lock also
+    /// serialises growing, so two threads never read the same old sizes.
+    static GROWN: Mutex<usize> = Mutex::new(0);
 
     /// Committed, zero-filled pages (VirtualAlloc zeroes them), locked if
     /// allowed. Windows has no fork(2), so there is nothing to wipe on fork,
@@ -180,9 +276,50 @@ mod os {
         let size = bytes.div_ceil(4096) * 4096;
         // SAFETY: plain allocation call; the result is checked for null.
         let ptr = NonNull::new(unsafe { VirtualAlloc(core::ptr::null(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) }.cast::<u8>())?;
-        // SAFETY: the region was just committed.
-        let locked = unsafe { VirtualLock(ptr.as_ptr().cast(), size) } != 0;
+        let locked = lock(ptr, size);
         Some(Mapping { ptr, size, locked, dump_excluded: false, wiped_on_fork: false })
+    }
+
+    /// VirtualLock on a region just committed.
+    fn try_lock(ptr: NonNull<u8>, size: usize) -> bool {
+        // SAFETY: the region is committed and owned by the caller.
+        unsafe { VirtualLock(ptr.as_ptr().cast(), size) != 0 }
+    }
+
+    /// Locks the region; if the working-set quota refuses it, grows the
+    /// minimum and maximum working set (by at least 1 MB, at most 64 MB in
+    /// all) and tries once more. "The maximum number of pages that a process
+    /// can lock is equal to the number of pages in its minimum working set
+    /// minus a small overhead" (VirtualLock, Microsoft Learn).
+    fn lock(ptr: NonNull<u8>, size: usize) -> bool {
+        if try_lock(ptr, size) {
+            return true;
+        }
+        // SAFETY: reads the calling thread's last error, set by VirtualLock.
+        if unsafe { GetLastError() } != ERROR_WORKING_SET_QUOTA {
+            return false;
+        }
+        let mut grown = GROWN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Another thread may have grown the working set while this one waited.
+        if try_lock(ptr, size) {
+            return true;
+        }
+        let step = (size + 16 * 4096).max(LOCK_GROWTH_STEP);
+        if *grown + step > MAX_LOCK_GROWTH {
+            return false;
+        }
+        let (mut min, mut max) = (0usize, 0usize);
+        // SAFETY: the pseudo-handle of this process, which has every access
+        // right (PROCESS_SET_QUOTA included); the out-pointers are live.
+        let set = unsafe {
+            let process = GetCurrentProcess();
+            GetProcessWorkingSetSize(process, &mut min, &mut max) != 0 && SetProcessWorkingSetSize(process, min + step, max + step) != 0
+        };
+        if !set {
+            return false;
+        }
+        *grown += step;
+        try_lock(ptr, size)
     }
 
     /// # Safety
@@ -214,8 +351,7 @@ mod os {
         if raw == libc::MAP_FAILED {
             return None;
         }
-        // SAFETY: the region was just mapped.
-        let locked = unsafe { libc::mlock(raw, size) } == 0;
+        let locked = lock(raw, size);
         #[cfg(any(target_os = "linux", target_os = "android"))]
         // SAFETY: our own fresh private anonymous mapping, whose contents
         // neither advice changes. A kernel older than 4.14 refuses
@@ -228,6 +364,62 @@ mod os {
             (false, false)
         };
         Some(Mapping { ptr: NonNull::new(raw.cast::<u8>())?, size, locked, dump_excluded, wiped_on_fork })
+    }
+
+    /// mlock(2) on a region just mapped.
+    fn try_lock(raw: *mut libc::c_void, size: usize) -> bool {
+        // SAFETY: the region was just mapped by the caller.
+        unsafe { libc::mlock(raw, size) == 0 }
+    }
+
+    /// Bytes this library has added to RLIMIT_MEMLOCK so far; the lock also
+    /// serialises raising it.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    static GROWN: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+    /// Locks the region; if RLIMIT_MEMLOCK refuses it (ENOMEM, or EPERM at a
+    /// zero limit, mlock(2)), raises the soft limit towards the hard one (by
+    /// at least 1 MB, at most 64 MB in all) and tries once more. An
+    /// unprivileged process may raise its soft limit up to the hard limit
+    /// (setrlimit(2)).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn lock(raw: *mut libc::c_void, size: usize) -> bool {
+        use super::{LOCK_GROWTH_STEP, MAX_LOCK_GROWTH};
+        if try_lock(raw, size) {
+            return true;
+        }
+        let err = std::io::Error::last_os_error().raw_os_error();
+        if err != Some(libc::ENOMEM) && err != Some(libc::EPERM) {
+            return false;
+        }
+        let mut grown = GROWN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if try_lock(raw, size) {
+            return true;
+        }
+        let step = (size + 16 * 4096).max(LOCK_GROWTH_STEP);
+        if *grown + step > MAX_LOCK_GROWTH {
+            return false;
+        }
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: getrlimit fills the struct it is given.
+        if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0 {
+            return false;
+        }
+        if limit.rlim_cur == libc::RLIM_INFINITY || limit.rlim_cur >= limit.rlim_max {
+            return false;
+        }
+        let raised = libc::rlimit { rlim_cur: limit.rlim_cur.saturating_add(step as libc::rlim_t).min(limit.rlim_max), rlim_max: limit.rlim_max };
+        // SAFETY: setrlimit reads the struct it is given.
+        if unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raised) } != 0 {
+            return false;
+        }
+        *grown += step;
+        try_lock(raw, size)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn lock(raw: *mut libc::c_void, size: usize) -> bool {
+        try_lock(raw, size)
     }
 
     /// madvise(2), reporting whether the kernel took the advice. It refuses
@@ -288,6 +480,87 @@ mod tests {
         // no fork, so both report false rather than a protection not given.
         let w: SecretBox<[u8; 32]> = SecretBox::zeroed_fork_wiped();
         assert!(!b.dump_excluded() && !w.dump_excluded() && !w.wiped_on_fork());
+    }
+
+    // More secret memory than the default quota covers (a 200 KB minimum
+    // working set locks about 44 pages; these are 384) is all locked: the
+    // allocation grows the working set when the quota refuses a lock.
+    // Before, the third Turing-1026 key and every workspace after it were
+    // left unlocked.
+    #[test]
+    #[cfg(windows)]
+    fn secrets_beyond_the_default_quota_are_locked_on_windows() {
+        let boxes: Vec<SecretBox<[u8; 64 * 1024]>> = (0..24).map(|_| SecretBox::zeroed()).collect();
+        let unlocked = boxes.iter().filter(|b| !b.locked()).count();
+        assert_eq!(unlocked, 0, "{unlocked} of 24 boxes of 64 KB unlocked");
+    }
+
+    // The same on Linux: with the soft RLIMIT_MEMLOCK lowered to 64 KB (in a
+    // child process, so no other test sees the limit), 8 boxes of 64 KB are
+    // still all locked, because the soft limit is raised towards the hard
+    // one. Control: at a hard limit of 64 KB nothing can be raised, and the
+    // refusals are counted.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_raises_the_soft_memlock_limit() {
+        let run = |hard_too: bool| -> [u8; 3] {
+            in_child(move || {
+                let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                // SAFETY: plain limit calls on this child process.
+                unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
+                let low = 64 * 1024;
+                let max = if hard_too { low } else { limit.rlim_max };
+                // SAFETY: as above.
+                let ok = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &libc::rlimit { rlim_cur: low, rlim_max: max }) } == 0;
+                let before = unlocked_allocations();
+                let boxes: Vec<SecretBox<[u8; 64 * 1024]>> = (0..8).map(|_| SecretBox::zeroed()).collect();
+                let locked = boxes.iter().filter(|b| b.locked()).count() as u8;
+                [u8::from(ok), locked, (unlocked_allocations() - before) as u8]
+            })
+        };
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: reads this process's limit.
+        unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
+        if limit.rlim_max != libc::RLIM_INFINITY && limit.rlim_max < 2 << 20 {
+            eprintln!("hard RLIMIT_MEMLOCK below 2 MB: nothing to raise into, test skipped");
+            return;
+        }
+        let [ok, locked, refused] = run(false);
+        assert!(ok == 1 && locked == 8 && refused == 0, "soft limit 64 KB: {locked} of 8 locked, {refused} counted");
+        let [ok, locked, refused] = run(true);
+        assert!(ok == 1 && locked < 8 && u32::from(refused) == 8 - u32::from(locked), "control: hard limit 64 KB locked {locked}, counted {refused}");
+    }
+
+    /// Runs `child` in a forked child and returns the 3 bytes it writes back.
+    #[cfg(target_os = "linux")]
+    fn in_child(child: impl FnOnce() -> [u8; 3]) -> [u8; 3] {
+        let mut fds = [0i32; 2];
+        // SAFETY: pipe fills the two descriptors.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: the child runs only `child`, write and _exit.
+        match unsafe { libc::fork() } {
+            0 => {
+                let out = child();
+                // SAFETY: plain system calls in the child.
+                unsafe {
+                    libc::write(fds[1], out.as_ptr().cast(), out.len());
+                    libc::_exit(0);
+                }
+            }
+            pid if pid > 0 => {
+                let mut out = [0u8; 3];
+                // SAFETY: reads into `out`; waits for our own child.
+                unsafe {
+                    assert_eq!(libc::read(fds[0], out.as_mut_ptr().cast(), 3), 3, "child wrote nothing");
+                    let mut status = 0;
+                    libc::waitpid(pid, &mut status, 0);
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                out
+            }
+            _ => panic!("fork failed"),
+        }
     }
 
     #[test]

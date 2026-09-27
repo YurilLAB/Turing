@@ -350,3 +350,28 @@ research/workfiles/review-crypto/ (local):
 - `symmetric/`: cSHAKE cross-checks, residue and lock-quota probes. `cipher/`: the cipher
   probes (residue, crafted fault, fault resets) and the independent Python reference.
 - `logs/baseline-release.log`: the release test suite at the start.
+
+## Fixes
+
+Every finding is fixed in the commit after this review. The major ones have several independent
+defences, each enough on its own for the bug found; every defence has a test or a check, and a
+planted bug that undoes it is caught (`tools/mutate.py --review2`, 17 planted bugs). The new
+residue tests were also run on the unfixed code, where they fail for the reason found here.
+
+| # | Fix | Evidence |
+|---|---|---|
+| R1 | (1) `SecretXof`'s state lives in its own locked allocation, never on the stack, so a move moves a pointer; (2) `wipe()` clears it in place and refuses reuse, and every `drop(<XOF>)` is gone; (3) `from_seed` runs its work (expansion and both checks) in an `#[inline(never)]` frame below the burn, `pair_consistent` is `#[inline(never)]`, `new_key` likewise; (4) `cshake256_secret` runs on `SecretXof`, so no secret path uses the sha3 crate's by-value states | `no_sponge_state_is_left_on_the_stack` records every secret sponge's final state and searches dead stack after `from_seed`, `generate`, `encapsulate`, `decapsulate` (valid and rejected), with a planted-copy control; on the unfixed code it fails ("from_seed: sponge state 1 of 10 is in dead stack"). `secret_xof_state_lives_off_the_stack`, `wipe_clears_the_state_in_place`, `secret_xof_refuses_use_after_wipe` |
+| R2 | (1) the selections are separate `#[inline(never)]` functions (`select_into`), the mask behind a value barrier inside; (2) a third verdict (the second run packed and compared as bytes) binds the accepted key: `bind_to_verdict` makes it cSHAKE256(c ‖ k' ⊕ K̄) unless that verdict accepts; (3) `tools/ct_check.py` fails unless the release build derives three masks and calls `select_into` twice and `bind_to_verdict` once | production asm: three `sarq $63` in three registers feeding three calls; `ct_check.py` on the unfixed build: 3 failures. Fault map: forcing both selection verdicts now gives denial of service; a bypass takes two correlated faults on the data side or three verdicts. Planted bugs: binding removed, binding verdict forced, binding reading the first run (fault map); selections fused, `select_into` inlined (`ct_check.py`) |
+| R3 | (1) G, J and PRF hash on `SecretXof`; (2) K and r are written straight into the caller's buffers and wiped; (3) `mlkem::keygen/encapsulate/decapsulate`, the entry points the hybrid will call, run below a stack burn, as do the analysis wrappers | `entry_points_leave_no_secret_on_the_stack` (K, r and every sponge state, all three parameter sets, with a control) |
+| R4 | `intact()` wipes the recomputed check (and the masked `a`, `b`); every checked call (Turing, Turing-256, masked) runs `guarded` in an `#[inline(never)]` frame and burns the stack after it | `checked_calls_leave_no_checksum_point_behind` for all three ciphers, with a control; on the unfixed code it fails ("encrypt_block_checked left H or the check") |
+| R5 | `lwe::check_key`: B − A·S must lie in [−η, η] everywhere (branch-free), run with the pair-wise check at every key generation | `check_key_catches_every_single_bit_fault_in_s` (exhaustive on a small set), `faults_the_pair_wise_check_missed_are_caught` (the 8 escapes found here: the pair-wise check alone passes them, both checks refuse them), 240 random flips in bits 0-14 in Bombe; cost 29 → 37 ms per key generation |
+| R6 | docs/16, docs/17 and fault1026.rs list the decoder (Pessl-Prokop) as the second single-fault hole, with the literature's mitigations | documentation |
+| R7 | `ct_check.py` reads ML-KEM in an `analysis` build and fails when a listed module has no function in its build | a division planted in Compress now fails in two functions (the old check passed it) |
+| R8 | a fork generation, moved on in every child by a `pthread_atfork` handler, is compared with the process ID (and, on Linux, the MADV_WIPEONFORK pages) | `a_fork_child_reseeds_even_when_its_pid_matches`, `fork_generation_moves_on_only_in_the_child` (Linux, in WSL) |
+| R9 | `self_test()` runs `MaskedTuring` on the known-answer vectors with OS masks, and a fixed-seed `MaskStream` draw against cSHAKE256 | the x^9, missing-constant and never-permuting mutants now fail `self_test` |
+| R10 | `mlkem::Params` has private fields: only the three FIPS 203 sets exist; the entry points return `InputError` for wrong lengths, a key failing the modulus check, a key failing the hash check | `entry_points_refuse_bad_inputs` |
+| R11 | a refused lock grows the limit once (Windows working set, Linux soft RLIMIT_MEMLOCK, at most 64 MB) and retries; `memory::unlocked_allocations()` counts what stayed unlocked; README and docs/16 qualified | `secrets_beyond_the_default_quota_are_locked_on_windows` (24 × 64 KB), `linux_raises_the_soft_memlock_limit` (with a hard-limit control) |
+| R12, R13 | masked.rs and docs/13 say key setup is unmasked; ten labels; `with_key`'s SecretBox; docs/15's bound and core-dump note; docs/13's GF(2^8) bound, now reproduced by `research/scripts/gf8_checksum_bound.py` | documentation, the script |
+
+CI: a `production` stage and workflow step test the library without `analysis` (the build users
+get, where R1 lived), and `--review2` joins the planted-bug sets.

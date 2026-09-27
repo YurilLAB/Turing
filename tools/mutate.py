@@ -5,12 +5,15 @@ tests caught it and always restores the original file (and verifies it). A
 test run that exceeds the time limit has not passed either: it counts as
 caught, and the whole process tree is killed.
 
-    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7 | --review1 | --mlkem] [--check] [NAME ...]
+    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7 | --review1 | --mlkem | --review2] [--check] [NAME ...]
 
 --check only verifies that every pattern still matches the current code
 exactly once, without running any tests. NAME filters mutations by name.
 Test arguments that start with "--wsl" run the tests on Linux in WSL
-(tools/wsl_linux.py), for the Linux-only code paths.
+(tools/wsl_linux.py), for the Linux-only code paths; arguments that start
+with "--python" run a Python check instead of cargo (tools/ct_check.py, for
+what only the machine code shows), and a failing exit status counts as
+caught there too.
 """
 import os
 import pathlib
@@ -68,7 +71,7 @@ MUTATIONS_STEP8 = [
 
 MUTATIONS_STEP9 = [
     ("xof: secret cSHAKE drops its label", "crates/turing/src/xof.rs",
-     "let mut core = CShake256Core::new(label.as_bytes());", 'let mut core = CShake256Core::new(b"");',
+     "    let mut x = SecretXof::new(label);\n    x.absorb(input);", "    let mut x = SecretXof::shake256();\n    x.absorb(input);",
      ["-p", "turing", "--lib"]),
     ("keyschedule: right half of K' copied from the left half", "crates/turing/src/keyschedule.rs",
      "whitened[16 + i]", "whitened[i]",
@@ -196,7 +199,8 @@ TURING = ["-p", "turing", "--lib"]
 MUTATIONS_ROUND4 = [
     # Keys in memory
     ("memory: key pages not locked", "crates/turing/src/memory.rs",
-     "let locked = unsafe { VirtualLock(ptr.as_ptr().cast(), size) } != 0;", "let locked = false;",
+     "        let locked = lock(ptr, size);\n        Some(Mapping { ptr, size, locked, dump_excluded: false, wiped_on_fork: false })",
+     "        let locked = { let _ = lock; false };\n        Some(Mapping { ptr, size, locked, dump_excluded: false, wiped_on_fork: false })",
      TURING),
     ("memory: drop skips the wipe", "crates/turing/src/memory.rs",
      "        (**self).zeroize();\n        // SAFETY: the value's bytes", "        // SAFETY: the value's bytes",
@@ -224,7 +228,7 @@ MUTATIONS_ROUND4 = [
      "st.lanes[SEED_BYTES / 8] ^= 0x04 << (8 * (SEED_BYTES % 8));", "st.lanes[SEED_BYTES / 8] ^= 0x06 << (8 * (SEED_BYTES % 8));",
      TURING),
     ("random: check_fork never reseeds", "crates/turing/src/random.rs",
-     "if self.state.seeded == 0 || self.state.pid != u64::from(std::process::id()) {", "if false {",
+     "if st.seeded == 0 || st.generation != fork_generation() || st.pid != u64::from(std::process::id()) {", "if { let _ = st; false } {",
      TURING),
     ("random (Linux): a wiped state is not reseeded", "crates/turing/src/random.rs",
      "        if self.state.seeded == 0 {\n            self.check_fork();\n        }", "",
@@ -410,8 +414,8 @@ MUTATIONS_ROUND6 = [
 MUTATIONS_ROUND7 = [
     # Turing-1026, the KEM (docs/16)
     ("turing-1026: rejection returns the decrypted key", "crates/turing/src/turing1026.rs",
-     "                let tmp = *out ^ ((*out ^ k) & accept_bytes);\n                *out ^= (*out ^ tmp) & accept_coeffs;",
-     "                let _ = (accept_bytes, accept_coeffs);\n                *out = k;",
+     "            select_into(tmp, accepted, accept_bytes);\n            select_into(&mut key, tmp, accept_coeffs);",
+     "            let _ = (accept_bytes, accept_coeffs);\n            key.copy_from_slice(&accepted[..]);",
      TURING),
     ("turing-1026: re-encryption byte check always accepts", "crates/turing/src/turing1026.rs",
      "        let accept_bytes = fault.accept_packed(eq_mask(&w.packed, body));",
@@ -422,8 +426,8 @@ MUTATIONS_ROUND7 = [
      "        let accept_coeffs = fault.accept_coeffs(0xffu8);",
      ["-p", "bombe", "--release", "--lib", "fault1026"]),
     ("turing-1026: selection collapses to one check", "crates/turing/src/turing1026.rs",
-     "                *out ^= (*out ^ tmp) & accept_coeffs;",
-     "                *out ^= (*out ^ tmp) & 0xffu8;",
+     "            select_into(&mut key, tmp, accept_coeffs);",
+     "            select_into(&mut key, tmp, { let _ = accept_coeffs; 0xffu8 });",
      ["-p", "bombe", "--release", "--lib", "fault1026"]),
     ("turing-1026: only one re-encryption (shared intermediate)", "crates/turing/src/turing1026.rs",
      "        // as coefficients: reads a separate computation from the first.\n        self.public.reencrypt(&mut w);\n        {\n            let Workspace { bp, c, .. } = &mut *w;\n            fault.intermediate(2, bp, c);\n        }",
@@ -465,7 +469,7 @@ MUTATIONS_ROUND7 = [
      "    input[SEED_A_BYTES..].copy_from_slice(&(i as u16).to_le_bytes());", "    let _ = i;",
      TURING),
     ("xof: SecretXof pads like SHAKE", "crates/turing/src/xof.rs",
-     "            self.lanes[self.pos / 8] ^= 0x04 << (8 * (self.pos % 8));", "            self.lanes[self.pos / 8] ^= 0x1f << (8 * (self.pos % 8));",
+     "        let mut x = SecretXof::sponge(RATE, 0x04);", "        let mut x = SecretXof::sponge(RATE, 0x1f);",
      TURING),
     # The analysis behind it
     ("dfr: n products instead of 2n", "crates/bombe/src/dfr.rs",
@@ -532,8 +536,8 @@ MUTATIONS_REVIEW1 = [
 MLKEM_VECTORS = ["-p", "bombe", "--release", "--test", "mlkem"]
 MUTATIONS_MLKEM = [
     ("ml-kem: key generation hashes G(d) without k (the FIPS 203 draft)", "crates/turing/src/mlkem.rs",
-     "    let (rho, mut sigma) = if ipd { g(&[d]) } else { g(&[d, &k_byte]) };",
-     "    let (rho, mut sigma) = if ipd { g(&[d]) } else { g(&[d]) };",
+     "        g(&[d, &k_byte], &mut rho, &mut sigma);",
+     "        g(&[d], &mut rho, &mut sigma);",
      MLKEM_VECTORS + ["every_official_vector_passes"]),
     ("ml-kem: SampleNTT reads rho || i || j", "crates/turing/src/mlkem.rs",
      "            sample_ntt(rho, j as u8, i as u8, entry);", "            sample_ntt(rho, i as u8, j as u8, entry);",
@@ -572,6 +576,84 @@ MUTATIONS_MLKEM = [
      MLKEM_VECTORS + ["every_official_vector_passes"]),
 ]
 
+# The fixes of the 2026-09-28 review (research/reviews/2026-09-28/crypto-audit.md):
+# each planted bug undoes one defence, and a test or check added with the fix
+# must catch it. Defences layered on the same bug (R1, R3) are each enough on
+# their own, so removing one leaves the others holding; those are shown by
+# the tests' own controls and by running the tests on the unfixed code.
+CT_CHECK = ["--python", "tools/ct_check.py"]
+MUTATIONS_REVIEW2 = [
+    # R1: the seed in a leftover sponge state
+    ("xof: wipe leaves the state", "crates/turing/src/xof.rs",
+     "        self.state.zeroize();\n        self.state.wiped = 1;", "        self.state.wiped = 1;",
+     TURING + ["wipe_clears_the_state_in_place"]),
+    # R2: the verdicts fused, or the accepted key no longer bound
+    ("turing-1026: accepted key not bound to the comparison", "crates/turing/src/turing1026.rs",
+     "        bind_to_verdict(&mut coins[COIN_SEED_BYTES..], &key, accept_binding);",
+     "        let _ = accept_binding;",
+     BOMBE_LIB + ["fault1026"]),
+    ("turing-1026: binding verdict always accepts", "crates/turing/src/turing1026.rs",
+     "        let accept_binding = fault.accept_binding(eq_mask(&w.packed, body));",
+     "        let accept_binding = fault.accept_binding(0xffu8);",
+     BOMBE_LIB + ["fault1026"]),
+    ("turing-1026: binding verdict reads the first run", "crates/turing/src/turing1026.rs",
+     "        self.public.pack_reencryption(&mut w);\n        let accept_binding",
+     "        let accept_binding",
+     BOMBE_LIB + ["fault1026"]),
+    ("turing-1026: the two selections fused into one mask", "crates/turing/src/turing1026.rs",
+     "            select_into(tmp, accepted, accept_bytes);\n            select_into(&mut key, tmp, accept_coeffs);",
+     "            let _ = tmp;\n            select_into(&mut key, accepted, accept_bytes & accept_coeffs);",
+     CT_CHECK),
+    ("turing-1026: selection inlined", "crates/turing/src/turing1026.rs",
+     "#[inline(never)]\nfn select_into(", "#[inline(always)]\nfn select_into(",
+     CT_CHECK),
+    # R3 and R7: ML-KEM's division check
+    ("ml-kem: Compress divides by q (KyberSlash)", "crates/turing/src/mlkem.rs",
+     "    let quotient = ((u64::from(v) * COMPRESS_M) >> 40) as u32;", "    let quotient = v / core::hint::black_box(Q);",
+     CT_CHECK),
+    # R4: the checksum point left in dead stack
+    ("checked: no stack burn after encrypt_block_checked", "crates/turing/src/cipher.rs",
+     "        let result = self.guarded(block, true, || {});\n        crate::memory::burn_stack();",
+     "        let result = self.guarded(block, true, || {});",
+     TURING + ["checked_calls_leave_no_checksum_point_behind"]),
+    ("masked: no stack burn after decrypt_block_checked", "crates/turing/src/masked.rs",
+     "        let result = self.guarded(block, false, |_| {});\n        memory::burn_stack();",
+     "        let result = self.guarded(block, false, |_| {});",
+     TURING + ["checked_calls_leave_no_checksum_point_behind"]),
+    # R5: the deterministic key check
+    ("turing-1026: key check skipped", "crates/turing/src/turing1026.rs",
+     "        let key_matches = lwe::check_key(&PARAMS, &self.public.seed_a, &self.secret.s, &self.public.b);",
+     "        let key_matches = true;",
+     ["-p", "bombe", "--release", "--test", "turing1026", "key_generation_faults"]),
+    ("lwe: key check accepts any noise", "crates/turing/src/lwe.rs",
+     "            bad |= (2 * u32::from(eta)).wrapping_sub(shifted) >> 31;", "            bad |= 0 & shifted;",
+     TURING + ["check_key"]),
+    # R8: fork detection by generation, not only by process ID
+    ("random (Linux): check_fork ignores the fork generation", "crates/turing/src/random.rs",
+     "        if st.seeded == 0 || st.generation != fork_generation() || st.pid", "        if st.seeded == 0 || st.pid",
+     ["--wsl", "-p", "turing", "--lib", "random"]),
+    ("random (Linux): no fork handler installed", "crates/turing/src/random.rs",
+     "        unsafe { libc::pthread_atfork(None, None, Some(in_child)) };", "        let _ = in_child;",
+     ["--wsl", "-p", "turing", "--lib", "random"]),
+    # R9: the self-test runs the masked cipher and the mask stream
+    ("selftest: masked S-box output constant missing", "crates/turing/src/masked.rs",
+     "    noted((map_out.apply(y.0), map_out.apply(y.1) ^ map_out.apply(0)))", "    noted((map_out.apply(y.0), map_out.apply(y.1)))",
+     TURING + ["self_test"]),
+    ("selftest: mask stream never permutes", "crates/turing/src/random.rs",
+     "                keccak::f1600(&mut st.lanes);\n                st.used = 0;", "                st.used = 0;",
+     TURING + ["self_test"]),
+    # R11: locking beyond the default quota
+    ("memory: working set never grown", "crates/turing/src/memory.rs",
+     "        if *grown + step > MAX_LOCK_GROWTH {\n            return false;\n        }\n        let (mut min, mut max) = (0usize, 0usize);",
+     "        if *grown + step > 0 {\n            return false;\n        }\n        let (mut min, mut max) = (0usize, 0usize);",
+     TURING + ["secrets_beyond_the_default_quota"]),
+    ("memory (Linux): soft memlock limit never raised", "crates/turing/src/memory.rs",
+     "        if limit.rlim_cur == libc::RLIM_INFINITY || limit.rlim_cur >= limit.rlim_max {",
+     "        if true || limit.rlim_cur >= limit.rlim_max {",
+     ["--wsl", "-p", "turing", "--lib", "memlock"]),
+]
+
+
 def kill_tree(p):
     """Kills cargo and the test binary it started."""
     if os.name == "nt":
@@ -585,6 +667,8 @@ def run(args):
     # failing test, which is what tells us which test caught the bug.
     if args and args[0] == "--wsl":
         cmd = [sys.executable, str(ROOT / "tools" / "wsl_linux.py"), "test", *args[1:]]
+    elif args and args[0] == "--python":
+        cmd = [sys.executable, *(str(ROOT / a) if a.endswith(".py") else a for a in args[1:])]
     else:
         cmd = ["cargo", "test", *args]
     group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
@@ -602,7 +686,7 @@ def run(args):
 
 
 def main():
-    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7, "--review1": MUTATIONS_REVIEW1, "--mlkem": MUTATIONS_MLKEM}
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7, "--review1": MUTATIONS_REVIEW1, "--mlkem": MUTATIONS_MLKEM, "--review2": MUTATIONS_REVIEW2}
     check_only = "--check" in sys.argv
     only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
     mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)

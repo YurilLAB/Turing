@@ -101,6 +101,8 @@ struct Workspace {
     packed: [u8; PKE_BYTES],
     /// The accepted key, before the selection (decapsulation).
     key: [u8; SHARED_KEY_BYTES],
+    /// The first selection's result (decapsulation), read by the second.
+    tmp: [u8; SHARED_KEY_BYTES],
 }
 
 impl Zeroize for Workspace {
@@ -112,6 +114,7 @@ impl Zeroize for Workspace {
         self.c.zeroize();
         self.packed.zeroize();
         self.key.zeroize();
+        self.tmp.zeroize();
     }
 }
 
@@ -170,6 +173,7 @@ impl EncapsulationKey {
             x.absorb(&seed[..]);
             x.squeeze(&mut w.mu);
             x.squeeze(&mut salt);
+            x.wipe();
         }
         Ok(self.encapsulate_in(&salt, &mut w))
     }
@@ -223,6 +227,7 @@ impl EncapsulationKey {
         g.absorb(&w.mu);
         g.absorb(salt);
         g.squeeze(&mut w.coins);
+        g.wipe();
     }
 
     /// Enc(pk, mu; r) into w.sp/bp/c, r the seed in w.coins. Deterministic in
@@ -235,6 +240,7 @@ impl EncapsulationKey {
         noise.absorb(&w.coins[..COIN_SEED_BYTES]);
         let Workspace { mu, sp, bp, c, .. } = w;
         lwe::encrypt(&PARAMS, &self.seed_a, &self.b, mu, &mut noise, sp, bp, c);
+        noise.wipe();
     }
 
     /// Pack w.bp, w.c into w.packed.
@@ -253,6 +259,36 @@ fn shared_key(ciphertext: &[u8], k: &[u8], out: &mut [u8; SHARED_KEY_BYTES]) {
     h.absorb(ciphertext);
     h.absorb(k);
     h.squeeze(out);
+    h.wipe();
+}
+
+/// out = candidate if `mask` is 0xff, else out unchanged; byte by byte,
+/// branch-free. Never inlined, and the mask passes a value barrier, so the
+/// compiler can neither fuse decapsulation's two chained selections into one
+/// (algebraically they are `out ^= (out ^ k) & (a & b)`: one mask, one fault)
+/// nor learn that a mask is 0 or 0xff. The release build did fuse them, into
+/// one `sar` (research/reviews/2026-09-28 R2); `tools/ct_check.py` now checks
+/// the machine code.
+#[inline(never)]
+fn select_into(out: &mut [u8; SHARED_KEY_BYTES], candidate: &[u8; SHARED_KEY_BYTES], mask: u8) {
+    let mask = opaque(u64::from(mask)) as u8;
+    for (o, &c) in out.iter_mut().zip(candidate) {
+        *o ^= (*o ^ c) & mask;
+    }
+}
+
+/// k'' = k' xor (K-bar and not `accept`): k' itself when the re-encryption
+/// matched (`accept` = 0xff), otherwise k' masked with the rejection key,
+/// which only the holder of z can compute. A fault that forces both
+/// selections to install the accepted key then releases cSHAKE256(c || k''),
+/// useless to the attacker, unless a third fault also forces this verdict.
+/// Never inlined, the verdict behind a value barrier.
+#[inline(never)]
+fn bind_to_verdict(k: &mut [u8], rejection: &[u8; SHARED_KEY_BYTES], accept: u8) {
+    let reject = !(opaque(u64::from(accept)) as u8);
+    for (x, &r) in k.iter_mut().zip(rejection) {
+        *x ^= r & reject;
+    }
 }
 
 /// `eq_mask`, for Bombe's timing test of the re-encryption check. Analysis
@@ -292,7 +328,10 @@ fn eq_mask_u16(a: &[u16], b: &[u16]) -> u8 {
 /// is the zero-sized `NoFault`, whose methods are the identity and compile
 /// away, so `decapsulate` is exactly `decapsulated_faulted(.., &NoFault)`.
 /// Every method is a place a glitch could strike, one per item of the fault
-/// model in docs/16.
+/// model in docs/16. The two instantiations compile separately, so what the
+/// optimiser does to the production one is checked on its machine code
+/// (`tools/ct_check.py`), not by this map: it once fused the verdicts that
+/// the hooks here keep apart (R2).
 trait DecapFault {
     /// The decoded message mu' = Dec(sk, c), before re-encryption (shared by
     /// both re-encryptions, so a fault here fails both checks: a rejection).
@@ -313,6 +352,11 @@ trait DecapFault {
     }
     /// The verdict of the coefficient comparison (second re-encryption).
     fn accept_coeffs(&self, mask: u8) -> u8 {
+        mask
+    }
+    /// The third verdict (second re-encryption, packed and compared as
+    /// bytes), which binds the accepted key to the comparison.
+    fn accept_binding(&self, mask: u8) -> u8 {
         mask
     }
     /// Whether to skip absorbing z into the rejection key (an XOF-state
@@ -372,20 +416,39 @@ impl DecapsulationKey {
     }
 
     /// Expands the seed: (seed_a, noise seed, z) = cSHAKE256(seed), S and E
-    /// from the noise seed, B = A S + E. Then encapsulates to the new public
-    /// key with coins derived from the seed and decapsulates (a pair-wise
-    /// consistency check: a key corrupted while being made, as Rowhammer did
-    /// to FrodoKEM, fails here instead of failing decryptions later). The
-    /// stack is burned afterwards.
+    /// from the noise seed, B = A S + E. Then two checks, each of which
+    /// refuses a key corrupted while it was made (as Rowhammer corrupted
+    /// FrodoKEM's, Fahr et al., CCS 2022): B - A S must be small noise
+    /// (deterministic: it catches every change of S, `lwe::check_key`), and
+    /// an encapsulation to the new public key with coins derived from the
+    /// seed must decapsulate (the whole pipeline, z included). The stack
+    /// is burned afterwards.
     pub fn from_seed(seed: &[u8; SEED_BYTES]) -> Result<DecapsulationKey, FaultDetected> {
-        let dk = DecapsulationKey::expanded(seed);
-        let consistent = dk.pair_consistent();
+        let dk = DecapsulationKey::from_seed_below_the_burn(seed);
         crate::memory::burn_stack();
-        if consistent {
+        dk
+    }
+
+    /// The work of `from_seed`, in a frame of its own: `burn_stack` reaches
+    /// only frames below its caller, and with the expansion and the checks
+    /// inlined into `from_seed` the key check's cSHAKE state stayed in
+    /// `from_seed`'s own frame, where one inverse permutation gave the seed
+    /// back (research/reviews/2026-09-28 R1).
+    #[inline(never)]
+    fn from_seed_below_the_burn(seed: &[u8; SEED_BYTES]) -> Result<DecapsulationKey, FaultDetected> {
+        let dk = DecapsulationKey::expanded(seed);
+        if dk.checks_pass() {
             Ok(dk)
         } else {
             Err(FaultDetected)
         }
+    }
+
+    /// Both key checks, each computed whatever the other says.
+    fn checks_pass(&self) -> bool {
+        let key_matches = lwe::check_key(&PARAMS, &self.public.seed_a, &self.secret.s, &self.public.b);
+        let pair = self.pair_consistent();
+        key_matches & pair
     }
 
     /// The expansion alone, without the pair-wise check (the self-test
@@ -404,7 +467,7 @@ impl DecapsulationKey {
         // B holds A S, which gives S away, until E is added: secret memory.
         let mut b: SecretBox<[u16; N * NBAR]> = SecretBox::zeroed();
         lwe::keygen(&PARAMS, &seed_a, &mut noise, &mut secret.s, &mut b[..]);
-        drop(noise);
+        noise.wipe();
         let mut bytes = vec![0u8; PUBLIC_KEY_BYTES].into_boxed_slice();
         bytes[..SEED_A_BYTES].copy_from_slice(&seed_a);
         lwe::pack(LOG_Q, &b[..], &mut bytes[SEED_A_BYTES..]);
@@ -412,6 +475,10 @@ impl DecapsulationKey {
         DecapsulationKey { secret, public }
     }
 
+    /// The pair-wise check. Never inlined, and its XOF is wiped in place:
+    /// `drop(x)` here once wiped a moved copy and left the state, which had
+    /// absorbed the seed, in the caller's frame (R1).
+    #[inline(never)]
     fn pair_consistent(&self) -> bool {
         let mut w: SecretBox<Workspace> = SecretBox::zeroed();
         let mut salt = [0u8; SALT_BYTES];
@@ -419,9 +486,9 @@ impl DecapsulationKey {
         x.absorb(&self.secret.seed);
         x.squeeze(&mut w.mu);
         x.squeeze(&mut salt);
-        drop(x);
+        x.wipe();
         let (ciphertext, key) = self.public.encapsulate_in(&salt, &mut w);
-        drop(w);
+        salt.zeroize();
         let back = self.decapsulated(&ciphertext);
         eq_mask(&key[..], &back[..]) == 0xff
     }
@@ -464,18 +531,25 @@ impl DecapsulationKey {
     /// compiles to the same code; the analysis-only `decapsulate_with_faults`
     /// drives the other implementors.
     ///
-    /// The re-encryption is checked twice, independently: `eq_mask` on the
-    /// packed bytes for one and `eq_mask_u16` on the coefficients B', C for the
-    /// other. Because the two re-encryptions are separate computations into the
-    /// same buffers, the two comparisons read the results of two independent
-    /// runs: a single transient fault on one run's coefficients (before they
-    /// are packed or compared) is caught by the other run's check. The output
-    /// starts as the rejection key and two chained selections install the
-    /// accepted key only if *both* verdicts accept, so forcing either verdict
-    /// or skipping either selection also still rejects. No single transient
-    /// fault turns a rejected ciphertext into an accepted one; only a
-    /// correlated pair does (the fault map in Bombe confirms it). The cost is a
-    /// second re-encryption -- decapsulation's main work done twice.
+    /// The re-encryption is computed twice, independently, and compared three
+    /// ways: the first run as packed bytes (`eq_mask`), the second as
+    /// coefficients B', C (`eq_mask_u16`) and, packed again, as bytes. The
+    /// output starts as the rejection key K-bar, and two chained selections,
+    /// separate non-inlined calls with their masks behind value barriers,
+    /// install the accepted key only if the first two verdicts both accept;
+    /// the third binds the accepted key itself to the comparison (it is
+    /// cSHAKE256(c || k' xor K-bar) unless the third verdict accepts). So:
+    /// - a fault on one re-encryption's data is caught by the other run;
+    /// - forcing one verdict, or skipping the selection, still rejects;
+    /// - forcing both selection verdicts releases a key derived with K-bar,
+    ///   which needs z: useless to the attacker;
+    /// - a bypass takes both runs' data (two correlated faults), or all
+    ///   three verdicts (three).
+    ///
+    /// Bombe's fault map checks each case; `tools/ct_check.py` checks that
+    /// the release build keeps the selections apart (it had fused them into
+    /// one mask, research/reviews/2026-09-28 R2). The cost is a second
+    /// re-encryption, decapsulation's main work done twice.
     #[inline(never)]
     fn decapsulated_faulted(&self, ciphertext: &[u8], fault: &impl DecapFault) -> SecretBox<[u8; SHARED_KEY_BYTES]> {
         let (body, salt) = ciphertext.split_at(PKE_BYTES);
@@ -506,8 +580,11 @@ impl DecapsulationKey {
             fault.intermediate(2, bp, c);
         }
         let accept_coeffs = fault.accept_coeffs(eq_mask_u16(&w.bp, &received_bp) & eq_mask_u16(&w.c, &received_c));
+        // The third verdict: the second run packed and compared as bytes.
+        self.public.pack_reencryption(&mut w);
+        let accept_binding = fault.accept_binding(eq_mask(&w.packed, body));
         // Default-fail order: the output is the rejection key unless both
-        // masks install the accepted one, so a skipped instruction or a
+        // selections install the accepted one, so a skipped instruction or a
         // forced mask leaves it rejecting (the pqm4 fault attacks skipped the
         // final copy; forcing one comparison is the accept-mask fault).
         let mut key: SecretBox<[u8; SHARED_KEY_BYTES]> = SecretBox::zeroed();
@@ -518,18 +595,18 @@ impl DecapsulationKey {
         h.absorb(&self.public.hash);
         h.absorb(ciphertext);
         h.squeeze(&mut key[..]);
-        drop(h);
+        h.wipe();
         fault.rejection_key(&mut key[..]);
-        let Workspace { coins, key: accepted, .. } = &mut *w;
+        let Workspace { coins, key: accepted, tmp, .. } = &mut *w;
+        bind_to_verdict(&mut coins[COIN_SEED_BYTES..], &key, accept_binding);
         shared_key(ciphertext, &coins[COIN_SEED_BYTES..], accepted);
         fault.accepted_key(accepted);
         if !fault.skip_selection() {
-            for (out, &k) in key.iter_mut().zip(accepted.iter()) {
-                // tmp = K' if the byte comparison accepts, else K-bar;
-                // out = tmp if the coefficient comparison accepts, else K-bar.
-                let tmp = *out ^ ((*out ^ k) & accept_bytes);
-                *out ^= (*out ^ tmp) & accept_coeffs;
-            }
+            // tmp = accepted key if the byte comparison accepts, else K-bar;
+            // out = tmp if the coefficient comparison accepts, else K-bar.
+            tmp.copy_from_slice(&key[..]);
+            select_into(tmp, accepted, accept_bytes);
+            select_into(&mut key, tmp, accept_coeffs);
         }
         key
     }
@@ -561,9 +638,25 @@ impl DecapsulationKey {
     pub fn from_seed_with_fault(seed: &[u8; SEED_BYTES], entry: usize, bit: u32) -> Result<DecapsulationKey, FaultDetected> {
         let mut dk = DecapsulationKey::expanded(seed);
         dk.secret.s[entry] ^= 1 << bit;
-        let consistent = dk.pair_consistent();
+        let pass = dk.checks_pass();
         crate::memory::burn_stack();
-        if consistent {
+        if pass {
+            Ok(dk)
+        } else {
+            Err(FaultDetected)
+        }
+    }
+
+    /// `from_seed_with_fault` with only the pair-wise check, as key
+    /// generation was before the review of 2026-09-28 (R5), so Bombe can
+    /// show the faults it missed. Analysis builds only.
+    #[cfg(feature = "analysis")]
+    pub fn from_seed_with_fault_pairwise_only(seed: &[u8; SEED_BYTES], entry: usize, bit: u32) -> Result<DecapsulationKey, FaultDetected> {
+        let mut dk = DecapsulationKey::expanded(seed);
+        dk.secret.s[entry] ^= 1 << bit;
+        let pass = dk.pair_consistent();
+        crate::memory::burn_stack();
+        if pass {
             Ok(dk)
         } else {
             Err(FaultDetected)
@@ -645,6 +738,8 @@ pub enum FaultPoint {
     AcceptBytes,
     /// The verdict of the coefficient comparison.
     AcceptCoeffs,
+    /// The third verdict, which binds the accepted key to the comparison.
+    AcceptBinding,
     /// Absorbing the secret z into the rejection key (skipped).
     RejectionZ,
     /// The rejection key K-bar.
@@ -745,6 +840,9 @@ impl DecapFault for Faults<'_> {
     fn accept_coeffs(&self, mask: u8) -> u8 {
         self.verdict(FaultPoint::AcceptCoeffs, mask)
     }
+    fn accept_binding(&self, mask: u8) -> u8 {
+        self.verdict(FaultPoint::AcceptBinding, mask)
+    }
     fn skip_rejection_z(&self) -> bool {
         self.skip(FaultPoint::RejectionZ)
     }
@@ -839,6 +937,78 @@ mod tests {
         assert_ne!(ka[..], ks[..]);
         assert_ne!(ca, cb);
         assert_ne!(ka[..], kb[..]);
+    }
+
+    // No secret sponge (key generation, key noise, the key check, the
+    // encapsulation seed, coins, encryption noise, the shared and the
+    // rejection key) leaves its state in dead stack after key generation,
+    // encapsulation or decapsulation. research/reviews/2026-09-28 R1: the key
+    // check's state did, whole, and one inverse permutation of it gave the
+    // seed, the whole private key. Every state is recorded as it is wiped
+    // (test builds) and searched for; control: a state copied into a
+    // callee's frame is found.
+    #[test]
+    fn no_sponge_state_is_left_on_the_stack() {
+        use crate::memory::residue::{contains_state, leave, run, snapshot, SCAN};
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| {
+                let mut buf = vec![0u8; SCAN];
+                let planted: [u64; 25] = core::array::from_fn(|i| 0x7475_7269_6e67_0000 ^ ((i as u64) << 8));
+                run(&mut || leave(&planted));
+                snapshot(&mut buf);
+                assert!(contains_state(&buf, &planted), "control: a state in a callee's frame is found");
+
+                let mut searched = 0;
+                let mut check = |name: &str, op: &mut dyn FnMut()| {
+                    crate::memory::burn_stack();
+                    xof::recorded::start();
+                    run(op);
+                    snapshot(&mut buf);
+                    let states = xof::recorded::stop();
+                    assert!(!states.is_empty(), "{name}: no sponge state was recorded");
+                    for (i, st) in states.iter().enumerate() {
+                        assert!(!contains_state(&buf, st), "{name}: sponge state {i} of {} is in dead stack", states.len());
+                    }
+                    searched += states.len();
+                };
+                let mut kept = None;
+                check("from_seed", &mut || kept = Some(DecapsulationKey::from_seed(&[0x42; 32]).expect("consistent")));
+                let dk = kept.take().expect("key");
+                check("generate", &mut || kept = Some(DecapsulationKey::generate().expect("keygen")));
+                let mut encapsulated = None;
+                check("encapsulate", &mut || encapsulated = Some(dk.encapsulation_key().encapsulate().expect("randomness")));
+                let (ct, k) = encapsulated.take().expect("ciphertext");
+                let mut back = None;
+                check("decapsulate", &mut || back = Some(dk.decapsulate(&ct).expect("length")));
+                assert_eq!(back.take().expect("key")[..], k[..]);
+                let mut bad = ct.clone();
+                bad[100] ^= 1;
+                check("decapsulate (rejected)", &mut || back = Some(dk.decapsulate(&bad).expect("length")));
+                assert!(searched >= 15, "only {searched} states searched");
+            })
+            .expect("thread")
+            .join()
+            .expect("test thread");
+    }
+
+    // Single-bit faults in S that the one-ciphertext pair-wise check missed
+    // (found by sampling 3,000 flips of seed [0x3c; 32], research/reviews/
+    // 2026-09-28 R5): the pair-wise check alone still passes them (the
+    // control), and the key check now refuses every one.
+    #[test]
+    fn faults_the_pair_wise_check_missed_are_caught() {
+        let seed = [0x3cu8; 32];
+        let clean = DecapsulationKey::expanded(&seed);
+        assert!(clean.checks_pass(), "control: the key as made passes both checks");
+        // (entry = 32 * row + column, bit)
+        for (entry, bit) in [(24_960, 12), (5_507, 0), (25_638, 8), (4_126, 0), (2_324, 3), (657, 14), (658, 14), (651, 14)] {
+            let mut dk = DecapsulationKey::expanded(&seed);
+            dk.secret.s[entry] ^= 1 << bit;
+            assert!(dk.pair_consistent(), "control: the pair-wise check alone misses S[{entry}] bit {bit}");
+            assert!(!lwe::check_key(&PARAMS, &dk.public.seed_a, &dk.secret.s, &dk.public.b), "S[{entry}] bit {bit} passed the key check");
+            assert!(!dk.checks_pass(), "S[{entry}] bit {bit} passed");
+        }
     }
 
     #[test]

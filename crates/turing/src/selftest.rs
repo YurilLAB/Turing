@@ -9,10 +9,17 @@
 //! `vectors/turing-256-v1.txt` and `vectors/turing-1026-v1.txt` (generated
 //! by the independent reference implementations in Bombe, whose tests check
 //! these constants against them) and NIST's published cSHAKE256 example
-//! values. The Turing-1026 check takes most of the time, about 60 ms.
+//! values. Every implementation of a primitive is run, not only one: the
+//! masked cipher (its own S-box over two shares, with real masks from the
+//! OS) must give the plain cipher's vectors, and the mask stream must be
+//! cSHAKE256 of its seed. Until the review of 2026-09-28 (R9) neither was
+//! run, and a masked S-box computing x^9, or masks repeating every 136
+//! bytes, passed. The Turing-1026 check takes most of the time, about 60 ms
+//! (twice that with its key check).
 
+use crate::random::{self, MaskStream};
 use crate::turing1026::DecapsulationKey;
-use crate::{xof, Turing, Turing256};
+use crate::{xof, MaskedTuring, Turing, Turing256};
 use sha3::digest::XofReader;
 use sha3::{Digest, Sha3_256};
 
@@ -27,6 +34,12 @@ pub enum SelfTestError {
     Decrypt,
     /// Turing-1026 produced a wrong public key, ciphertext or shared key.
     Kem,
+    /// The masked cipher encrypted or decrypted a known-answer vector wrongly.
+    Masked,
+    /// The mask stream is not cSHAKE256 of its seed.
+    Masks,
+    /// The operating system gave no randomness for the masked cipher.
+    Randomness,
 }
 
 /// NIST SP 800-185 cSHAKE256 sample #3: S = "Email Signature", X = 00010203.
@@ -165,6 +178,26 @@ pub fn self_test() -> Result<(), SelfTestError> {
         if block != *plaintext {
             return Err(SelfTestError::Decrypt);
         }
+    }
+    for (key, plaintext, ciphertext) in &VECTORS {
+        let mut m = MaskedTuring::new(key).map_err(|_| SelfTestError::Randomness)?;
+        let mut block = *plaintext;
+        m.encrypt_block(&mut block);
+        if block != *ciphertext {
+            return Err(SelfTestError::Masked);
+        }
+        m.decrypt_block(&mut block);
+        if block != *plaintext {
+            return Err(SelfTestError::Masked);
+        }
+    }
+    // Across two block boundaries of the stream (136 bytes each).
+    let seed: [u8; 64] = core::array::from_fn(|i| (i as u8).wrapping_mul(7));
+    let (mut got, mut want) = ([0u8; 300], [0u8; 300]);
+    MaskStream::from_seed(&seed).fill(&mut got);
+    xof::cshake256(random::STREAM_LABEL, &seed).read(&mut want);
+    if got != want {
+        return Err(SelfTestError::Masks);
     }
     for (key, plaintext, ciphertext) in &VECTORS_256 {
         let t = Turing256::new(key);

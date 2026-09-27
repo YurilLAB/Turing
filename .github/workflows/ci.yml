@@ -35,6 +35,10 @@ jobs:
       # cargo test --release --workspace
       - name: Test
         run: cargo test --release --workspace
+      # The library alone: a workspace build turns on Bombe's `analysis`
+      # feature, whose code inlines differently from what users build.
+      - name: Test the production library
+        run: cargo test --release -p turing
 
   clippy:
     name: clippy

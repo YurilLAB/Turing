@@ -20,21 +20,43 @@
 //! The internal, derandomised functions (FIPS 203 section 6) "should not be
 //! made available to applications other than for testing": they are
 //! crate-internal, and public only in analysis builds for the known-answer
-//! tests.
+//! tests. What the hybrid will call is `keygen`, `encapsulate` and
+//! `decapsulate` below: they check their inputs as FIPS 203 section 7
+//! requires, returning an error instead of panicking, and burn the stack.
+//!
+//! Secrets leave nothing behind (FIPS 203 section 3.3: "All other data shall
+//! be destroyed prior to the algorithm terminating"). The review of
+//! 2026-09-28 (R3) found K and r in dead stack after every encapsulation, r'
+//! after every decapsulation, and a whole J(z || c) state that gave z back.
+//! Three defences now, each enough for that: G, J and PRF hash secrets on
+//! `xof::SecretXof`, whose state is never on the stack and is wiped in place
+//! (the sha3 crate's hashers are moved by value and never wipe their
+//! buffers; they remain for the public H(ek) and SampleNTT); K and r are
+//! written straight into the caller's buffers and wiped; and every entry
+//! point runs its work below a stack burn.
+
+// ML-KEM is compiled into the library for the hybrid that will call it (docs/18),
+// which does not exist yet: until then only tests and analysis builds use it.
+#![cfg_attr(not(any(test, feature = "analysis")), allow(dead_code))]
 
 use crate::linear::opaque;
+use crate::xof::SecretXof;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
-use sha3::{Digest, Sha3_256, Sha3_512, Shake128, Shake256};
+use sha3::{Digest, Sha3_256, Shake128};
 use zeroize::Zeroize;
 
-/// A parameter set (FIPS 203, Table 2).
+/// A parameter set (FIPS 203, Table 2): one of the three constants below.
+/// The fields are private, so no other set can be made: FIPS 203 section 7
+/// requires the functions to be "only invoked with a valid parameter set",
+/// and an invalid one panicked, broke the keys, or (k = 0) put m in the
+/// ciphertext in the clear (R10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Params {
-    pub k: usize,
-    pub eta1: usize,
-    pub eta2: usize,
-    pub du: u32,
-    pub dv: u32,
+    k: usize,
+    eta1: usize,
+    eta2: usize,
+    du: u32,
+    dv: u32,
 }
 
 pub const ML_KEM_512: Params = Params { k: 2, eta1: 3, eta2: 2, du: 10, dv: 4 };
@@ -42,6 +64,11 @@ pub const ML_KEM_768: Params = Params { k: 3, eta1: 2, eta2: 2, du: 10, dv: 4 };
 pub const ML_KEM_1024: Params = Params { k: 4, eta1: 2, eta2: 2, du: 11, dv: 5 };
 
 impl Params {
+    /// The module rank k: 2, 3 or 4.
+    pub const fn k(&self) -> usize {
+        self.k
+    }
+
     /// Encapsulation key: 384 k + 32 bytes (FIPS 203, Table 3).
     pub const fn ek_bytes(&self) -> usize {
         384 * self.k + 32
@@ -296,35 +323,39 @@ fn sample_cbd(eta: usize, b: &[u8], f: &mut Poly) {
 /// PRF_eta(s, b) = SHAKE256(s || b), 64 eta bytes, then SamplePolyCBD_eta.
 fn prf_cbd(eta: usize, s: &[u8; 32], b: u8, f: &mut Poly) {
     let mut buf = [0u8; 64 * 3];
-    let mut h = Shake256::default();
-    h.update(s);
-    h.update(&[b]);
-    h.finalize_xof().read(&mut buf[..64 * eta]);
+    let mut h = SecretXof::shake256();
+    h.absorb(s);
+    h.absorb(&[b]);
+    h.squeeze(&mut buf[..64 * eta]);
+    h.wipe();
     sample_cbd(eta, &buf[..64 * eta], f);
     buf.zeroize();
 }
 
-fn g(parts: &[&[u8]]) -> ([u8; 32], [u8; 32]) {
-    let mut h = Sha3_512::new();
+/// G = SHA3-512 split in two, written into `a` and `b` (never returned by
+/// value: a returned array is copied through the caller's frame).
+fn g(parts: &[&[u8]], a: &mut [u8; 32], b: &mut [u8; 32]) {
+    let mut h = SecretXof::sha3_512();
     for p in parts {
-        Digest::update(&mut h, p);
+        h.absorb(p);
     }
-    let mut out = h.finalize();
-    let a: [u8; 32] = out[..32].try_into().expect("32 bytes");
-    let b: [u8; 32] = out[32..].try_into().expect("32 bytes");
-    out.zeroize();
-    (a, b)
+    h.squeeze(a);
+    h.squeeze(b);
+    h.wipe();
 }
 
+/// H = SHA3-256, only ever of public data (the encapsulation key).
 pub(crate) fn h(x: &[u8]) -> [u8; 32] {
     Sha3_256::digest(x).into()
 }
 
+/// J = SHAKE256(z || c) to 32 bytes: z is the implicit-rejection secret.
 fn j(z: &[u8], c: &[u8], out: &mut [u8; 32]) {
-    let mut s = Shake256::default();
-    s.update(z);
-    s.update(c);
-    s.finalize_xof().read(out);
+    let mut s = SecretXof::shake256();
+    s.absorb(z);
+    s.absorb(c);
+    s.squeeze(out);
+    s.wipe();
 }
 
 /// A_hat[i][j] = SampleNTT(rho || j || i) (Algorithm 13, line 5).
@@ -343,7 +374,12 @@ fn matrix(p: &Params, rho: &[u8], a: &mut [[Poly; MAX_K]; MAX_K]) {
 /// made for the draft (docs/18).
 fn kpke_keygen(p: &Params, d: &[u8; 32], ipd: bool, ek: &mut [u8], dk_pke: &mut [u8]) {
     let k_byte = [p.k as u8];
-    let (rho, mut sigma) = if ipd { g(&[d]) } else { g(&[d, &k_byte]) };
+    let (mut rho, mut sigma) = ([0u8; 32], [0u8; 32]);
+    if ipd {
+        g(&[d], &mut rho, &mut sigma);
+    } else {
+        g(&[d, &k_byte], &mut rho, &mut sigma);
+    }
     let mut a = [[[0u16; N]; MAX_K]; MAX_K];
     matrix(p, &rho, &mut a);
     let mut s = [[0u16; N]; MAX_K];
@@ -475,12 +511,13 @@ pub(crate) fn keygen_inner(p: &Params, d: &[u8; 32], z: &[u8; 32], ipd: bool, ek
     dk[pke + p.ek_bytes() + 32..].copy_from_slice(z);
 }
 
-/// ML-KEM.Encaps_internal (Algorithm 17): (K, r) = G(m || H(ek)).
+/// ML-KEM.Encaps_internal (Algorithm 17): (K, r) = G(m || H(ek)), K
+/// straight into `key`.
 pub(crate) fn encaps_inner(p: &Params, ek: &[u8], m: &[u8; 32], c: &mut [u8], key: &mut [u8; 32]) {
     assert!(ek.len() == p.ek_bytes() && c.len() == p.ct_bytes());
-    let (k, mut r) = g(&[m, &h(ek)]);
+    let mut r = [0u8; 32];
+    g(&[m, &h(ek)], key, &mut r);
     kpke_encrypt(p, ek, m, &r, c);
-    *key = k;
     r.zeroize();
 }
 
@@ -504,7 +541,8 @@ pub(crate) fn decaps_inner(p: &Params, dk: &[u8], c: &[u8], key: &mut [u8; 32]) 
     let z = &dk[pke + p.ek_bytes() + 32..];
     let mut m = [0u8; 32];
     kpke_decrypt(p, dk_pke, c, &mut m);
-    let (mut accepted, mut r) = g(&[&m, hash]);
+    let (mut accepted, mut r) = ([0u8; 32], [0u8; 32]);
+    g(&[&m, hash], &mut accepted, &mut r);
     j(z, c, key);
     let mut again = [0u8; 4 * 352 + 160];
     let again = &mut again[..p.ct_bytes()];
@@ -545,29 +583,115 @@ pub(crate) fn dk_valid(p: &Params, dk: &[u8]) -> bool {
     h(&dk[pke..pke + p.ek_bytes()])[..] == dk[pke + p.ek_bytes()..pke + p.ek_bytes() + 32]
 }
 
-/// ML-KEM.KeyGen_internal. Analysis builds only (known-answer tests).
+/// Why an ML-KEM input was refused (FIPS 203 section 7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputError {
+    /// A key, ciphertext or output buffer of the wrong length (the type checks).
+    Length,
+    /// An encapsulation key with a coefficient not reduced mod q (7.2's modulus check).
+    EncapsulationKey,
+    /// A decapsulation key whose H(ek) is not where it belongs (7.3's hash check).
+    DecapsulationKey,
+}
+
+/// ML-KEM.KeyGen_internal from (d, z), below a stack burn. The caller
+/// supplies fresh d and z (FIPS 203 Algorithm 19 draws them).
+pub(crate) fn keygen(p: &Params, d: &[u8; 32], z: &[u8; 32], ek: &mut [u8], dk: &mut [u8]) -> Result<(), InputError> {
+    if ek.len() != p.ek_bytes() || dk.len() != p.dk_bytes() {
+        return Err(InputError::Length);
+    }
+    keygen_below_the_burn(p, d, z, false, ek, dk);
+    crate::memory::burn_stack();
+    Ok(())
+}
+
+/// ML-KEM.Encaps_internal after section 7.2's checks, below a stack burn.
+pub(crate) fn encapsulate(p: &Params, ek: &[u8], m: &[u8; 32], c: &mut [u8], key: &mut [u8; 32]) -> Result<(), InputError> {
+    if c.len() != p.ct_bytes() || ek.len() != p.ek_bytes() {
+        return Err(InputError::Length);
+    }
+    if !ek_valid(p, ek) {
+        return Err(InputError::EncapsulationKey);
+    }
+    encaps_below_the_burn(p, ek, m, c, key);
+    crate::memory::burn_stack();
+    Ok(())
+}
+
+/// ML-KEM.Decaps_internal after section 7.3's checks, below a stack burn.
+pub(crate) fn decapsulate(p: &Params, dk: &[u8], c: &[u8], key: &mut [u8; 32]) -> Result<(), InputError> {
+    if c.len() != p.ct_bytes() || dk.len() != p.dk_bytes() {
+        return Err(InputError::Length);
+    }
+    if !dk_valid(p, dk) {
+        return Err(InputError::DecapsulationKey);
+    }
+    decaps_below_the_burn(p, dk, c, key);
+    crate::memory::burn_stack();
+    Ok(())
+}
+
+#[inline(never)]
+fn keygen_below_the_burn(p: &Params, d: &[u8; 32], z: &[u8; 32], ipd: bool, ek: &mut [u8], dk: &mut [u8]) {
+    keygen_inner(p, d, z, ipd, ek, dk);
+}
+
+#[inline(never)]
+fn encaps_below_the_burn(p: &Params, ek: &[u8], m: &[u8; 32], c: &mut [u8], key: &mut [u8; 32]) {
+    encaps_inner(p, ek, m, c, key);
+}
+
+#[inline(never)]
+fn decaps_below_the_burn(p: &Params, dk: &[u8], c: &[u8], key: &mut [u8; 32]) {
+    decaps_inner(p, dk, c, key);
+}
+
+/// ML-KEM.KeyGen_internal, burned like the entry points but without their
+/// checks. Analysis builds only (known-answer tests).
 #[cfg(feature = "analysis")]
 pub fn keygen_internal(p: &Params, d: &[u8; 32], z: &[u8; 32], ek: &mut [u8], dk: &mut [u8]) {
-    keygen_inner(p, d, z, false, ek, dk);
+    keygen_below_the_burn(p, d, z, false, ek, dk);
+    crate::memory::burn_stack();
 }
 
 /// Key generation as the FIPS 203 draft did it, G(d) without k, to run the
 /// C2SP CCTV vectors. Analysis builds only.
 #[cfg(feature = "analysis")]
 pub fn keygen_internal_ipd(p: &Params, d: &[u8; 32], z: &[u8; 32], ek: &mut [u8], dk: &mut [u8]) {
-    keygen_inner(p, d, z, true, ek, dk);
+    keygen_below_the_burn(p, d, z, true, ek, dk);
+    crate::memory::burn_stack();
 }
 
 /// ML-KEM.Encaps_internal. Analysis builds only.
 #[cfg(feature = "analysis")]
 pub fn encaps_internal(p: &Params, ek: &[u8], m: &[u8; 32], c: &mut [u8], key: &mut [u8; 32]) {
-    encaps_inner(p, ek, m, c, key);
+    encaps_below_the_burn(p, ek, m, c, key);
+    crate::memory::burn_stack();
 }
 
 /// ML-KEM.Decaps_internal. Analysis builds only.
 #[cfg(feature = "analysis")]
 pub fn decaps_internal(p: &Params, dk: &[u8], c: &[u8], key: &mut [u8; 32]) {
-    decaps_inner(p, dk, c, key);
+    decaps_below_the_burn(p, dk, c, key);
+    crate::memory::burn_stack();
+}
+
+/// The checked entry points, for Bombe's tests. Analysis builds only.
+#[cfg(feature = "analysis")]
+pub fn keygen_checked(p: &Params, d: &[u8; 32], z: &[u8; 32], ek: &mut [u8], dk: &mut [u8]) -> Result<(), InputError> {
+    keygen(p, d, z, ek, dk)
+}
+
+/// As above, for encapsulation. Analysis builds only.
+#[cfg(feature = "analysis")]
+pub fn encapsulate_checked(p: &Params, ek: &[u8], m: &[u8; 32], c: &mut [u8], key: &mut [u8; 32]) -> Result<(), InputError> {
+    encapsulate(p, ek, m, c, key)
+}
+
+/// As above, for decapsulation. Analysis builds only.
+#[cfg(feature = "analysis")]
+pub fn decapsulate_checked(p: &Params, dk: &[u8], c: &[u8], key: &mut [u8; 32]) -> Result<(), InputError> {
+    decapsulate(p, dk, c, key)
 }
 
 /// The encapsulation-key check. Analysis builds only.
@@ -585,6 +709,7 @@ pub fn check_decapsulation_key(p: &Params, dk: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha3::Sha3_512;
 
     /// FIPS 203 Appendix A as printed (the second table prints q - x as -x).
     const ZETAS_FIPS203: [u16; 128] = [
@@ -691,6 +816,95 @@ mod tests {
             let mut back = [0u16; N];
             byte_decode(d, &bytes, &mut back);
             assert_eq!(back, f, "d = {d}");
+        }
+    }
+
+    // The checked entry points leave neither the shared key K, nor the coins
+    // r, nor any secret sponge state (G, J, PRF) in dead stack. research/
+    // reviews/2026-09-28 R3: every encapsulation left K twice and r three
+    // times, and decapsulation r' and a J(z || c) state that gave z back.
+    // Control: a copy of K in a callee's frame is found.
+    #[test]
+    fn entry_points_leave_no_secret_on_the_stack() {
+        use crate::memory::residue::{contains, contains_state, leave, run, snapshot, SCAN};
+        use crate::xof::recorded;
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| {
+                let mut buf = vec![0u8; SCAN];
+                for p in [ML_KEM_512, ML_KEM_768, ML_KEM_1024] {
+                    let (mut ek, mut dk) = (vec![0u8; p.ek_bytes()], vec![0u8; p.dk_bytes()]);
+                    let (d, z, m) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32]);
+                    let (mut c, mut key, mut back) = (vec![0u8; p.ct_bytes()], [0u8; 32], [0u8; 32]);
+                    // K and r as FIPS 203 defines them, from the sha3 crate.
+                    let mut g = Sha3_512::new();
+                    Digest::update(&mut g, m);
+                    Digest::update(&mut g, h(&ek_after_keygen(&p, &d, &z)));
+                    let kr = g.finalize();
+                    let (want_k, r) = (&kr[..32], &kr[32..]);
+                    let found = |buf: &[u8]| contains(buf, &want_k[..16]) || contains(buf, &want_k[16..]) || contains(buf, &r[..16]) || contains(buf, &r[16..]);
+                    let mut planted = [0u8; 32];
+                    planted.copy_from_slice(want_k);
+                    run(&mut || leave(&planted));
+                    snapshot(&mut buf);
+                    assert!(found(&buf), "control: a copy of K in a callee's frame is found");
+
+                    let mut step = |name: &str, op: &mut dyn FnMut()| {
+                        crate::memory::burn_stack();
+                        recorded::start();
+                        run(op);
+                        snapshot(&mut buf);
+                        let states = recorded::stop();
+                        assert!(!states.is_empty(), "{p:?} {name}: no sponge recorded");
+                        assert!(!found(&buf), "{p:?} {name}: K or r is in dead stack");
+                        for st in &states {
+                            assert!(!contains_state(&buf, st), "{p:?} {name}: a sponge state is in dead stack");
+                        }
+                    };
+                    step("keygen", &mut || keygen(&p, &d, &z, &mut ek, &mut dk).expect("lengths"));
+                    step("encapsulate", &mut || encapsulate(&p, &ek, &m, &mut c, &mut key).expect("valid key"));
+                    assert_eq!(&key[..], want_k, "K is FIPS 203's");
+                    step("decapsulate", &mut || decapsulate(&p, &dk, &c, &mut back).expect("valid key"));
+                    assert_eq!(back, key);
+                }
+            })
+            .expect("thread")
+            .join()
+            .expect("test thread");
+    }
+
+    fn ek_after_keygen(p: &Params, d: &[u8; 32], z: &[u8; 32]) -> Vec<u8> {
+        let (mut ek, mut dk) = (vec![0u8; p.ek_bytes()], vec![0u8; p.dk_bytes()]);
+        keygen_inner(p, d, z, false, &mut ek, &mut dk);
+        ek
+    }
+
+    // The entry points check their inputs as FIPS 203 section 7 requires and
+    // return an error instead of panicking.
+    #[test]
+    fn entry_points_refuse_bad_inputs() {
+        for p in [ML_KEM_512, ML_KEM_768, ML_KEM_1024] {
+            let (mut ek, mut dk) = (vec![0u8; p.ek_bytes()], vec![0u8; p.dk_bytes()]);
+            assert_eq!(keygen(&p, &[1; 32], &[2; 32], &mut ek[1..], &mut dk), Err(InputError::Length));
+            keygen(&p, &[1; 32], &[2; 32], &mut ek, &mut dk).expect("lengths");
+            let (mut c, mut key) = (vec![0u8; p.ct_bytes()], [0u8; 32]);
+            assert_eq!(encapsulate(&p, &ek[1..], &[3; 32], &mut c, &mut key), Err(InputError::Length));
+            assert_eq!(encapsulate(&p, &ek, &[3; 32], &mut c[1..], &mut key), Err(InputError::Length));
+            // Modulus check: coefficient 0 set to q = 3329, which ByteDecode12 reduces.
+            let mut bad_ek = ek.clone();
+            bad_ek[0] = (Q & 0xff) as u8;
+            bad_ek[1] = (bad_ek[1] & 0xf0) | (Q >> 8) as u8;
+            assert_eq!(encapsulate(&p, &bad_ek, &[3; 32], &mut c, &mut key), Err(InputError::EncapsulationKey));
+            encapsulate(&p, &ek, &[3; 32], &mut c, &mut key).expect("valid");
+            let mut back = [0u8; 32];
+            assert_eq!(decapsulate(&p, &dk, &c[1..], &mut back), Err(InputError::Length));
+            assert_eq!(decapsulate(&p, &dk[1..], &c, &mut back), Err(InputError::Length));
+            // Hash check: one bit of the stored H(ek) flipped.
+            let mut bad_dk = dk.clone();
+            bad_dk[768 * p.k + 32] ^= 1;
+            assert_eq!(decapsulate(&p, &bad_dk, &c, &mut back), Err(InputError::DecapsulationKey));
+            decapsulate(&p, &dk, &c, &mut back).expect("valid");
+            assert_eq!(back, key);
         }
     }
 

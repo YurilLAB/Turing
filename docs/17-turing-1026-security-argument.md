@@ -186,8 +186,14 @@ of LP, which nobody has bounded (next point).
   security level, and finds none near it in 100,000 keys.
 - *Implementation attacks*: faults, power, timing (docs/16 and the campaign).
   The decapsulation fault map (`bombe fault-map`) shows the re-encryption
-  check -- two independent re-encryptions, compared two ways, with chained
-  default-fail selections -- has no single-fault bypass; the residual is an
-  XOF-state fault on the rejection hash, which wants masking.
+  check -- two independent re-encryptions, compared three ways, with chained
+  default-fail selections and the accepted key bound to the comparison --
+  has no single-fault bypass, and `tools/ct_check.py` checks that the
+  release build keeps the verdicts apart (it once fused them, research/
+  reviews/2026-09-28 R2). Two single-fault holes remain: an XOF-state fault
+  on the rejection hash, which wants masking, and a skipped rounding step in
+  the decoder, whose effect reveals the sign of a noise coefficient (Pessl
+  and Prokop, TCHES 2021(2)), which wants shuffling or control-flow
+  integrity (docs/16).
 - *The concrete lattice term.* No reduction gives a number for
   Adv^LWE; docs/16's attack-cost analysis does.

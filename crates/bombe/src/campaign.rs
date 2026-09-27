@@ -1545,27 +1545,37 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
     let mut caught = 0;
     for _ in 0..faults {
         let entry = rng.below((1026 * 32) as u64) as usize;
-        let bit = rng.below(14) as u32;
+        let bit = rng.below(15) as u32;
         caught += usize::from(DecapsulationKey::from_seed_with_fault(&[0x5a; 32], entry, bit).is_err());
     }
     let harmless = DecapsulationKey::from_seed_with_fault(&[0x5a; 32], 77, 15).is_ok();
+    // A flip the one-ciphertext pair-wise check misses (research/reviews/
+    // 2026-09-28 R5): passed by the pair-wise check alone, caught by the key check.
+    let missed_before = DecapsulationKey::from_seed_with_fault_pairwise_only(&[0x3c; 32], 24_960, 12).is_ok();
+    let caught_now = DecapsulationKey::from_seed_with_fault(&[0x3c; 32], 24_960, 12).is_err();
     log.add(
         s,
         "faults in S during key generation",
-        format!("{caught} of {faults} single-bit flips in bits 0-13 of S caught by the pair-wise check; bit 15 changes S by 2^15 = 0 mod q, so it changes nothing and is not caught ({})", if harmless { "as expected" } else { "unexpectedly caught" }),
-        pass_if(caught == faults && harmless),
+        format!(
+            "{caught} of {faults} single-bit flips in bits 0-14 of S caught by the key check (B - A S must be small noise) and the pair-wise check; a flip the pair-wise check alone misses (about 2^-8 of them): {}; bit 15 changes S by 2^15 = 0 mod q, so it changes nothing and is not caught ({})",
+            if missed_before && caught_now { "caught" } else if !missed_before { "CONTROL FAILED: the pair-wise check caught it" } else { "MISSED" },
+            if harmless { "as expected" } else { "unexpectedly caught" }
+        ),
+        pass_if(caught == faults && harmless && missed_before && caught_now),
     );
     let fault_map = crate::fault1026::single_fault_summary(3);
     log.add(
         s,
         "faults in decapsulation (the fault map)",
         format!(
-            "over the accept mask, each re-encryption's coefficients, decoded message, coins, rejection and accepted keys and the selection: {} single faults bypass the re-encryption check, {} give a validity oracle (skipping z, which redundancy cannot stop); two independent re-encryptions and chained selections mean a correlated pair (both verdicts, or both re-encryptions) is the cheapest bypass: {}",
+            "over the three verdicts, each re-encryption's coefficients, decoded message, coins, rejection and accepted keys and the selection: {} single faults bypass the re-encryption check, {} give a validity oracle (skipping z, which redundancy cannot stop); forcing both selection verdicts {}; the cheapest bypass takes {} correlated faults (both re-encryptions' data), forcing verdicts alone {}",
             fault_map.bypasses,
             fault_map.validity_oracles,
-            if fault_map.pair_bypasses { "two faults" } else { "not found" }
+            if fault_map.verdict_pair_bypasses { "BYPASSES" } else { "gives a key bound to the comparison (no bypass)" },
+            fault_map.cheapest_bypass,
+            if fault_map.all_verdicts_bypass { "three" } else { "more" }
         ),
-        pass_if(fault_map.bypasses == 0 && fault_map.pair_bypasses),
+        pass_if(fault_map.bypasses == 0 && !fault_map.verdict_pair_bypasses && fault_map.cheapest_bypass == 2 && fault_map.all_verdicts_bypass),
     );
     let n = scale(200_000, 50_000);
     let packed = vec![0x3cu8; 15_870];

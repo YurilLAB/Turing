@@ -24,15 +24,52 @@
 //! attacker who watches both sees each mask used twice, which undoes masking
 //! (Bombe's leakage tests show it). On Linux the state's pages are marked
 //! MADV_WIPEONFORK, so a child finds them zeroed and reseeds before its first
-//! mask. Beyond that, `check_fork` compares the process ID: every public
-//! draw (`fill`, `u64`, `block`) runs it first, so a stream used directly is
-//! fork-safe on every platform, whatever the kernel said to
-//! MADV_WIPEONFORK. The masked cipher draws thousands of masks per block
-//! through crate-private calls that skip the system call, and runs
+//! mask. Beyond that, `check_fork` compares two things with what the stream
+//! recorded when it was seeded: the fork generation, which a fork handler
+//! (pthread_atfork) moves on in every child, and the process ID. Every public
+//! draw (`fill`, `u64`, `block`) runs it first. The process ID alone is not
+//! enough: a descendant can be given the ID of the process that seeded the
+//! stream once that process has exited, and then drew exactly its masks
+//! (reproduced on Linux with MADV_WIPEONFORK refused, research/reviews/
+//! 2026-09-28 R8). The generation does not depend on IDs, so a child always
+//! reseeds unless it was made without fork(3) itself (a raw clone system
+//! call runs no handler); the process ID and, on Linux, the wiped pages
+//! still stand behind it there. The masked cipher draws thousands of masks
+//! per block through crate-private calls that skip these checks, and runs
 //! `check_fork` once at the start of every operation instead.
 
 use crate::memory::{SecretBox, Zeroable};
+use core::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroize;
+
+/// Moved on by one in every child process, by the fork handler that
+/// `watch_forks` installs (pthread_atfork); never in the parent.
+static FORK_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn fork_generation() -> u64 {
+    FORK_GENERATION.load(Ordering::Relaxed)
+}
+
+/// Installs the fork handler once per process, before the first stream is
+/// seeded. The handler only increments an atomic, which is safe in a fork
+/// child. If the C library refuses (pthread_atfork can fail with ENOMEM),
+/// the process-ID check and MADV_WIPEONFORK remain.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+fn watch_forks() {
+    unsafe extern "C" fn in_child() {
+        FORK_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: registers a handler with no preconditions; it runs only in
+        // fork children and touches nothing but an atomic.
+        unsafe { libc::pthread_atfork(None, None, Some(in_child)) };
+    });
+}
+
+/// Windows has no fork(2); other targets keep the process-ID check.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
+fn watch_forks() {}
 
 /// The operating system could not supply random bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,12 +87,17 @@ pub fn os_random(buf: &mut [u8]) -> Result<(), RandomnessError> {
 /// so is the stack the hash used; Bombe's memory scan finds the key nowhere
 /// but in the returned buffer.
 pub fn new_key() -> Result<SecretBox<[u8; 32]>, RandomnessError> {
+    let key = new_key_below_the_burn();
+    crate::memory::burn_stack();
+    key
+}
+
+/// The work of `new_key`, in a frame of its own below the burn.
+#[inline(never)]
+fn new_key_below_the_burn() -> Result<SecretBox<[u8; 32]>, RandomnessError> {
     let mut seed: SecretBox<[u8; SEED_BYTES]> = SecretBox::zeroed();
     os_random(&mut seed[..])?;
-    let key = key_from_seed(&seed);
-    drop(seed);
-    crate::memory::burn_stack();
-    Ok(key)
+    Ok(key_from_seed(&seed))
 }
 
 fn key_from_seed(seed: &[u8; SEED_BYTES]) -> SecretBox<[u8; 32]> {
@@ -64,7 +106,7 @@ fn key_from_seed(seed: &[u8; SEED_BYTES]) -> SecretBox<[u8; 32]> {
     key
 }
 
-const STREAM_LABEL: &str = "Turing v2 masks";
+pub(crate) const STREAM_LABEL: &str = "Turing v2 masks";
 /// cSHAKE256's rate in bytes (capacity 512 bits).
 const RATE: usize = 136;
 const SEED_BYTES: usize = 64;
@@ -81,6 +123,8 @@ struct StreamState {
     seeded: u64,
     /// The process that seeded the stream.
     pid: u64,
+    /// The fork generation when it was seeded.
+    generation: u64,
 }
 
 impl Zeroize for StreamState {
@@ -90,6 +134,7 @@ impl Zeroize for StreamState {
         self.used.zeroize();
         self.seeded.zeroize();
         self.pid.zeroize();
+        self.generation.zeroize();
     }
 }
 
@@ -116,13 +161,12 @@ impl MaskStream {
         Ok(stream)
     }
 
-    /// The stream for a given seed (tests and Bombe's controls replay one).
-    #[cfg(any(test, feature = "analysis"))]
+    /// The stream for a given seed (the self-test's known answer; tests and
+    /// Bombe's controls replay one).
     pub(crate) fn from_seed(seed: &[u8; SEED_BYTES]) -> MaskStream {
         MaskStream::seeded_in(SecretBox::zeroed_fork_wiped(), seed)
     }
 
-    #[cfg(any(test, feature = "analysis"))]
     fn seeded_in(state: SecretBox<StreamState>, seed: &[u8; SEED_BYTES]) -> MaskStream {
         let mut stream = MaskStream { state };
         stream.state.block[..SEED_BYTES].copy_from_slice(seed);
@@ -141,6 +185,7 @@ impl MaskStream {
     /// then the seed followed by cSHAKE's suffix 00 and the pad10*1 padding
     /// (the bytes 0x04 ... 0x80), then wipes the seed.
     fn start(&mut self) {
+        watch_forks();
         let st = &mut *self.state;
         st.lanes = [0; 25];
         let label = STREAM_LABEL.as_bytes();
@@ -158,13 +203,16 @@ impl MaskStream {
         st.used = RATE as u64;
         st.seeded = 1;
         st.pid = u64::from(std::process::id());
+        st.generation = fork_generation();
     }
 
     /// Reseeds from the OS if this process did not seed the stream: a fork
-    /// child. Panics if the OS has no randomness to give, since the only
-    /// alternative is to reuse the parent's masks.
+    /// child, told by the fork generation or by the process ID. Panics if the
+    /// OS has no randomness to give, since the only alternative is to reuse
+    /// the parent's masks.
     pub fn check_fork(&mut self) {
-        if self.state.seeded == 0 || self.state.pid != u64::from(std::process::id()) {
+        let st = &*self.state;
+        if st.seeded == 0 || st.generation != fork_generation() || st.pid != u64::from(std::process::id()) {
             self.reseed().expect("OS randomness failed after fork; refusing to reuse masks");
         }
     }
@@ -436,6 +484,55 @@ mod tests {
             assert_ne!(child, parent, "{name}");
             assert_ne!(child, [0u8; 64], "{name}");
         }
+    }
+
+    // PID reuse: a child whose inherited stream carries the child's own
+    // process ID (as when a descendant is given the ID of the process that
+    // seeded the stream, research/reviews/2026-09-28 R8; simulated here by
+    // writing that ID into the child's copy), in memory nothing wipes on
+    // fork, still reseeds, because the fork handler moved the generation on.
+    // Before, it drew the seeder's masks.
+    #[test]
+    #[cfg(unix)]
+    fn a_fork_child_reseeds_even_when_its_pid_matches() {
+        for draw in ["fill", "u64"] {
+            let mut s = MaskStream::seeded_in(SecretBox::zeroed(), &[4; 64]);
+            assert!(!s.wiped_on_fork());
+            let child = in_child(|| {
+                s.state.pid = u64::from(std::process::id());
+                let mut b = [0u8; 64];
+                if draw == "fill" {
+                    s.fill(&mut b);
+                } else {
+                    b.chunks_exact_mut(8).for_each(|c| c.copy_from_slice(&s.u64().to_le_bytes()));
+                }
+                b
+            });
+            let mut parent = [0u8; 64];
+            if draw == "fill" {
+                s.fill(&mut parent);
+            } else {
+                parent.chunks_exact_mut(8).for_each(|c| c.copy_from_slice(&s.u64().to_le_bytes()));
+            }
+            assert_ne!(child, parent, "{draw}: the child drew the parent's masks");
+        }
+    }
+
+    // The fork handler moves the generation on in a child and never in the
+    // parent.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn fork_generation_moves_on_only_in_the_child() {
+        let _ = MaskStream::from_seed(&[1; 64]);
+        let parent_before = fork_generation();
+        let child = in_child(|| {
+            let mut b = [0u8; 64];
+            b[..8].copy_from_slice(&fork_generation().to_le_bytes());
+            b
+        });
+        let in_child_generation = u64::from_le_bytes(child[..8].try_into().unwrap());
+        assert_eq!(in_child_generation, parent_before + 1);
+        assert_eq!(fork_generation(), parent_before);
     }
 
     // On Linux a child that never calls check_fork still reseeds, because

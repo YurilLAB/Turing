@@ -1,6 +1,10 @@
-//! First-order masked Turing. Every secret value inside the cipher is split
-//! into two shares whose XOR is the value, with fresh random masks for every
-//! block, so no single intermediate value depends on the key or the data.
+//! First-order masked Turing. Every secret value inside encryption and
+//! decryption is split into two shares whose XOR is the value, with fresh
+//! random masks for every block, so no single intermediate value depends on
+//! the key or the data. Key setup is not masked: the key schedule runs in the
+//! clear, as the plain cipher's does, and the round keys exist unshared, in
+//! locked memory, until `with_stream` has split them into shares and wiped
+//! them (research/reviews/2026-09-28 R12).
 //! A single intermediate value is exactly what power and EM analysis,
 //! software power meters (PLATYPUS) and Hertzbleed's frequency leak observe
 //! (docs/13).
@@ -14,7 +18,8 @@
 //!   falls to an attack of order ceil(d/2) + 1. At masking order d = 1 that
 //!   is order 2, which first-order masking does not claim to resist.
 //! - Round keys are stored as two shares in locked memory, re-randomised on
-//!   every call, so the key never sits in memory as itself. Their checksum
+//!   every call, so after key setup the key never sits in memory as itself.
+//!   Their checksum
 //!   is shared the same way and catches corrupted shares. Its secret point
 //!   is drawn at random, not derived from the key, so checking it handles
 //!   no value that depends on the key.
@@ -297,9 +302,11 @@ impl MaskedTuring {
     /// and the point must still be odd, so a reset fault on the point and
     /// both check shares no longer verifies (review of 2026-09-27).
     fn intact(&self) -> bool {
-        let a = xor(&checksum(&self.shares.keys[0], &self.shares.point), &self.shares.check[0]);
-        let b = xor(&xor(&checksum(&self.shares.keys[1], &self.shares.point), &self.shares.check[1]), &keyschedule::CHECK_CONSTANT);
+        let mut a = xor(&checksum(&self.shares.keys[0], &self.shares.point), &self.shares.check[0]);
+        let mut b = xor(&xor(&checksum(&self.shares.keys[1], &self.shares.point), &self.shares.check[1]), &keyschedule::CHECK_CONSTANT);
         let diff = a.iter().zip(&b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+        a.zeroize();
+        b.zeroize();
         let even = !self.shares.point[0] & 1;
         (diff | even) == 0
     }
@@ -350,14 +357,20 @@ impl MaskedTuring {
     /// compares, and checks the checksum again; a fault anywhere wipes the
     /// block (as `Turing`'s checked calls, which explain the second check).
     pub fn encrypt_block_checked(&mut self, block: &mut Block) -> Result<(), FaultDetected> {
-        self.guarded(block, true, |_| {})
+        let result = self.guarded(block, true, |_| {});
+        memory::burn_stack();
+        result
     }
 
     /// The same for decryption.
     pub fn decrypt_block_checked(&mut self, block: &mut Block) -> Result<(), FaultDetected> {
-        self.guarded(block, false, |_| {})
+        let result = self.guarded(block, false, |_| {});
+        memory::burn_stack();
+        result
     }
 
+    /// Never inlined: its frame, and the checksums', lie below the burn.
+    #[inline(never)]
     fn guarded(&mut self, block: &mut Block, encrypt: bool, between: impl FnOnce(&mut MaskedTuring)) -> Result<(), FaultDetected> {
         if !self.intact() {
             block.zeroize();
@@ -501,6 +514,46 @@ mod tests {
             }
         }
         assert!(m.intact());
+    }
+
+    // A masked checked call leaves no half of its checksum point in dead
+    // stack (research/reviews/2026-09-28 R4). Control: a copy of the point
+    // in a callee's frame is found.
+    #[test]
+    fn checked_calls_leave_no_checksum_point_behind() {
+        use crate::memory::residue::{contains, leave, run, snapshot, SCAN};
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| {
+                let mut buf = vec![0u8; SCAN];
+                for seed in 1..=5u8 {
+                    let mut m = MaskedTuring::new(&key(seed)).expect("OS randomness");
+                    let point = m.shares.point;
+                    let found = |buf: &[u8]| contains(buf, &point[..8]) || contains(buf, &point[8..]);
+                    run(&mut || leave(&point));
+                    snapshot(&mut buf);
+                    assert!(found(&buf), "control: a copy of the point in a callee's frame is found");
+                    crate::memory::burn_stack();
+                    run(&mut || {
+                        let mut b = [0x5au8; 16];
+                        m.encrypt_block_checked(&mut b).expect("intact");
+                        core::hint::black_box(&b);
+                    });
+                    snapshot(&mut buf);
+                    assert!(!found(&buf), "encrypt_block_checked left the point (key {seed})");
+                    crate::memory::burn_stack();
+                    run(&mut || {
+                        let mut b = [0x5au8; 16];
+                        m.decrypt_block_checked(&mut b).expect("intact");
+                        core::hint::black_box(&b);
+                    });
+                    snapshot(&mut buf);
+                    assert!(!found(&buf), "decrypt_block_checked left the point (key {seed})");
+                }
+            })
+            .expect("thread")
+            .join()
+            .expect("test thread");
     }
 
     #[test]

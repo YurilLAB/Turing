@@ -14,14 +14,27 @@
 //! party a session but leaks nothing.
 //!
 //! With the single-comparison design decapsulation once used, forcing the one
-//! accept mask was a single-fault bypass. Decapsulation now checks the
-//! re-encryption twice (packed bytes and coefficients, independent memory and
-//! code) and installs the accepted key only through two chained selections,
-//! so no single fault on the check bypasses it: the map below finds a bypass
-//! only from the correlated pair that forces *both* verdicts. The one
-//! single-fault hole left is skipping the secret z in the rejection hash (an
-//! XOF-state fault), which no amount of comparison redundancy can close; it
-//! needs redundant or masked hashing, noted as not done.
+//! accept mask was a single-fault bypass. Decapsulation now computes the
+//! re-encryption twice and compares it three ways (the first run as packed
+//! bytes, the second as coefficients and as packed bytes); two chained
+//! selections install the accepted key only if the first two verdicts
+//! accept, and the third verdict binds the accepted key itself to the
+//! comparison (cSHAKE256(c || k' xor K-bar) unless it accepts). No single
+//! fault on the check bypasses it, and forcing both selection verdicts no
+//! longer does either: the map finds a bypass only from both runs' data
+//! (two correlated faults) or all three verdicts (three). The one
+//! single-fault hole on the check left is skipping the secret z in the
+//! rejection hash (an XOF-state fault), which no amount of comparison
+//! redundancy can close; it needs redundant or masked hashing, noted as not
+//! done. The decoder is outside this map: a skipped `+ q/4` makes the
+//! decapsulation's success depend on the sign of one noise coefficient
+//! (Pessl and Prokop, TCHES 2021(2)), docs/16's fault model.
+//!
+//! This map runs the `Faults` compilation of decapsulation. The production
+//! one (`NoFault`) is compiled separately, and its release build once fused
+//! the two selection verdicts into one mask, a single-fault bypass this map
+//! could not see (research/reviews/2026-09-28 R2): `tools/ct_check.py` checks
+//! the production machine code for that.
 //!
 //! The two comparisons read two *independent* re-encryptions, not one shared
 //! intermediate: an earlier version packed one re-encryption and compared it
@@ -217,6 +230,7 @@ pub fn map(seed: u8) -> Vec<MapEntry> {
     // Forcing each verdict to accept (the accept-mask fault).
     out.push(s.run("force the packed-byte verdict to accept", vec![Fault::Verdict(FaultPoint::AcceptBytes, 0xff)]));
     out.push(s.run("force the coefficient verdict to accept", vec![Fault::Verdict(FaultPoint::AcceptCoeffs, 0xff)]));
+    out.push(s.run("force the binding verdict to accept", vec![Fault::Verdict(FaultPoint::AcceptBinding, 0xff)]));
     // Faulting one re-encryption's coefficients to match the received one (the
     // user-found bypass of the shared-intermediate design): each is caught by
     // the other, independent re-encryption.
@@ -228,13 +242,35 @@ pub fn map(seed: u8) -> Vec<MapEntry> {
     out.push(s.run("skip absorbing z into the rejection key", vec![Fault::Skip(FaultPoint::RejectionZ)]));
     // Skipping the final selection (pqm4's skipped copy).
     out.push(s.run("skip the final masked selection", vec![Fault::Skip(FaultPoint::Selection)]));
-    // The correlated pairs that do bypass: both verdicts, or both
-    // re-encryptions forced to match. Two faults each.
+    // Both selection verdicts forced: the accepted key is still bound to the
+    // comparison, so what comes out needs z to compute (no bypass).
     out.push(s.run(
-        "force BOTH verdicts to accept (two correlated faults)",
+        "force BOTH selection verdicts to accept (two faults)",
         vec![Fault::Verdict(FaultPoint::AcceptBytes, 0xff), Fault::Verdict(FaultPoint::AcceptCoeffs, 0xff)],
     ));
+    // Data and verdict mixed. The third verdict reads the second run, packed:
+    // forcing the first run and the coefficient verdict still leaves it
+    // rejecting (no bypass); forcing the second run fools both verdicts that
+    // read it, so the byte verdict is the one fault left to force (bypass).
+    out.push(s.run(
+        "force the first re-encryption AND the coefficient verdict (two faults)",
+        vec![force1, Fault::Verdict(FaultPoint::AcceptCoeffs, 0xff)],
+    ));
+    out.push(s.run(
+        "force the second re-encryption AND the byte verdict (two correlated faults)",
+        vec![force2, Fault::Verdict(FaultPoint::AcceptBytes, 0xff)],
+    ));
+    // The cheapest bypasses: both re-encryptions' data (two correlated
+    // faults), or all three verdicts (three).
     out.push(s.run("force BOTH re-encryptions to match (two correlated faults)", vec![force1, force2]));
+    out.push(s.run(
+        "force ALL THREE verdicts to accept (three faults)",
+        vec![
+            Fault::Verdict(FaultPoint::AcceptBytes, 0xff),
+            Fault::Verdict(FaultPoint::AcceptCoeffs, 0xff),
+            Fault::Verdict(FaultPoint::AcceptBinding, 0xff),
+        ],
+    ));
     out
 }
 
@@ -260,12 +296,14 @@ pub fn report(seed: u8) -> (String, bool) {
     let s = single_fault_summary(seed);
     let _ = writeln!(
         out,
-        "\n{} single faults bypass the check; {} give a validity oracle (skipping z in the rejection hash,\nwhich comparison redundancy cannot close). The correlated pairs -- both verdicts, or both\nre-encryptions -- {}.",
+        "\n{} single faults bypass the check; {} give a validity oracle (skipping z in the rejection hash,\nwhich comparison redundancy cannot close). Forcing both selection verdicts {}; the cheapest\nbypass takes {} faults (both re-encryptions' data), forcing verdicts alone {}.",
         s.bypasses,
         s.validity_oracles,
-        if s.pair_bypasses { "each need two faults to bypass" } else { "do not bypass" }
+        if s.verdict_pair_bypasses { "BYPASSES" } else { "does not bypass (the key is bound to the comparison)" },
+        s.cheapest_bypass,
+        if s.all_verdicts_bypass { "three" } else { "more than three" }
     );
-    (out, s.bypasses == 0)
+    (out, s.bypasses == 0 && !s.verdict_pair_bypasses)
 }
 
 fn severity(e: &MapEntry) -> u8 {
@@ -280,23 +318,27 @@ fn severity(e: &MapEntry) -> u8 {
     }
 }
 
-/// The single-fault picture: how many single faults give a full bypass, how
-/// many give a validity oracle, and whether the correlated two-fault pair
-/// bypasses.
+/// The fault picture: how many single faults give a full bypass, how many a
+/// validity oracle, whether forcing both selection verdicts bypasses, the
+/// fewest faults of any bypass, and whether forcing all three verdicts does.
 pub struct SingleFaultSummary {
     pub bypasses: usize,
     pub validity_oracles: usize,
-    pub pair_bypasses: bool,
+    pub verdict_pair_bypasses: bool,
+    pub cheapest_bypass: usize,
+    pub all_verdicts_bypass: bool,
 }
 
 pub fn single_fault_summary(seed: u8) -> SingleFaultSummary {
     let m = map(seed);
     let singles = m.iter().filter(|e| e.faults.len() == 1);
-    let pairs: Vec<_> = m.iter().filter(|e| e.faults.len() == 2).collect();
+    let named = |part: &str| m.iter().find(|e| e.name.contains(part)).expect("entry");
     SingleFaultSummary {
         bypasses: singles.clone().filter(|e| e.on_invalid == Outcome::Bypass).count(),
         validity_oracles: singles.filter(|e| e.on_invalid == Outcome::ValidityOracle).count(),
-        pair_bypasses: !pairs.is_empty() && pairs.iter().all(|e| e.on_invalid == Outcome::Bypass),
+        verdict_pair_bypasses: named("BOTH selection verdicts").on_invalid == Outcome::Bypass,
+        cheapest_bypass: m.iter().filter(|e| e.on_invalid == Outcome::Bypass).map(|e| e.faults.len()).min().unwrap_or(usize::MAX),
+        all_verdicts_bypass: named("ALL THREE verdicts").on_invalid == Outcome::Bypass,
     }
 }
 
@@ -306,8 +348,10 @@ mod tests {
 
     // No single fault on the check turns a rejected ciphertext into an
     // accepted one: the only single-fault break is the validity oracle from
-    // skipping z, and the accept-mask faults do nothing. The correlated pair
-    // that forces both verdicts does bypass, so two faults are needed.
+    // skipping z, and the accept-mask faults do nothing. Forcing both
+    // selection verdicts gives a key bound to the comparison (denial of
+    // service); a bypass takes both re-encryptions' data, or all three
+    // verdicts.
     #[test]
     fn no_single_fault_bypass() {
         for seed in [1u8, 2, 7, 200] {
@@ -322,6 +366,9 @@ mod tests {
             assert_eq!(force_bytes.on_invalid, Outcome::NoEffect);
             let force_coeffs = m.iter().find(|e| e.name.contains("coefficient verdict")).expect("entry");
             assert_eq!(force_coeffs.on_invalid, Outcome::NoEffect);
+            let force_binding = m.iter().find(|e| e.name.contains("binding verdict")).expect("entry");
+            assert_eq!(force_binding.on_invalid, Outcome::NoEffect);
+            assert_eq!(force_binding.on_valid, Outcome::NoEffect, "forcing an accepting verdict changes nothing on a valid ciphertext");
             // Forcing one re-encryption's coefficients to match is caught by
             // the other, independent re-encryption.
             let force1 = m.iter().find(|e| e.name.contains("first re-encryption to match")).expect("entry");
@@ -332,10 +379,24 @@ mod tests {
             let skip = m.iter().find(|e| e.name.contains("final masked selection")).expect("entry");
             assert_eq!(skip.on_invalid, Outcome::NoEffect);
             assert_eq!(skip.on_valid, Outcome::DenialOfService);
-            // Both correlated pairs (verdicts, and re-encryptions) bypass.
-            for pair in m.iter().filter(|e| e.faults.len() == 2) {
-                assert_eq!(pair.on_invalid, Outcome::Bypass, "correlated pair should bypass: {}", pair.name);
-            }
+            // Both selection verdicts forced: the released key is bound to
+            // the comparison (it needs z), so no bypass. research/reviews/
+            // 2026-09-28 R2: this pair was a bypass, and the release build
+            // had fused it into one fault.
+            let verdicts = m.iter().find(|e| e.name.contains("BOTH selection verdicts")).expect("entry");
+            assert_eq!(verdicts.on_invalid, Outcome::DenialOfService, "forcing both selection verdicts bypassed");
+            // The cheapest bypasses remain: both runs' data, or three verdicts.
+            let data = m.iter().find(|e| e.name.contains("BOTH re-encryptions")).expect("entry");
+            assert_eq!(data.on_invalid, Outcome::Bypass, "both re-encryptions forced should bypass");
+            // The third verdict reads the second run: forcing the first run
+            // and a verdict does not bypass; the second run and the byte
+            // verdict does (two faults, as cheap as both runs' data).
+            let first_and_coeffs = m.iter().find(|e| e.name.contains("first re-encryption AND")).expect("entry");
+            assert_eq!(first_and_coeffs.on_invalid, Outcome::DenialOfService, "first run + coefficient verdict bypassed");
+            let second_and_bytes = m.iter().find(|e| e.name.contains("second re-encryption AND")).expect("entry");
+            assert_eq!(second_and_bytes.on_invalid, Outcome::Bypass);
+            let three = m.iter().find(|e| e.name.contains("ALL THREE verdicts")).expect("entry");
+            assert_eq!(three.on_invalid, Outcome::Bypass, "all three verdicts forced should bypass");
         }
     }
 
@@ -353,6 +414,8 @@ mod tests {
         let s = single_fault_summary(11);
         assert_eq!(s.bypasses, 0, "no single fault gives a full bypass");
         assert_eq!(s.validity_oracles, 1, "only skipping z is a single-fault validity oracle");
-        assert!(s.pair_bypasses, "two correlated faults do bypass");
+        assert!(!s.verdict_pair_bypasses, "forcing both selection verdicts must not bypass");
+        assert_eq!(s.cheapest_bypass, 2, "the cheapest bypass is both re-encryptions' data");
+        assert!(s.all_verdicts_bypass, "three verdict faults do bypass");
     }
 }

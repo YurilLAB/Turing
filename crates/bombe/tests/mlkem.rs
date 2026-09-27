@@ -267,7 +267,7 @@ fn every_unreduced_coefficient_fails_the_modulus_check() {
                 ek[byte + 1] = (ek[byte + 1] & 0xf0) | ((v >> 8) as u8 & 0x0f);
             }
         };
-        for i in 0..256 * p.k {
+        for i in 0..256 * p.k() {
             for v in [3329, 4095] {
                 let mut bad = ek.clone();
                 set(&mut bad, i, v);
@@ -283,7 +283,7 @@ fn every_unreduced_coefficient_fails_the_modulus_check() {
         }
         assert!(!mlkem::check_encapsulation_key(&p, &ek[..ek.len() - 1]), "type check");
         let mut bad_dk = dk.clone();
-        let hash_at = 768 * p.k + 32;
+        let hash_at = 768 * p.k() + 32;
         bad_dk[hash_at] ^= 1;
         assert!(!mlkem::check_decapsulation_key(&p, &bad_dk), "{p:?}: hash check");
     }

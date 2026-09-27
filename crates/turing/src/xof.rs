@@ -9,8 +9,8 @@
 //! lengths. Plain SHAKE256(label || input) only has that property while
 //! every label/input combination happens to differ in length.
 
-use sha3::digest::core_api::{BlockSizeUser, Buffer, CoreWrapper, ExtendableOutputCore, UpdateCore, XofReaderCore};
-use sha3::digest::generic_array::GenericArray;
+use crate::memory::{SecretBox, Zeroable};
+use sha3::digest::core_api::CoreWrapper;
 use sha3::digest::{ExtendableOutput, Update};
 use sha3::{CShake256Core, CShake256Reader};
 use zeroize::Zeroize;
@@ -28,37 +28,25 @@ pub fn cshake256(label: &str, input: &[u8]) -> CShake256Reader {
     h.finalize_xof()
 }
 
-/// The same function for secret input and output (key whitening, key
-/// shielding), leaving no copy behind. The high-level API above keeps the
-/// input and the last output block in the digest crate's buffers, which are
-/// never wiped. Here full input blocks are absorbed straight from the
-/// caller's slice (cSHAKE's buffer is "eager", so this is exactly what the
-/// high-level API does), the partial last block goes into a block buffer we
-/// wipe, every output block is wiped after copying, and the Keccak state
-/// itself is wiped on drop by the sha3 crate (its `zeroize` feature).
+/// The same function for secret input and output (key whitening, the checksum
+/// point, key generation, key shielding), leaving no copy behind. It runs on
+/// `SecretXof`, whose whole Keccak state lives in its own locked allocation
+/// and is wiped in place. The sha3 crate's API was used here before: its
+/// buffers are never wiped, and `finalize_xof_core` takes the state by value,
+/// so every call moved a copy of the state through the stack (a leftover
+/// state gives the input back through one inverse permutation, research/
+/// reviews/2026-09-28 R1).
 pub fn cshake256_secret(label: &str, input: &[u8], out: &mut [u8]) {
-    assert!(!label.is_empty(), "cSHAKE label must not be empty");
-    let mut core = CShake256Core::new(label.as_bytes());
-    let block_len = CShake256Core::block_size();
-    let (full, rest) = input.split_at(input.len() - input.len() % block_len);
-    for chunk in full.chunks_exact(block_len) {
-        core.update_blocks(core::slice::from_ref(GenericArray::from_slice(chunk)));
-    }
-    let mut buffer = Buffer::<CShake256Core>::new(rest);
-    let mut reader = core.finalize_xof_core(&mut buffer);
-    // SAFETY: a BlockBuffer is a byte array, a u8 position and a PhantomData:
-    // no references, no Drop impl, and all zeroes is a valid (empty) buffer.
-    // It is not used again.
-    unsafe { zeroize::zeroize_flat_type(&mut buffer) };
-    for chunk in out.chunks_mut(block_len) {
-        let mut block = reader.read_block();
-        chunk.copy_from_slice(&block[..chunk.len()]);
-        block.as_mut_slice().zeroize();
-    }
+    let mut x = SecretXof::new(label);
+    x.absorb(input);
+    x.squeeze(out);
+    x.wipe();
 }
 
-/// cSHAKE256's rate in bytes.
+/// cSHAKE256's and SHAKE256's rate in bytes (capacity 512 bits).
 const RATE: usize = 136;
+/// SHA3-512's rate in bytes (capacity 1024 bits).
+const RATE_SHA3_512: usize = 72;
 
 /// SP 800-185 left_encode(x): the byte length of x, then x big-endian.
 fn left_encode(x: u64, out: &mut [u8; 9]) -> &[u8] {
@@ -68,75 +56,187 @@ fn left_encode(x: u64, out: &mut [u8; 9]) -> &[u8] {
     &out[..=len]
 }
 
-/// cSHAKE256 (N = "", S = label) for secret data that arrives in parts and
-/// leaves in parts: Turing-1026 hashes a secret message together with
-/// public bytes, and draws hundreds of kilobytes of secret noise from one
-/// stream (docs/16). Written directly on Keccak-f[1600], like the mask
-/// stream (random.rs), so the whole state is one array this type owns and
-/// wipes when dropped; nothing is left in a library buffer.
+/// A Keccak sponge's whole state: 25 lanes, where in the rate block it is,
+/// whether it squeezes, whether it was wiped.
+struct SpongeState {
+    lanes: [u64; 25],
+    pos: u64,
+    squeezing: u64,
+    wiped: u64,
+}
+
+impl Zeroize for SpongeState {
+    fn zeroize(&mut self) {
+        self.lanes.zeroize();
+        self.pos.zeroize();
+        self.squeezing.zeroize();
+        self.wiped.zeroize();
+    }
+}
+
+// SAFETY: 28 u64s, so no padding; all zeroes is a valid (empty) state.
+unsafe impl Zeroable for SpongeState {}
+
+/// A Keccak-f[1600] sponge for secret data that arrives in parts and leaves
+/// in parts: cSHAKE256 for Turing-1026's hashes of a secret message with
+/// public bytes and its hundreds of kilobytes of secret noise (docs/16), and
+/// SHAKE256 and SHA3-512 for ML-KEM's secret hashes (FIPS 203 G, J, PRF).
+/// Written directly on Keccak-f[1600], like the mask stream (random.rs).
+///
+/// The state is never on the stack. A leftover Keccak state gives its input
+/// back through one inverse permutation, and a value on the stack leaves a
+/// copy wherever it is moved: `drop(x)` wipes the moved copy, not the
+/// original (research/reviews/2026-09-28 R1, where that left Turing-1026's
+/// seed behind). Three defences, each enough on its own for that bug:
+/// - the state lives in its own locked allocation (memory.rs), so moving a
+///   `SecretXof` moves a pointer and no state;
+/// - `wipe` clears it in place, and any use after that panics; dropping
+///   wipes too;
+/// - every caller that absorbs a secret runs below a stack burn, for the
+///   compiler temporaries of Keccak-f itself (memory.rs).
 ///
 /// Absorb everything first, then squeeze; absorbing after the first squeeze
 /// panics.
 pub struct SecretXof {
-    lanes: [u64; 25],
-    /// Byte position within the current rate block.
-    pos: usize,
-    squeezing: bool,
+    state: SecretBox<SpongeState>,
+    rate: usize,
+    /// The domain bits and the first padding bit: 0x04 for cSHAKE, 0x1F for
+    /// SHAKE, 0x06 for SHA-3 (FIPS 202 section 6, SP 800-185 section 3.3).
+    suffix: u8,
 }
 
 impl SecretXof {
+    /// cSHAKE256(X, N = "", S = label).
     pub fn new(label: &str) -> SecretXof {
         assert!(!label.is_empty(), "cSHAKE label must not be empty");
-        let mut x = SecretXof { lanes: [0; 25], pos: 0, squeezing: false };
+        let mut x = SecretXof::sponge(RATE, 0x04);
         // bytepad(encode_string(N) || encode_string(S), 136) with N empty.
         let mut buf = [0u8; 9];
         x.absorb(left_encode(RATE as u64, &mut buf));
         x.absorb(left_encode(0, &mut buf));
         x.absorb(left_encode(8 * label.len() as u64, &mut buf));
         x.absorb(label.as_bytes());
-        if x.pos != 0 {
+        if x.state.pos != 0 {
             // The zero padding XORs nothing into the state.
-            keccak::f1600(&mut x.lanes);
-            x.pos = 0;
+            keccak::f1600(&mut x.state.lanes);
+            x.state.pos = 0;
         }
         x
     }
 
+    /// SHAKE256 (FIPS 202): ML-KEM's J and PRF.
+    pub fn shake256() -> SecretXof {
+        SecretXof::sponge(RATE, 0x1f)
+    }
+
+    /// SHA3-512 (FIPS 202): squeeze exactly 64 bytes for the digest (ML-KEM's
+    /// G). One squeeze of at most 72 bytes needs no further permutation.
+    pub fn sha3_512() -> SecretXof {
+        SecretXof::sponge(RATE_SHA3_512, 0x06)
+    }
+
+    fn sponge(rate: usize, suffix: u8) -> SecretXof {
+        SecretXof { state: SecretBox::zeroed(), rate, suffix }
+    }
+
     pub fn absorb(&mut self, data: &[u8]) {
-        assert!(!self.squeezing, "absorb after squeeze");
+        let rate = self.rate;
+        let st = &mut *self.state;
+        assert!(st.wiped == 0, "use after wipe");
+        assert!(st.squeezing == 0, "absorb after squeeze");
         for &b in data {
-            self.lanes[self.pos / 8] ^= u64::from(b) << (8 * (self.pos % 8));
-            self.pos += 1;
-            if self.pos == RATE {
-                keccak::f1600(&mut self.lanes);
-                self.pos = 0;
+            let pos = st.pos as usize;
+            st.lanes[pos / 8] ^= u64::from(b) << (8 * (pos % 8));
+            st.pos += 1;
+            if st.pos as usize == rate {
+                keccak::f1600(&mut st.lanes);
+                st.pos = 0;
             }
         }
     }
 
     pub fn squeeze(&mut self, out: &mut [u8]) {
-        if !self.squeezing {
-            // cSHAKE's two zero domain bits, then pad10*1: 0x04 ... 0x80.
-            self.lanes[self.pos / 8] ^= 0x04 << (8 * (self.pos % 8));
-            self.lanes[(RATE - 1) / 8] ^= 0x80 << (8 * ((RATE - 1) % 8));
-            keccak::f1600(&mut self.lanes);
-            self.pos = 0;
-            self.squeezing = true;
+        let (rate, suffix) = (self.rate, self.suffix);
+        let st = &mut *self.state;
+        assert!(st.wiped == 0, "use after wipe");
+        if st.squeezing == 0 {
+            // The domain bits and pad10*1: `suffix` ... 0x80.
+            let pos = st.pos as usize;
+            st.lanes[pos / 8] ^= u64::from(suffix) << (8 * (pos % 8));
+            st.lanes[(rate - 1) / 8] ^= 0x80 << (8 * ((rate - 1) % 8));
+            keccak::f1600(&mut st.lanes);
+            st.pos = 0;
+            st.squeezing = 1;
         }
         for b in out {
-            if self.pos == RATE {
-                keccak::f1600(&mut self.lanes);
-                self.pos = 0;
+            if st.pos as usize == rate {
+                keccak::f1600(&mut st.lanes);
+                st.pos = 0;
             }
-            *b = (self.lanes[self.pos / 8] >> (8 * (self.pos % 8))) as u8;
-            self.pos += 1;
+            let pos = st.pos as usize;
+            *b = (st.lanes[pos / 8] >> (8 * (pos % 8))) as u8;
+            st.pos += 1;
         }
+    }
+
+    /// Wipes the state where it lives; any later absorb or squeeze panics.
+    /// Call it as soon as the output is read, instead of relying on the end
+    /// of a scope (and never through `drop(x)`, which moves).
+    pub fn wipe(&mut self) {
+        #[cfg(test)]
+        recorded::note(&self.state.lanes);
+        self.state.zeroize();
+        self.state.wiped = 1;
     }
 }
 
 impl Drop for SecretXof {
     fn drop(&mut self) {
-        self.lanes.zeroize();
+        if self.state.wiped == 0 {
+            self.wipe();
+        }
+    }
+}
+
+/// Test builds record each sponge's last state just before it is wiped, so
+/// the residue tests can search the stack for whole Keccak states, the form
+/// of leftover that raw-byte needles miss (research/reviews/2026-09-28 R1).
+/// Room is reserved up front: recording must not call the allocator in the
+/// middle of the operation whose stack is then searched.
+#[cfg(test)]
+pub(crate) mod recorded {
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static ON: Cell<bool> = const { Cell::new(false) };
+        static STATES: RefCell<Vec<[u64; 25]>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Starts recording on this thread (up to 4096 states).
+    pub fn start() {
+        STATES.with(|s| {
+            let mut s = s.borrow_mut();
+            s.clear();
+            s.reserve(4096);
+        });
+        ON.with(|o| o.set(true));
+    }
+
+    /// Stops recording and returns the states recorded since `start`.
+    pub fn stop() -> Vec<[u64; 25]> {
+        ON.with(|o| o.set(false));
+        STATES.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+
+    pub(super) fn note(lanes: &[u64; 25]) {
+        if ON.with(|o| o.get()) {
+            STATES.with(|s| {
+                let mut s = s.borrow_mut();
+                if s.len() < s.capacity() {
+                    s.push(*lanes);
+                }
+            });
+        }
     }
 }
 
@@ -185,6 +285,70 @@ mod tests {
         assert_eq!(left_encode(136, &mut buf), &[1, 136]);
         assert_eq!(left_encode(256, &mut buf), &[2, 1, 0]);
         assert_eq!(left_encode(u64::MAX, &mut buf), &[8, 255, 255, 255, 255, 255, 255, 255, 255]);
+    }
+
+    // SHAKE256 and SHA3-512 on the same sponge equal the sha3 crate's, for
+    // every input length across two rate blocks, split in two parts, and
+    // output read across block boundaries.
+    #[test]
+    fn shake256_and_sha3_512_match_the_library() {
+        use sha3::digest::{Digest, ExtendableOutput, Update, XofReader};
+        let data: Vec<u8> = (0..300u32).map(|i| (i * 29 + 7) as u8).collect();
+        for len in 0..=300usize {
+            let mut want = [0u8; 300];
+            let mut h = sha3::Shake256::default();
+            Update::update(&mut h, &data[..len]);
+            h.finalize_xof().read(&mut want);
+            let split = len / 3;
+            let mut x = SecretXof::shake256();
+            x.absorb(&data[..split]);
+            x.absorb(&data[split..len]);
+            let mut got = [0u8; 300];
+            let (a, b) = got.split_at_mut(137);
+            x.squeeze(a);
+            x.squeeze(b);
+            assert_eq!(got, want, "SHAKE256, input {len}");
+
+            let want512 = sha3::Sha3_512::digest(&data[..len]);
+            let mut y = SecretXof::sha3_512();
+            y.absorb(&data[..split]);
+            y.absorb(&data[split..len]);
+            let mut got512 = [0u8; 64];
+            y.squeeze(&mut got512);
+            assert_eq!(got512[..], want512[..], "SHA3-512, input {len}");
+        }
+    }
+
+    // The sponge's state is not inside the value (it cannot be: the value is
+    // smaller than the 200-byte state), so moving a SecretXof moves no state.
+    #[test]
+    fn secret_xof_state_lives_off_the_stack() {
+        assert!(core::mem::size_of::<SecretXof>() < core::mem::size_of::<[u64; 25]>());
+        let mut x = SecretXof::new("Turing v1 test");
+        x.absorb(b"secret");
+        // A SecretBox allocation is page-aligned, unlike a stack slot or a heap block.
+        assert_eq!(&*x.state as *const SpongeState as usize % 4096, 0);
+    }
+
+    // wipe clears the whole state where it is, and refuses further use.
+    #[test]
+    fn wipe_clears_the_state_in_place() {
+        let mut x = SecretXof::new("Turing v1 test");
+        x.absorb(&[0xa5; 200]);
+        let mut out = [0u8; 10];
+        x.squeeze(&mut out);
+        assert!(x.state.lanes.iter().any(|&l| l != 0));
+        x.wipe();
+        assert!(x.state.lanes.iter().all(|&l| l == 0) && x.state.pos == 0 && x.state.squeezing == 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "use after wipe")]
+    fn secret_xof_refuses_use_after_wipe() {
+        let mut x = SecretXof::shake256();
+        x.absorb(b"secret");
+        x.wipe();
+        x.squeeze(&mut [0u8; 1]);
     }
 
     #[test]

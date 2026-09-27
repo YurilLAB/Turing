@@ -8,7 +8,7 @@ gap nobody sees.
 
 | Profile | Stages | Time (this machine, warm build) |
 |---|---|---|
-| `quick` (default) | release, overflow, robustness, math-audit, constant-time, noise, simulate | about 4 min |
+| `quick` (default) | release, overflow, production, robustness, math-audit, constant-time, noise, simulate | about 5 min |
 | `full` | quick + math-audit-negative, noise-negative, simulate-negative, mlkem-million, mutation-patterns, campaign, linux-wsl | tens of minutes |
 | `deep` | full + campaign-deep, an hour's soak and every planted-bug set of `tools/mutate.py` | hours |
 
@@ -41,6 +41,28 @@ overflow, `cargo test --release` silently returns the wrapped value (44 for
 200 + 100). Until this stage, no documented command ran the suite with
 overflow checks on. The first run found no overflow; the stage now keeps it
 that way.
+
+**production** runs the library's own tests with `-p turing` alone. A
+workspace build also compiles Bombe, which turns on the library's
+`analysis` feature, and the optimiser inlines that build differently: the
+review of 2026-09-28 found Turing-1026's seed left in dead stack only in the
+build users get (R1), because there `pair_consistent` was inlined into
+`from_seed`, above the stack burn. The residue tests (`no_sponge_state_is_
+left_on_the_stack`, `checked_calls_leave_no_checksum_point_behind`, ML-KEM's
+`entry_points_leave_no_secret_on_the_stack`) run here in that configuration;
+each has a planted-copy control, and each fails on the unfixed code.
+
+**constant-time** (`tools/ct_check.py`) reads the release build's machine
+code. No division in the lattice code (the KyberSlash class): `lwe` and
+`turing1026` in the production build, `mlkem` in the analysis build, the
+only one that compiles it until the hybrid calls it; a module with no
+function in the build it is read in fails the check (review of 2026-09-28,
+R7: ML-KEM was listed but never read, and a division planted in Compress
+passed; now it fails in two functions). And Turing-1026 decapsulation keeps
+its verdicts apart: three masks derived separately, `select_into` called
+twice and `bind_to_verdict` once, both real functions. The release build had
+fused the two selections into one mask, a single-fault bypass (R2); run on
+that build, the check reports all three failed.
 
 **robustness** (`crates/bombe/tests/robustness.rs`) checks the inputs that
 random tests almost never draw, each against the independent reference
@@ -188,8 +210,9 @@ each case's outputs in order, and it must first reproduce the sequential
 1,000,000-case hashes match CCTV's.
 
 **mutation-patterns** checks that every planted bug of every set of
-`tools/mutate.py` still matches the code it is meant to change (133 bugs
-in 8 sets). `mutate.py --check` on its own checks only the default set,
+`tools/mutate.py` still matches the code it is meant to change (174 bugs
+in 11 sets; `--review2` holds the 17 of the 2026-09-28 review's fixes,
+three of them checked by `ct_check.py` instead of a test). `mutate.py --check` on its own checks only the default set,
 and that hid a real problem: on 2026-09-27, 21 planted bugs in six sets
 (among them six of Turing-1026's, such as "rejection key without z" and
 "salt left out of the coins", and ten of the memory and masking ones)

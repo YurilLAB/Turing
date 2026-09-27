@@ -104,17 +104,22 @@ impl Turing256 {
     /// result and compares, then checks the keys again; on any fault the
     /// block is wiped (Turing's `encrypt_block_checked`).
     pub fn encrypt_block_checked(&self, block: &mut Block256) -> Result<(), FaultDetected> {
-        self.guarded(block, true, || {})
+        let result = self.guarded(block, true, || {});
+        crate::memory::burn_stack();
+        result
     }
 
     pub fn decrypt_block_checked(&self, block: &mut Block256) -> Result<(), FaultDetected> {
-        self.guarded(block, false, || {})
+        let result = self.guarded(block, false, || {});
+        crate::memory::burn_stack();
+        result
     }
 
     /// As Turing's: `between` runs right after the first key check, where the
     /// tests inject a fault to reach the second check (until the review of
     /// 2026-09-27 no test reached it, nor decrypt-and-compare: removing both
-    /// passed every test).
+    /// passed every test). Never inlined: its frame lies below the burn.
+    #[inline(never)]
     fn guarded(&self, block: &mut Block256, encrypt: bool, between: impl FnOnce()) -> Result<(), FaultDetected> {
         if !self.keys.intact() {
             block.zeroize();
@@ -217,6 +222,48 @@ impl Turing256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A checked call leaves neither the checksum's secret point H nor the
+    // stored check in dead stack (research/reviews/2026-09-28 R4: both were
+    // there after every call, for 20 of 20 keys; with H an attacker can
+    // compute faults that pass the check). Control: a copy of H left in a
+    // callee's frame is found.
+    #[test]
+    fn checked_calls_leave_no_checksum_point_behind() {
+        use crate::memory::residue::{contains, leave, run, snapshot, SCAN};
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| {
+                let mut buf = vec![0u8; SCAN];
+                for seed in 1..=5u8 {
+                    let t = Turing256::new(&[seed; 32]);
+                    let (point, check) = t.keys.point_and_check();
+                    let found = |buf: &[u8]| [&point[..8], &point[8..], &check[..8], &check[8..]].iter().any(|n| contains(buf, n));
+                    run(&mut || leave(&point));
+                    snapshot(&mut buf);
+                    assert!(found(&buf), "control: a copy of H in a callee's frame is found");
+                    crate::memory::burn_stack();
+                    run(&mut || {
+                        let mut b = [0x5au8; 32];
+                        t.encrypt_block_checked(&mut b).expect("intact");
+                        core::hint::black_box(&b);
+                    });
+                    snapshot(&mut buf);
+                    assert!(!found(&buf), "encrypt_block_checked left H or the check (key {seed})");
+                    crate::memory::burn_stack();
+                    run(&mut || {
+                        let mut b = [0x5au8; 32];
+                        t.decrypt_block_checked(&mut b).expect("intact");
+                        core::hint::black_box(&b);
+                    });
+                    snapshot(&mut buf);
+                    assert!(!found(&buf), "decrypt_block_checked left H or the check (key {seed})");
+                }
+            })
+            .expect("thread")
+            .join()
+            .expect("test thread");
+    }
 
     #[test]
     fn decrypts_what_it_encrypts() {

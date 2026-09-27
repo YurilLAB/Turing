@@ -100,6 +100,16 @@ locked in memory") and `dd` ("do not include area into core dump"), and a
 test reads it from /proc/self/smaps (against a heap allocation that shows
 neither).
 
+Locking is limited: Windows lets a process lock about its minimum working
+set (200 KB by default), Linux its RLIMIT_MEMLOCK. When a lock is refused
+for that reason, the allocation raises the limit and tries once more (the
+working set on Windows, as Microsoft's VirtualLock documentation says an
+application that locks more pages must; the soft limit on Linux, up to the
+hard one; at most 64 MB in all). Before the review of 2026-09-28 (R11), the
+third Turing-1026 key, and every per-operation workspace once two keys
+existed, went unlocked. `memory::unlocked_allocations()` counts, for the
+whole process, the secrets that still ended up unlocked.
+
 What the operating system granted is reported, not assumed. `locked()`,
 `dump_excluded()` and `wiped_on_fork()` return its answers to mlock,
 MADV_DONTDUMP and MADV_WIPEONFORK (false wherever a call was refused or does
@@ -227,8 +237,11 @@ Ishai, Sahai and Wagner (CRYPTO 2003). Coron, Prouff, Rivain and Roche
 (FSE 2013) showed that this use of refreshing "is defeated by an attack of
 order ⌈d/2⌉ + 1"; at d = 1 that is order 2, which first-order masking does
 not claim to resist. The round-key shares are re-randomised at the start of
-every call, so the key never sits in memory as itself, and it looks
-different every time. About 21 µs per block, 4.6 times the plain cipher
+every call, so after key setup the key never sits in memory as itself, and
+it looks different every time. Key setup itself is not masked: the key
+schedule runs in the clear, as the plain cipher's does, and the round keys
+exist unshared, in locked memory, until they are split into shares and
+wiped (review of 2026-09-28, R12). About 21 µs per block, 4.6 times the plain cipher
 (4.5 µs).
 
 The masks come from cSHAKE256 keyed with a 64-byte OS seed. Whoever knows
@@ -239,13 +252,20 @@ parent and child would use each mask twice. On Linux the state's pages are
 MADV_WIPEONFORK ("Present the child process with zero-filled memory in
 this range after a fork(2)", since Linux 4.14; `VmFlags` shows `wf`), so a
 child finds them zeroed and reseeds before its first mask. The generator
-also compares process IDs: the masked cipher at the start of every
-operation, and every public draw from the generator (`fill`, `u64`,
-`block`) before it draws. The first version checked the process ID in the
-masked cipher only, so a program drawing from the generator directly, on a
-system without MADV_WIPEONFORK or with a kernel that refused it, would have
-drawn its parent's masks in a fork child. Both mechanisms are tested: on
-Linux with a real fork, the process-ID check on every platform by changing
+also compares, with what it recorded when it was seeded, a fork generation
+that a fork handler (pthread_atfork) moves on in every child, and the
+process ID: the masked cipher at the start of every operation, and every
+public draw from the generator (`fill`, `u64`, `block`) before it draws. The
+first version checked the process ID in the masked cipher only, so a program
+drawing from the generator directly, on a system without MADV_WIPEONFORK or
+with a kernel that refused it, would have drawn its parent's masks in a fork
+child. The process ID alone is not enough either: a descendant can be given
+the ID of the process that seeded the stream once that process has exited,
+and on Linux with MADV_WIPEONFORK refused such a child drew exactly the
+seeder's masks, in 3 of 3 runs (review of 2026-09-28, R8). The generation
+does not depend on IDs. All three mechanisms are tested: on Linux with a
+real fork, the generation with a real fork of a stream whose recorded ID is
+set to the child's own, the process-ID check on every platform by changing
 the recorded ID, and each public draw with a real fork of a generator whose
 pages are not wiped.
 
@@ -346,10 +366,13 @@ at one, verifies (`reset_faults_are_caught`, plain and masked, and
 `tools/mutate.py --review1`). An earlier version of this page only asserted the case of a
 fault in H. The weights start at H^1: with H^0, bit j of RK_0 and bit j of
 the stored checksum would cancel whatever H is. Both cases were also
-checked exhaustively in GF(2^8) with four round keys, where every point and
-every RK_0 can be tried: with H untouched no fault tried passed at more
-than 3 of the 128 odd points (the bound is 4), and with H moved each passed
-for exactly one RK_0 in 256, at every point.
+checked in GF(2^8) with four round keys, where every point and every RK_0
+can be tried (`research/scripts/gf8_checksum_bound.py`): with H untouched a
+fault passes at no more than 4 of the 128 odd points, the bound, which is
+attained (E = (80, bd, bb, 55), e = 39 passes at 11, 79, 87 and bf); an
+earlier version of this page reported "no fault tried passed at more than
+3", sample luck (reviews of 2026-09-27, F2, and 2026-09-28, R13). With H
+moved each fault passed for exactly one RK_0 in 256, at every point.
 
 The point has to be secret. Version 2 first used the public point x,
 Σ x^i · RK_i, and said that changes in several round keys escape only if
@@ -436,8 +459,8 @@ Hertzbleed (Wang et al., USENIX Security 2022) turns power draw into remote
 timing: frequency scaling makes the CPU's speed depend on its power, and so
 on the data. dudect measures time on this machine, not power, and cannot
 rule it out for the plain cipher. The masked cipher answers it at first
-order: every value it handles is independent of the key, so its average
-power is too.
+order for encryption and decryption: every value they handle is independent
+of the key, so their average power is too. Key setup is not masked (above).
 
 ## 7. Planted bugs
 

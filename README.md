@@ -110,8 +110,9 @@ Run each with `cargo run --release -p bombe -- <command>`.
   keyed checksum before and after computing, against injected faults.
 - `MaskedTuring` is a first-order masked variant (about 21 µs per block),
   `ShieldedKey` an OpenSSH-style shielded key, and `random::new_key`
-  generates keys without leaving a copy behind. Keys live in locked memory,
-  kept out of core dumps on Linux.
+  generates keys without leaving a copy behind. Keys live in memory locked
+  where the OS allows it (reported by `locked()` and
+  `memory::unlocked_allocations()`), kept out of core dumps on Linux.
 - Round keys and reduced-round encryption sit behind the `analysis` feature,
   which only Bombe turns on.
 

@@ -115,14 +115,39 @@ fn parameters_are_turing_1026s() {
     assert_eq!(TURING_1026, turing::turing1026::PARAMS);
 }
 
-// A bit of S flipped between the expansion and the pair-wise check (a fault
-// during key generation) is caught; bit 15 is the exception, since S is
-// used mod 2^15 and a change of 2^15 changes nothing.
+// A bit of S flipped between the expansion and the key checks (a fault
+// during key generation) is caught, in every bit that matters mod 2^15 (0 to
+// 14); bit 15 is the exception, since a change of 2^15 changes nothing.
+// Until the review of 2026-09-28 (R5) only a one-ciphertext pair-wise check
+// looked, and it missed about 2^-8 of these flips; four positions were
+// tested. Now 240 random flips over 12 threads, plus flips the pair-wise
+// check alone is shown to miss (the control).
 #[test]
 fn key_generation_faults_are_caught() {
-    for (entry, bit) in [(0, 0), (5_000, 7), (32_831, 13), (100, 3)] {
+    for (entry, bit) in [(0, 0), (5_000, 7), (32_831, 13), (100, 3), (32_831, 14)] {
         assert!(DecapsulationKey::from_seed_with_fault(&[3; 32], entry, bit).is_err(), "entry {entry} bit {bit}");
     }
+    // The pair-wise check still runs, and on its own catches most flips.
+    assert!(DecapsulationKey::from_seed_with_fault_pairwise_only(&[3; 32], 0, 0).is_err(), "the pair-wise check alone catches S[0] bit 0");
+    // Flips of seed [0x3c; 32] that escaped the pair-wise check.
+    for (entry, bit) in [(24_960, 12), (5_507, 0), (657, 14)] {
+        assert!(DecapsulationKey::from_seed_with_fault_pairwise_only(&[0x3c; 32], entry, bit).is_ok(), "control: the pair-wise check alone misses S[{entry}] bit {bit}");
+        assert!(DecapsulationKey::from_seed_with_fault(&[0x3c; 32], entry, bit).is_err(), "S[{entry}] bit {bit} passed");
+    }
+    let flips: Vec<(usize, u32)> = (0..240u64)
+        .map(|i| {
+            let x = i.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(17) ^ 0x5a5a;
+            ((x % (1026 * 32)) as usize, ((x >> 32) % 15) as u32)
+        })
+        .collect();
+    let missed: Vec<(usize, u32)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = flips
+            .chunks(20)
+            .map(|chunk| scope.spawn(move || chunk.iter().copied().filter(|&(e, b)| DecapsulationKey::from_seed_with_fault(&[9; 32], e, b).is_ok()).collect::<Vec<_>>()))
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("worker")).collect()
+    });
+    assert!(missed.is_empty(), "flips that passed the key checks: {missed:?}");
     let dk = DecapsulationKey::from_seed_with_fault(&[3; 32], 100, 15).expect("bit 15 is harmless");
     let (ct, key) = dk.encapsulation_key().encapsulate_with(&[4; 32], &[5; 64]);
     assert_eq!(dk.decapsulate(&ct).expect("length")[..], key[..]);
