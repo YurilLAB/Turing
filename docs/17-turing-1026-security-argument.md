@@ -185,8 +185,9 @@ of LP, which nobody has bounded (next point).
   norms) that at most a 2^-13.6 fraction of keys could exceed the 2^-252.4
   security level, and finds none near it in 100,000 keys.
 - *Implementation attacks*: faults, power, timing (docs/16 and the campaign).
-  The decapsulation fault map (`bombe fault-map`) shows the two-comparison,
-  chained-selection re-encryption check has no single-fault bypass; the
-  residual is an XOF-state fault on the rejection hash, which wants masking.
+  The decapsulation fault map (`bombe fault-map`) shows the re-encryption
+  check -- two independent re-encryptions, compared two ways, with chained
+  default-fail selections -- has no single-fault bypass; the residual is an
+  XOF-state fault on the rejection hash, which wants masking.
 - *The concrete lattice term.* No reduction gives a number for
   Adv^LWE; docs/16's attack-cost analysis does.

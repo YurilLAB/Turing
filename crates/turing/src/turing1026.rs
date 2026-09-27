@@ -209,30 +209,40 @@ impl EncapsulationKey {
     }
 
     /// The deterministic encryption of w.mu: (r, k) = G(H(pk), mu, salt) into
-    /// w.coins, then Enc(pk, mu; r), packed into w.packed.
+    /// w.coins, then Enc(pk, mu; r) into w.sp/bp/c, packed into w.packed.
     fn encrypt_message(&self, salt: &[u8; SALT_BYTES], w: &mut Workspace) {
-        self.encrypt_message_faulted(salt, w, &NoFault);
+        self.derive_coins(salt, w);
+        self.reencrypt(w);
+        self.pack_reencryption(w);
     }
 
-    /// The same, with fault hooks on the coins and the packed re-encryption,
-    /// for the decapsulation fault analysis. `NoFault` makes this the plain
-    /// `encrypt_message`.
-    fn encrypt_message_faulted(&self, salt: &[u8; SALT_BYTES], w: &mut Workspace, fault: &impl DecapFault) {
+    /// (r, k) = G(H(pk), mu, salt) into w.coins.
+    fn derive_coins(&self, salt: &[u8; SALT_BYTES], w: &mut Workspace) {
         let mut g = SecretXof::new(COINS_LABEL);
         g.absorb(&self.hash);
         g.absorb(&w.mu);
         g.absorb(salt);
         g.squeeze(&mut w.coins);
-        drop(g);
-        fault.coins(&mut w.coins);
+    }
+
+    /// Enc(pk, mu; r) into w.sp/bp/c, r the seed in w.coins. Deterministic in
+    /// (mu, coins), so calling it twice recomputes the same B', C from scratch:
+    /// decapsulation does, into the same buffers, so the two re-encryption
+    /// checks read values from two independent computations. A transient fault
+    /// in one computation cannot then fool the other's comparison.
+    fn reencrypt(&self, w: &mut Workspace) {
         let mut noise = SecretXof::new(ENCRYPTION_NOISE_LABEL);
         noise.absorb(&w.coins[..COIN_SEED_BYTES]);
-        let Workspace { mu, sp, bp, c, packed, .. } = w;
+        let Workspace { mu, sp, bp, c, .. } = w;
         lwe::encrypt(&PARAMS, &self.seed_a, &self.b, mu, &mut noise, sp, bp, c);
+    }
+
+    /// Pack w.bp, w.c into w.packed.
+    fn pack_reencryption(&self, w: &mut Workspace) {
+        let Workspace { bp, c, packed, .. } = w;
         let (packed_bp, packed_c) = packed.split_at_mut(B_PRIME_BYTES);
         lwe::pack(LOG_Q, bp, packed_bp);
         lwe::pack(LOG_Q, c, packed_c);
-        fault.reencryption(packed);
     }
 }
 
@@ -252,23 +262,28 @@ pub fn eq_mask_for_timing(a: &[u8], b: &[u8]) -> u8 {
     eq_mask(a, b)
 }
 
-/// 0xff if the slices are equal, else 0. Every byte is read whatever the
+/// 0xff if `diff` is zero, else 0, in constant time and independent of the
+/// accumulator's width: only diff == 0 makes `diff - 1` borrow into bit 63,
+/// for any `diff` below 2^63 (both callers accumulate far less). The earlier
+/// `(diff - 1) >> 8` form was correct only for a byte difference, whose
+/// `diff - 1` never reaches bit 8; a 16-bit difference does (diff = 257 gave
+/// 0x01, neither 0 nor 0xff), so both callers now share this.
+fn zero_mask(diff: u64) -> u8 {
+    0u8.wrapping_sub((opaque(diff).wrapping_sub(1) >> 63) as u8)
+}
+
+/// 0xff if the byte slices are equal, else 0. Every byte is read whatever the
 /// contents, and the verdict passes through a value barrier, so the compiler
 /// cannot turn the selection it drives into a branch.
 fn eq_mask(a: &[u8], b: &[u8]) -> u8 {
     assert_eq!(a.len(), b.len());
-    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
-    (opaque(u64::from(diff)).wrapping_sub(1) >> 8) as u8
+    zero_mask(u64::from(a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y))))
 }
 
-/// The same for u16 slices: 0xff if equal, else 0. Decapsulation compares
-/// the re-encryption with the received ciphertext twice, once on the packed
-/// bytes (`eq_mask`) and once on these coefficients, so no single fault on
-/// one comparison's data or verdict accepts a ciphertext the other rejects.
+/// The same for u16 slices: 0xff if equal, else 0.
 fn eq_mask_u16(a: &[u16], b: &[u16]) -> u8 {
     assert_eq!(a.len(), b.len());
-    let diff = a.iter().zip(b).fold(0u16, |acc, (x, y)| acc | (x ^ y));
-    (opaque(u64::from(diff)).wrapping_sub(1) >> 8) as u8
+    zero_mask(u64::from(a.iter().zip(b).fold(0u16, |acc, (x, y)| acc | (x ^ y))))
 }
 
 /// Hooks for injecting transient faults into decapsulation, so the fault
@@ -279,17 +294,24 @@ fn eq_mask_u16(a: &[u16], b: &[u16]) -> u8 {
 /// Every method is a place a glitch could strike, one per item of the fault
 /// model in docs/16.
 trait DecapFault {
-    /// The decoded message mu' = Dec(sk, c), before re-encryption.
+    /// The decoded message mu' = Dec(sk, c), before re-encryption (shared by
+    /// both re-encryptions, so a fault here fails both checks: a rejection).
     fn message(&self, _mu: &mut [u8]) {}
-    /// The coins (rho' || k') = G(h, mu', salt).
+    /// The coins (rho' || k') = G(h, mu', salt) (also shared).
     fn coins(&self, _coins: &mut [u8]) {}
-    /// The packed re-encryption that the byte comparison reads.
+    /// The coefficients B', C of one re-encryption before they are read, `pass`
+    /// 1 (compared as packed bytes) or 2 (compared as coefficients). The two
+    /// passes are independent computations, so this is where the user-found
+    /// single-fault bypass would strike: faulting one pass is caught by the
+    /// other; only faulting both (a correlated pair) bypasses.
+    fn intermediate(&self, _pass: u8, _bp: &mut [u16], _c: &mut [u16]) {}
+    /// The packed first re-encryption that the byte comparison reads.
     fn reencryption(&self, _packed: &mut [u8]) {}
-    /// The verdict of the packed-byte comparison.
+    /// The verdict of the packed-byte comparison (first re-encryption).
     fn accept_packed(&self, mask: u8) -> u8 {
         mask
     }
-    /// The verdict of the coefficient comparison.
+    /// The verdict of the coefficient comparison (second re-encryption).
     fn accept_coeffs(&self, mask: u8) -> u8 {
         mask
     }
@@ -443,14 +465,17 @@ impl DecapsulationKey {
     /// drives the other implementors.
     ///
     /// The re-encryption is checked twice, independently: `eq_mask` on the
-    /// packed bytes and `eq_mask_u16` on the coefficients B' and C, read from
-    /// separate memory and reduced by different code. The output starts as
-    /// the rejection key and two chained selections install the accepted key
-    /// only if *both* verdicts accept. So forcing either verdict, or skipping
-    /// either selection, still yields the rejection key: no single transient
-    /// fault on the check turns a rejected ciphertext into an accepted one
-    /// (the fault map in Bombe confirms it, and shows the single-comparison
-    /// version being bypassed).
+    /// packed bytes for one and `eq_mask_u16` on the coefficients B', C for the
+    /// other. Because the two re-encryptions are separate computations into the
+    /// same buffers, the two comparisons read the results of two independent
+    /// runs: a single transient fault on one run's coefficients (before they
+    /// are packed or compared) is caught by the other run's check. The output
+    /// starts as the rejection key and two chained selections install the
+    /// accepted key only if *both* verdicts accept, so forcing either verdict
+    /// or skipping either selection also still rejects. No single transient
+    /// fault turns a rejected ciphertext into an accepted one; only a
+    /// correlated pair does (the fault map in Bombe confirms it). The cost is a
+    /// second re-encryption -- decapsulation's main work done twice.
     #[inline(never)]
     fn decapsulated_faulted(&self, ciphertext: &[u8], fault: &impl DecapFault) -> SecretBox<[u8; SHARED_KEY_BYTES]> {
         let (body, salt) = ciphertext.split_at(PKE_BYTES);
@@ -462,9 +487,24 @@ impl DecapsulationKey {
         let mut w: SecretBox<Workspace> = SecretBox::zeroed();
         lwe::decrypt(&PARAMS, &self.secret.s, &received_bp, &received_c, &mut w.mu);
         fault.message(&mut w.mu);
-        self.public.encrypt_message_faulted(salt, &mut w, fault);
-        // Two independent verdicts: the packed bytes, and the coefficients.
+        self.public.derive_coins(salt, &mut w);
+        fault.coins(&mut w.coins);
+        // First re-encryption, compared as packed bytes.
+        self.public.reencrypt(&mut w);
+        {
+            let Workspace { bp, c, .. } = &mut *w;
+            fault.intermediate(1, bp, c);
+        }
+        self.public.pack_reencryption(&mut w);
+        fault.reencryption(&mut w.packed);
         let accept_bytes = fault.accept_packed(eq_mask(&w.packed, body));
+        // A second, independent re-encryption into the same buffers, compared
+        // as coefficients: reads a separate computation from the first.
+        self.public.reencrypt(&mut w);
+        {
+            let Workspace { bp, c, .. } = &mut *w;
+            fault.intermediate(2, bp, c);
+        }
         let accept_coeffs = fault.accept_coeffs(eq_mask_u16(&w.bp, &received_bp) & eq_mask_u16(&w.c, &received_c));
         // Default-fail order: the output is the rejection key unless both
         // masks install the accepted one, so a skipped instruction or a
@@ -593,7 +633,13 @@ pub enum FaultPoint {
     Message,
     /// The coins (rho' || k').
     Coins,
-    /// The packed re-encryption the byte comparison reads.
+    /// The coefficients B', C of the first re-encryption, before they are
+    /// packed and compared as bytes.
+    Intermediate1,
+    /// The coefficients B', C of the second re-encryption, before they are
+    /// compared as coefficients.
+    Intermediate2,
+    /// The packed first re-encryption the byte comparison reads.
     Reencryption,
     /// The verdict of the packed-byte comparison.
     AcceptBytes,
@@ -609,6 +655,16 @@ pub enum FaultPoint {
     Selection,
 }
 
+/// Which coefficient matrix of a re-encryption an `AddCoeff` fault hits.
+#[cfg(feature = "analysis")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Matrix {
+    /// B' (mbar x n).
+    Bp,
+    /// C (mbar x nbar).
+    C,
+}
+
 /// One transient fault. Analysis builds only.
 #[cfg(feature = "analysis")]
 #[derive(Clone, Copy, Debug)]
@@ -616,6 +672,10 @@ pub enum Fault {
     /// Flip bit `bit` of byte `byte` of a byte-buffer point (Message, Coins,
     /// Reencryption, RejectionKey, AcceptedKey).
     FlipBit(FaultPoint, usize, u32),
+    /// Add `delta` (mod q) to coefficient `index` of B' or C of a
+    /// re-encryption (Intermediate1, Intermediate2): the coefficient-level
+    /// fault that can force a re-encryption to match a chosen ciphertext.
+    AddCoeff(FaultPoint, Matrix, usize, u16),
     /// Force a verdict mask (AcceptBytes, AcceptCoeffs) to this value: 0xff
     /// accepts, 0 rejects.
     Verdict(FaultPoint, u8),
@@ -649,6 +709,20 @@ impl Faults<'_> {
     fn skip(&self, point: FaultPoint) -> bool {
         self.0.iter().any(|f| matches!(f, Fault::Skip(p) if *p == point))
     }
+    fn add_coeff(&self, point: FaultPoint, bp: &mut [u16], c: &mut [u16]) {
+        let mask = (1u16 << LOG_Q) - 1;
+        for f in self.0 {
+            if let Fault::AddCoeff(p, m, i, d) = *f {
+                if p == point {
+                    let buf = match m {
+                        Matrix::Bp => &mut *bp,
+                        Matrix::C => &mut *c,
+                    };
+                    buf[i] = buf[i].wrapping_add(d) & mask;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "analysis")]
@@ -658,6 +732,9 @@ impl DecapFault for Faults<'_> {
     }
     fn coins(&self, coins: &mut [u8]) {
         self.flip(FaultPoint::Coins, coins);
+    }
+    fn intermediate(&self, pass: u8, bp: &mut [u16], c: &mut [u16]) {
+        self.add_coeff(if pass == 1 { FaultPoint::Intermediate1 } else { FaultPoint::Intermediate2 }, bp, c);
     }
     fn reencryption(&self, packed: &mut [u8]) {
         self.flip(FaultPoint::Reencryption, packed);
@@ -775,5 +852,25 @@ mod tests {
             }
         }
         assert_eq!(eq_mask(&[0; 5], &[0xff; 5]), 0);
+    }
+
+    // The u16 mask must be exactly 0 or 0xff for every difference, including
+    // ones whose OR reaches bit 8 or higher: the earlier `>> 8` form returned
+    // 0x01 for a coefficient difference of 257 and other partial bytes for
+    // larger ones, which the chained selection could have leaked bits through.
+    #[test]
+    fn eq_mask_u16_is_all_or_nothing() {
+        assert_eq!(eq_mask_u16(&[1, 2, 3], &[1, 2, 3]), 0xff);
+        assert_eq!(eq_mask_u16(&[0], &[257]), 0, "diff 257 (the >> 8 bug)");
+        // Every single-coefficient difference, across the whole 16-bit range.
+        for base in [0u16, 0x1234, 0x7fff, 0x8000, 0xffff] {
+            for bit in 0..16 {
+                assert_eq!(eq_mask_u16(&[base], &[base ^ (1 << bit)]), 0, "base {base:#x} bit {bit}");
+            }
+        }
+        // Differences whose OR is a value with a nonzero high byte.
+        for diff in [0x0100u16, 0x0101, 0x00ff, 0x0200, 0xff00, 0xffff] {
+            assert_eq!(eq_mask_u16(&[0], &[diff]), 0, "diff {diff:#x}");
+        }
     }
 }

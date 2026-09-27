@@ -22,10 +22,21 @@
 //! single-fault hole left is skipping the secret z in the rejection hash (an
 //! XOF-state fault), which no amount of comparison redundancy can close; it
 //! needs redundant or masked hashing, noted as not done.
+//!
+//! The two comparisons read two *independent* re-encryptions, not one shared
+//! intermediate: an earlier version packed one re-encryption and compared it
+//! both ways, so a single fault on its coefficients (before packing) fooled
+//! both checks -- a hole this map now injects (`Intermediate1`/`2`) and the
+//! two-re-encryption design closes.
 
-use turing::turing1026::{DecapsulationKey, Fault, FaultPoint};
+use turing::lwe;
+use turing::turing1026::{DecapsulationKey, Fault, FaultPoint, Matrix, PARAMS};
 
 use crate::refkem1026::ReferenceKem;
+
+const BP_BYTES: usize = 15_390;
+const PKE_BYTES: usize = 15_870;
+const Q_MASK: u16 = (1 << 15) - 1;
 
 /// What a fault does to one ciphertext.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +115,23 @@ struct Setup {
     invalid_oracle: Oracle,
     valid_oracle: Oracle,
     reject_invalid: [u8; 32],
+    /// The coefficient of C the invalid ciphertext raised by `fault_delta`,
+    /// so an intermediate fault that adds the same delta forces a match.
+    fault_index: usize,
+    fault_delta: u16,
+}
+
+/// Whether two ciphertexts decrypt to the same message under `s`.
+fn decodes_same(s: &[u16], a: &[u8], b: &[u8]) -> bool {
+    let decode = |ct: &[u8]| {
+        let (mut bp, mut c) = (vec![0u16; PARAMS.mbar * PARAMS.n], vec![0u16; PARAMS.mbar * PARAMS.nbar]);
+        lwe::unpack(15, &ct[..BP_BYTES], &mut bp);
+        lwe::unpack(15, &ct[BP_BYTES..PKE_BYTES], &mut c);
+        let mut msg = vec![0u8; PARAMS.message_bytes()];
+        lwe::decrypt(&PARAMS, s, &bp, &c, &mut msg);
+        msg
+    };
+    decode(a) == decode(b)
 }
 
 fn setup(seed: u8) -> Setup {
@@ -112,11 +140,21 @@ fn setup(seed: u8) -> Setup {
     let (valid, key) = dk.encapsulation_key().encapsulate_with(&[0x5c; 32], &[0x3a; 64]);
     let valid_key: [u8; 32] = key[..].try_into().expect("32");
     // An invalid ciphertext the attacker knows the decryption of: a valid one
-    // with a coefficient of C shifted by q/2, so one message bit flips and the
-    // re-encryption no longer matches.
+    // with coefficient 0 of C raised by 1. That is far inside the q/4 decoding
+    // window, so the decoded message is unchanged and the honest re-encryption
+    // recreates the original coefficient -- the ciphertext is rejected. The
+    // small, known delta is what an intermediate fault adds back to force a
+    // re-encryption to match (the user-found single-fault bypass).
+    let (fault_index, fault_delta) = (0usize, 1u16);
+    let mut c = vec![0u16; PARAMS.mbar * PARAMS.nbar];
+    lwe::unpack(15, &valid[BP_BYTES..PKE_BYTES], &mut c);
+    c[fault_index] = c[fault_index].wrapping_add(fault_delta) & Q_MASK;
     let mut invalid = valid.clone();
-    let bp_bytes = 15_390;
-    invalid[bp_bytes] ^= 0x40; // a bit inside the first coefficient of C
+    lwe::pack(15, &c, &mut invalid[BP_BYTES..PKE_BYTES]);
+    // The modification must preserve the decoded message, or the honest
+    // re-encryption would change and the intermediate fault would not
+    // reproduce the received coefficient.
+    assert!(decodes_same(dk.secret_matrix(), &valid, &invalid), "the invalid ciphertext must decode to the same message");
     Setup {
         valid_oracle: Oracle::new(&reference, &valid),
         invalid_oracle: Oracle::new(&reference, &invalid),
@@ -125,6 +163,8 @@ fn setup(seed: u8) -> Setup {
         valid,
         invalid,
         dk,
+        fault_index,
+        fault_delta,
     }
 }
 
@@ -177,15 +217,24 @@ pub fn map(seed: u8) -> Vec<MapEntry> {
     // Forcing each verdict to accept (the accept-mask fault).
     out.push(s.run("force the packed-byte verdict to accept", vec![Fault::Verdict(FaultPoint::AcceptBytes, 0xff)]));
     out.push(s.run("force the coefficient verdict to accept", vec![Fault::Verdict(FaultPoint::AcceptCoeffs, 0xff)]));
+    // Faulting one re-encryption's coefficients to match the received one (the
+    // user-found bypass of the shared-intermediate design): each is caught by
+    // the other, independent re-encryption.
+    let force1 = Fault::AddCoeff(FaultPoint::Intermediate1, Matrix::C, s.fault_index, s.fault_delta);
+    let force2 = Fault::AddCoeff(FaultPoint::Intermediate2, Matrix::C, s.fault_index, s.fault_delta);
+    out.push(s.run("force the first re-encryption to match (coefficients)", vec![force1]));
+    out.push(s.run("force the second re-encryption to match (coefficients)", vec![force2]));
     // Skipping the secret z in the rejection hash (an XOF-state fault).
     out.push(s.run("skip absorbing z into the rejection key", vec![Fault::Skip(FaultPoint::RejectionZ)]));
     // Skipping the final selection (pqm4's skipped copy).
     out.push(s.run("skip the final masked selection", vec![Fault::Skip(FaultPoint::Selection)]));
-    // The correlated pair that forces both verdicts: two faults, a bypass.
+    // The correlated pairs that do bypass: both verdicts, or both
+    // re-encryptions forced to match. Two faults each.
     out.push(s.run(
         "force BOTH verdicts to accept (two correlated faults)",
         vec![Fault::Verdict(FaultPoint::AcceptBytes, 0xff), Fault::Verdict(FaultPoint::AcceptCoeffs, 0xff)],
     ));
+    out.push(s.run("force BOTH re-encryptions to match (two correlated faults)", vec![force1, force2]));
     out
 }
 
@@ -211,10 +260,10 @@ pub fn report(seed: u8) -> (String, bool) {
     let s = single_fault_summary(seed);
     let _ = writeln!(
         out,
-        "\n{} single faults bypass the check; {} give a validity oracle (skipping z in the rejection hash,\nwhich comparison redundancy cannot close). The correlated pair forcing both verdicts {}.",
+        "\n{} single faults bypass the check; {} give a validity oracle (skipping z in the rejection hash,\nwhich comparison redundancy cannot close). The correlated pairs -- both verdicts, or both\nre-encryptions -- {}.",
         s.bypasses,
         s.validity_oracles,
-        if s.pair_bypasses { "does bypass (two faults)" } else { "does not bypass" }
+        if s.pair_bypasses { "each need two faults to bypass" } else { "do not bypass" }
     );
     (out, s.bypasses == 0)
 }
@@ -242,12 +291,12 @@ pub struct SingleFaultSummary {
 
 pub fn single_fault_summary(seed: u8) -> SingleFaultSummary {
     let m = map(seed);
-    let (pair, singles) = m.split_last().expect("entries");
-    let singles = singles.iter().filter(|e| e.faults.len() == 1);
+    let singles = m.iter().filter(|e| e.faults.len() == 1);
+    let pairs: Vec<_> = m.iter().filter(|e| e.faults.len() == 2).collect();
     SingleFaultSummary {
         bypasses: singles.clone().filter(|e| e.on_invalid == Outcome::Bypass).count(),
         validity_oracles: singles.filter(|e| e.on_invalid == Outcome::ValidityOracle).count(),
-        pair_bypasses: pair.on_invalid == Outcome::Bypass,
+        pair_bypasses: !pairs.is_empty() && pairs.iter().all(|e| e.on_invalid == Outcome::Bypass),
     }
 }
 
@@ -273,13 +322,20 @@ mod tests {
             assert_eq!(force_bytes.on_invalid, Outcome::NoEffect);
             let force_coeffs = m.iter().find(|e| e.name.contains("coefficient verdict")).expect("entry");
             assert_eq!(force_coeffs.on_invalid, Outcome::NoEffect);
+            // Forcing one re-encryption's coefficients to match is caught by
+            // the other, independent re-encryption.
+            let force1 = m.iter().find(|e| e.name.contains("first re-encryption to match")).expect("entry");
+            assert_eq!(force1.on_invalid, Outcome::NoEffect, "one re-encryption fault bypassed");
+            let force2 = m.iter().find(|e| e.name.contains("second re-encryption to match")).expect("entry");
+            assert_eq!(force2.on_invalid, Outcome::NoEffect, "one re-encryption fault bypassed");
             // Skipping the final selection leaves the rejection key (default-fail).
             let skip = m.iter().find(|e| e.name.contains("final masked selection")).expect("entry");
             assert_eq!(skip.on_invalid, Outcome::NoEffect);
             assert_eq!(skip.on_valid, Outcome::DenialOfService);
-            // The correlated pair bypasses.
-            let pair = m.last().expect("pair");
-            assert_eq!(pair.on_invalid, Outcome::Bypass);
+            // Both correlated pairs (verdicts, and re-encryptions) bypass.
+            for pair in m.iter().filter(|e| e.faults.len() == 2) {
+                assert_eq!(pair.on_invalid, Outcome::Bypass, "correlated pair should bypass: {}", pair.name);
+            }
         }
     }
 

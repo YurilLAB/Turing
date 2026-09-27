@@ -1560,7 +1560,7 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         s,
         "faults in decapsulation (the fault map)",
         format!(
-            "over the accept mask, re-encryption, decoded message, coins, rejection and accepted keys and the selection: {} single faults bypass the re-encryption check, {} give a validity oracle (skipping z, which the double check cannot stop); two independent comparisons and chained selections mean forcing both verdicts (a correlated pair) is the cheapest bypass: {}",
+            "over the accept mask, each re-encryption's coefficients, decoded message, coins, rejection and accepted keys and the selection: {} single faults bypass the re-encryption check, {} give a validity oracle (skipping z, which redundancy cannot stop); two independent re-encryptions and chained selections mean a correlated pair (both verdicts, or both re-encryptions) is the cheapest bypass: {}",
             fault_map.bypasses,
             fault_map.validity_oracles,
             if fault_map.pair_bypasses { "two faults" } else { "not found" }
