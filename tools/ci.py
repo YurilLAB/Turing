@@ -3,14 +3,21 @@ stage under a timeout, and writes a report (tools/CI.md explains each stage,
 what it catches and the evidence that it does).
 
     python tools/ci.py                         # quick profile, the working tree
-    python tools/ci.py --profile full          # + negative controls, campaign, Linux in WSL
-    python tools/ci.py --profile deep          # + the deep campaign, every planted-bug set
+    python tools/ci.py --profile full          # + negative controls, campaign, Linux in WSL, 1M ML-KEM cases
+    python tools/ci.py --profile deep          # + the deep campaign, every planted-bug set, an hour's soak
     python tools/ci.py --commit HEAD           # test a commit in a clean worktree instead
     python tools/ci.py --only math-audit,robustness
     python tools/ci.py --list
 
 Reports go to target/ci/<time>/: one log per stage, summary.md and
 summary.json. The exit code is 1 if any stage failed or timed out.
+
+The simulate and noise stages use the GPU and every CPU thread, and add
+their samples to accumulated evidence in research/workfiles/sim/ (local),
+so every run makes the long-run check stronger. The GPU's Python is
+TURING_GPU_PYTHON, else "gpu_python" in tools/ci-local.json (this
+machine's settings, not in git), else this Python; without a GPU,
+simulate.py samples on the CPU.
 
 --commit runs everything in a throwaway git worktree of that commit, so the
 result belongs to a known snapshot and is unaffected by files other people
@@ -33,6 +40,22 @@ PY = sys.executable
 PROFILES = ["quick", "full", "deep"]
 ITERS = {"quick": "1", "full": "5", "deep": "25"}
 MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7", "--review1", "--mlkem"]
+SIM = ROOT / "research" / "workfiles" / "sim"
+SIM_STATE, NOISE_STATE = str(SIM / "failures-state.json"), str(SIM / "noise-state.txt")
+
+
+def gpu_python():
+    """The Python that runs tools/simulate.py: TURING_GPU_PYTHON, else the
+    "gpu_python" of tools/ci-local.json if it exists, else this one."""
+    if os.environ.get("TURING_GPU_PYTHON"):
+        return os.environ["TURING_GPU_PYTHON"]
+    try:
+        local = json.loads((ROOT / "tools" / "ci-local.json").read_text(encoding="utf-8"))["gpu_python"]
+        if pathlib.Path(local).is_file():
+            return local
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return PY
 
 
 def stages(profile):
@@ -50,8 +73,19 @@ def stages(profile):
          "documented numbers recomputed independently; checks that cannot fail"),
         ("constant-time", "quick", [["CARGO_TARGET_DIR", "target/ci-release"]], [PY, "tools/ct_check.py"], 900, False,
          "the release build's assembly divides no secret in the lattice code (KyberSlash class)"),
+        ("noise", "quick", [t_rel], ["cargo", "run", "--release", "-p", "bombe", "--", "noise", "--state", NOISE_STATE], 1800, False,
+         "real Turing-1026 ciphertexts' decryption error against docs/16's exact law, on every CPU thread"),
+        ("simulate", "quick", [t_rel], [gpu_python(), "tools/simulate.py", "--state", SIM_STATE], 1800, False,
+         "docs/16's failure law against an FFT and exact samples drawn on the GPU (the CPU without one)"),
         ("math-audit-negative", "full", [], [PY, "tools/mathaudit.py", "--negative-control"], 1200, False,
          "every math-audit comparison must flag a planted wrong value"),
+        ("noise-negative", "full", [t_rel], ["cargo", "run", "--release", "-p", "bombe", "--", "noise", "--negative-control"], 1800, False,
+         "the noise check must reject real ciphertexts made with the wrong noise"),
+        ("simulate-negative", "full", [t_rel], [gpu_python(), "tools/simulate.py", "--negative-control"], 1800, False,
+         "the simulation must reject samples drawn from the wrong laws"),
+        ("mlkem-million", "full", [t_rel],
+         ["cargo", "test", "--release", "-p", "bombe", "--test", "mlkem", "--", "--ignored", "--exact", "cctv_accumulated_one_million"], 3600, False,
+         "CCTV's 1,000,000-case accumulated ML-KEM vectors, on every CPU thread"),
         # `mutate.py --check` alone checks only the default set; every set is
         # checked here (on 2026-09-27, 21 bugs in six sets had gone stale).
         ("mutation-patterns", "full", [],
@@ -64,6 +98,8 @@ def stages(profile):
          "the library's Linux code paths (mlock, madvise, fork), built for Linux and run in WSL"),
         ("campaign-deep", "deep", [t_rel], ["cargo", "run", "--release", "-p", "bombe", "--", "attack", "--deep"], 14400, False,
          "the deep campaign (2^32-text structures, NIST at scale)"),
+        ("soak", "deep", [t_rel], [PY, "tools/soak.py", "--minutes", "60"], 5400, False,
+         "an hour of the GPU simulation and the CPU noise measurement side by side"),
     ]
     for flag in MUTATION_SETS:
         label = flag.lstrip("-") or "default"

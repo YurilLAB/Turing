@@ -52,6 +52,9 @@ jobs:
   #   math-audit     docs/16, docs/14, docs/15 numbers recomputed independently
   #   constant-time  the release build's assembly divides no secret (tools/ct_check.py)
   #   mutation-patterns  every planted bug of every set still matches the code
+  #   noise          real Turing-1026 ciphertexts' error against docs/16's exact law
+  #   simulate       docs/16's failure law against an FFT and exact sampling (on
+  #                  these GPU-less runners, NumPy on the CPU)
   audit:
     name: generated-code and maths audit
     runs-on: ubuntu-latest
@@ -64,6 +67,6 @@ jobs:
           python-version: '3.12'
       - name: Python dependencies
         run: pip install numpy mpmath
-      # python tools/ci.py --only math-audit,constant-time,mutation-patterns
+      # python tools/ci.py --only math-audit,constant-time,mutation-patterns,noise,simulate
       - name: Audits
-        run: python tools/ci.py --only math-audit,constant-time,mutation-patterns
+        run: python tools/ci.py --only math-audit,constant-time,mutation-patterns,noise,simulate

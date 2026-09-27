@@ -5,3 +5,5 @@
 /research/workfiles/
 # Python bytecode from the research scripts
 __pycache__/
+# This machine's CI settings (tools/ci.py: the GPU's Python)
+/tools/ci-local.json

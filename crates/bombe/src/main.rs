@@ -15,6 +15,12 @@ Usage:
   bombe attack [--quick] [--deep] [--report PATH | --no-report]
   bombe weak-keys [KEYS]      Turing-1026's per-key failure rates (default 100,000 keys)
   bombe fault-map             Turing-1026 decapsulation under transient faults
+  bombe noise [--keys K] [--encryptions E] [--minutes M] [--state PATH] [--label L]
+              [--negative-control]
+                              the real Turing-1026 code's decryption error against
+                              docs/16's exact law, on every thread (tools/CI.md)
+  bombe dfr-tail N ETA T...   P(X < -T or X >= T) for docs/16's law of 2N products
+                              of CBD(ETA) plus one sample (for tools/simulate.py)
   bombe trace [--key HEX] [--plaintext HEX] [--rounds N]
               [--flip-plaintext-bit N | --flip-key-bit N | --key2 HEX | --plaintext2 HEX]
 
@@ -387,6 +393,141 @@ fn run_weak_keys(args: &[String]) -> Result<bool, String> {
     Ok(ok)
 }
 
+fn run_dfr_tail(args: &[String]) -> Result<bool, String> {
+    let usage = "usage: bombe dfr-tail N ETA T [T ...]";
+    let [n, eta, thresholds @ ..] = args else {
+        return Err(usage.into());
+    };
+    let n: u64 = n.parse().ok().filter(|n| (1..=4096).contains(n)).ok_or(format!("bad N {n:?} (1..=4096)"))?;
+    let eta: u32 = eta.parse().ok().filter(|e| (1..=32).contains(e)).ok_or(format!("bad ETA {eta:?} (1..=32)"))?;
+    if thresholds.is_empty() {
+        return Err(usage.into());
+    }
+    let thresholds = thresholds.iter().map(|t| t.parse::<i64>().ok().filter(|&t| t > 0).ok_or(format!("bad threshold {t:?}"))).collect::<Result<Vec<_>, _>>()?;
+    let law = bombe::dfr::error_law(&bombe::dfr::Law::cbd(eta), n);
+    for t in thresholds {
+        println!("{t} {:e}", law.sum_where(|x| x < -t || x >= t));
+    }
+    Ok(true)
+}
+
+fn run_noise(args: &[String]) -> Result<bool, String> {
+    use bombe::noise1026::{self as noise, Tally};
+    let (mut keys, mut encryptions, mut minutes) = (400usize, 4usize, 0.0f64);
+    let (mut state, mut label, mut negative) = (None::<String>, None::<String>, false);
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let mut value = || it.next().ok_or(format!("{flag} needs a value"));
+        match flag.as_str() {
+            "--keys" => keys = value()?.parse().map_err(|_| "bad --keys")?,
+            "--encryptions" => encryptions = value()?.parse().map_err(|_| "bad --encryptions")?,
+            "--minutes" => minutes = value()?.parse().map_err(|_| "bad --minutes")?,
+            "--state" => state = Some(value()?.clone()),
+            "--label" => label = Some(value()?.clone()),
+            "--negative-control" => negative = true,
+            other => return Err(format!("unexpected argument {other:?}")),
+        }
+    }
+    if keys < noise::MIN_KEYS as usize || !(1..=64).contains(&encryptions) || !minutes.is_finite() || minutes < 0.0 {
+        return Err(format!("need --keys >= {}, --encryptions 1..=64, --minutes >= 0", noise::MIN_KEYS));
+    }
+    if label.is_some() && state.is_some() {
+        // A label names its keys, so a repeated label would add the same
+        // samples to the evidence twice.
+        return Err("--label reproduces a run's keys; it cannot be combined with --state".into());
+    }
+    // The law under test is docs/16's; the negative control encrypts with
+    // CBD(eta - 1) noise instead and must be caught.
+    let claimed = turing::turing1026::PARAMS;
+    let data = if negative { turing::lwe::Params { eta: claimed.eta - 1, ..claimed } } else { claimed };
+    let label = match label {
+        Some(l) => l,
+        None => {
+            let mut nonce = [0u8; 8];
+            turing::random::os_random(&mut nonce).map_err(|_| "no OS randomness")?;
+            format!("noise {:016x}", u64::from_le_bytes(nonce))
+        }
+    };
+    let n = claimed.n as u64;
+    let grid = noise::grid(noise::sd(claimed.eta, n));
+    let laws = [
+        (format!("docs/16's law (CBD({}), {} products)", claimed.eta, 2 * n), noise::exact(claimed.eta, n, &grid)),
+        (format!("control: CBD({}) noise", claimed.eta - 1), noise::exact(claimed.eta - 1, n, &grid)),
+        (format!("control: {n} products instead of {}", 2 * n), noise::exact(claimed.eta, n / 2, &grid)),
+    ];
+    println!("Real Turing-1026 encryptions{}, label {label:?}", if negative { " with CBD(17) noise (negative control)" } else { "" });
+    let per_key = (encryptions * claimed.mbar * claimed.nbar) as u64;
+    // The accumulated evidence, saved after every batch so that a long run
+    // cut short keeps what it measured. The negative control's samples are
+    // wrong on purpose and never join it.
+    let fingerprint = noise::fingerprint(&data, encryptions, &grid);
+    let mut total = match (&state, negative) {
+        (Some(path), false) => Some(std::fs::read_to_string(path).ok().and_then(|t| Tally::from_text(&t, &fingerprint, per_key)).unwrap_or_else(|| {
+            println!("(starting a new state file {path}: none yet, or it is from other code or parameters)");
+            Tally::new(per_key)
+        })),
+        _ => None,
+    };
+    let save = |total: &Tally, path: &str| -> Result<(), String> {
+        if let Some(dir) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        let tmp = format!("{path}.tmp");
+        std::fs::write(&tmp, total.to_text(&fingerprint)).map_err(|e| format!("cannot write {tmp}: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace {path}: {e}"))
+    };
+    let start = std::time::Instant::now();
+    let mut run = Tally::new(per_key);
+    let mut batch = 0u64;
+    loop {
+        let t = std::time::Instant::now();
+        let measured = noise::measure(&data, &grid, batch * keys as u64, keys, encryptions, &label);
+        run.merge(&measured);
+        if let (Some(total), Some(path)) = (total.as_mut(), &state) {
+            total.merge(&measured);
+            save(total, path)?;
+        }
+        batch += 1;
+        println!("  {} keys, {} ciphertexts, {} coefficients, {:.1} s", run.keys, run.keys * encryptions as u64, run.keys * run.per_key, t.elapsed().as_secs_f64());
+        if start.elapsed().as_secs_f64() >= minutes * 60.0 {
+            break;
+        }
+    }
+    let judge_all = |tally: &Tally, heading: &str| -> bool {
+        println!("\n{heading}: {} keys, {} coefficients; {} decryption failures, {} decryptions disagreeing with their measured error", tally.keys, tally.keys * tally.per_key, tally.failures, tally.inconsistent);
+        let verdicts: Vec<noise::Verdict> = laws.iter().map(|(_, e)| noise::judge(tally, e)).collect();
+        println!("  {:<16} {:>13} {:>13} {:>9} {:>9} {:>9}", "statistic", "exact", "measured", "z", "z ctl 1", "z ctl 2");
+        let k = tally.keys as f64;
+        for i in 0..noise::STATS {
+            let se = (tally.m2[i] / (k - 1.0) / k).sqrt();
+            let zs: Vec<String> = verdicts.iter().map(|v| v.z[i].map_or("-".into(), |z| format!("{z:.2}"))).collect();
+            println!("  {:<16} {:>13.6e} {:>13.6e} {:>9} {:>9} {:>9}  (+- {se:.1e})", noise::stat_name(&grid, i), laws[0].1[i], tally.mean[i], zs[0], zs[1], zs[2]);
+        }
+        let mut ok = tally.failures == 0 && tally.inconsistent == 0;
+        for (i, ((name, _), v)) in laws.iter().zip(&verdicts).enumerate() {
+            let worst = v.worst().map_or("nothing judged yet".into(), |(s, z)| format!("largest |z| {:.2} at {}", z.abs(), noise::stat_name(&grid, s)));
+            let (word, good) = match (i, negative, v.rejected()) {
+                (0, false, false) => ("agrees", v.judged > 0),
+                (0, false, true) => ("DISAGREES", false),
+                (0, true, true) => ("rejected, as the negative control must be", true),
+                (0, true, false) => ("NOT REJECTED: the check cannot see CBD(17) noise", false),
+                (_, false, true) => ("rejected", true),
+                (_, false, false) => ("NOT REJECTED", false),
+                (_, true, _) => ("(not judged in the negative control)", true),
+            };
+            println!("  {name}: {word}; {} statistics judged, critical |z| {:.2}, {worst}", v.judged, v.critical);
+            ok &= good;
+        }
+        ok
+    };
+    let mut ok = judge_all(&run, "This run");
+    if let (Some(total), Some(path)) = (&total, &state) {
+        ok &= judge_all(total, &format!("All runs so far ({path})"));
+    }
+    println!("\nRESULT: {}", if ok { "PASS" } else { "FAIL" });
+    Ok(ok)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -400,6 +541,8 @@ fn main() -> ExitCode {
         Some("attack") => run_attack(&args[1..]),
         Some("weak-keys") => run_weak_keys(&args[1..]),
         Some("fault-map") => run_fault_map(&args[1..]),
+        Some("noise") => run_noise(&args[1..]),
+        Some("dfr-tail") => run_dfr_tail(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

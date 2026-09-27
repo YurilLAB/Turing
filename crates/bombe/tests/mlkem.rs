@@ -157,6 +157,78 @@ fn accumulated(p: &Params, cases: usize, ipd: bool) -> String {
     hex(&out)
 }
 
+/// `accumulated` with the cases spread over every thread: the inputs are
+/// drawn from the RNG in order, blocks of cases run in parallel, and each
+/// case's outputs are absorbed in order, so the hash is the sequential one.
+fn accumulated_parallel(p: &Params, cases: usize, ipd: bool) -> String {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut rng = Shake128::default().finalize_xof();
+    let mut acc = Shake128::default();
+    let mut done = 0;
+    while done < cases {
+        let block = (cases - done).min(8192);
+        // Per case: d, z and m (32 bytes each), then the random ciphertext.
+        let inputs: Vec<([u8; 96], Vec<u8>)> = (0..block)
+            .map(|_| {
+                let (mut dzm, mut random_c) = ([0u8; 96], vec![0u8; p.ct_bytes()]);
+                rng.read(&mut dzm);
+                rng.read(&mut random_c);
+                (dzm, random_c)
+            })
+            .collect();
+        let mut outputs = vec![Vec::new(); block];
+        let per = block.div_ceil(threads);
+        std::thread::scope(|scope| {
+            for (ins, outs) in inputs.chunks(per).zip(outputs.chunks_mut(per)) {
+                scope.spawn(move || {
+                    for ((dzm, random_c), out) in ins.iter().zip(outs) {
+                        let (d, z, m) = (arr(&dzm[..32]), arr(&dzm[32..64]), arr(&dzm[64..]));
+                        let (mut ek, mut dk) = (vec![0u8; p.ek_bytes()], vec![0u8; p.dk_bytes()]);
+                        if ipd {
+                            mlkem::keygen_internal_ipd(p, &d, &z, &mut ek, &mut dk);
+                        } else {
+                            mlkem::keygen_internal(p, &d, &z, &mut ek, &mut dk);
+                        }
+                        let (mut c, mut key, mut back, mut rejected) = (vec![0u8; p.ct_bytes()], [0u8; 32], [0u8; 32], [0u8; 32]);
+                        mlkem::encaps_internal(p, &ek, &m, &mut c, &mut key);
+                        mlkem::decaps_internal(p, &dk, &c, &mut back);
+                        assert_eq!(back, key, "{p:?}: a case does not decapsulate");
+                        mlkem::decaps_internal(p, &dk, random_c, &mut rejected);
+                        *out = [&ek[..], &dk[..], &c[..], &key[..], &rejected[..]].concat();
+                    }
+                });
+            }
+        });
+        for out in &outputs {
+            acc.update(out);
+        }
+        done += block;
+    }
+    let mut out = [0u8; 32];
+    acc.finalize_xof().read(&mut out);
+    hex(&out)
+}
+
+// CCTV's 1,000,000-case accumulated hashes (draft mode, like the 10,000-case
+// ones): three million key generations, encapsulations and pairs of
+// decapsulations, on every thread. The parallel runner first reproduces the
+// sequential 10,000-case hashes, so a scheduling mistake cannot pass. Run it
+// with `cargo test --release -p bombe --test mlkem -- --ignored` (tools/ci.py
+// stage mlkem-million).
+#[test]
+#[ignore = "two and a half minutes of every CPU thread; tools/ci.py runs it in the full profile"]
+fn cctv_accumulated_one_million() {
+    let sets = [
+        (ML_KEM_512, "845913ea5a308b803c764a9ed8e9d814ca1fd9c82ba43c7b1e64b79c7a6ec8e4", "578eeaa1156848cbf7a15bafef963b4ccabe3308ddfb7dbdd20ad965f634e81d"),
+        (ML_KEM_768, "f7db260e1137a742e05fe0db9525012812b004d29040a5b606aad3d134b548d3", "70090cc5842aad0ec43d5042c783fae9bc320c047b5dafcb6e134821db02384d"),
+        (ML_KEM_1024, "47ac888fe61544efc0518f46094b4f8a600965fc89822acb06dc7169d24f3543", "7ccc6d803739d3db3c5ce39c7130f459db32a199c6605e3be210e5a89d4c4b95"),
+    ];
+    for (p, ten_thousand, million) in sets {
+        assert_eq!(accumulated_parallel(&p, 10_000, true), ten_thousand, "{p:?}: the parallel runner at 10,000 cases");
+        assert_eq!(accumulated_parallel(&p, 1_000_000, true), million, "{p:?}: CCTV's published 1,000,000-case hash");
+    }
+}
+
 // CCTV publishes the hash of the draft-mode (G(d)) run, which this must
 // reproduce exactly. The final-mode (G(d || k)) hashes come from the
 // research's independent Python implementation

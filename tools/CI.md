@@ -8,9 +8,19 @@ gap nobody sees.
 
 | Profile | Stages | Time (this machine, warm build) |
 |---|---|---|
-| `quick` (default) | release, overflow, robustness, math-audit | about 2.5 min |
-| `full` | quick + math-audit-negative, mutation-patterns, campaign, linux-wsl | tens of minutes |
-| `deep` | full + campaign-deep and every planted-bug set of `tools/mutate.py` | hours |
+| `quick` (default) | release, overflow, robustness, math-audit, constant-time, noise, simulate | about 4 min |
+| `full` | quick + math-audit-negative, noise-negative, simulate-negative, mlkem-million, mutation-patterns, campaign, linux-wsl | tens of minutes |
+| `deep` | full + campaign-deep, an hour's soak and every planted-bug set of `tools/mutate.py` | hours |
+
+Two stages of every run use the whole machine: **simulate** samples on the
+GPU (an AMD RX 9060 XT here, through PyTorch with ROCm) and **noise**
+encrypts on every CPU thread. Both add their samples to accumulated
+evidence in `research/workfiles/sim/` (local, not in git), so every run
+strengthens the long-run check; the evidence restarts by itself when the
+code that produces it changes. `tools/ci.py` runs simulate with the Python
+named by `TURING_GPU_PYTHON`, else by `"gpu_python"` in
+`tools/ci-local.json` (this machine's settings, not in git), else its own;
+without a GPU, simulate samples on the CPU with NumPy.
 
 `--only a,b` picks stages; `--list` lists them; `--commit REF` runs in a
 throwaway git worktree of REF, so the result belongs to a known snapshot
@@ -95,6 +105,88 @@ tables come from the scripts; the audit follows the tables.
 **math-audit-negative** plants a wrong claimed value into every comparison
 of the audit and requires every one to be flagged: 38 of 38 are.
 
+**noise** (`bombe noise`, `crates/bombe/src/noise1026.rs`) measures the
+decryption error of real Turing-1026 ciphertexts at the real parameters.
+docs/16's failure rate rests on the law of that error, X = S'E - E'S + E'',
+computed exactly by convolution (`dfr.rs`). The existing Monte Carlo check
+runs the real code only at n = 64, because at n = 1026 a failure is a
+2^-274 event and will never be seen. The error itself can be seen: every
+coefficient of C - B'S - Encode(m) is one sample of the real code's X. Each
+run makes 400 keys with 4 ciphertexts each (409,600 samples, about 3 s on
+12 threads) and compares them with the exact law at 25 points of its
+distribution function (from -6 to +6 standard deviations), its mean (0 by
+symmetry: the most sensitive test of a shift) and its second moment
+(166,221). Coefficients of one key share S and E, so standard errors come
+from the spread of per-key averages over keys, as in `dfr::monte_carlo`; a
+statistic is judged once it has 200 keys and, for a probability, 200
+expected events, and the critical value is Bonferroni-corrected for a
+nominal false alarm rate of 1e-6 per run. The same samples must reject two
+wrong laws (CBD(17) noise; 1026 products instead of 2052), and the real
+decryption must get a bit right exactly when its measured error lies in
+[-q/4, q/4).
+
+Results on 2026-09-27: a three-minute run of 30,000 keys (30.7 million
+samples) agrees with docs/16's law at all 19 statistics it could judge
+(largest |z| 1.09 against a critical 5.44); its mean is 0.017 +- 0.074 and
+its second moment 166,247 +- 43. The wrong laws are rejected at 418 and
+1,931 standard errors. There were no decryption failures and no
+decryptions that disagreed with their measured error. An earlier, smaller
+run had shown P(X < 0) at z = -2.8, which is within chance for 18
+correlated statistics. The mean statistic was added to settle it directly,
+and the larger run found no shift. This is why the evidence is allowed to
+accumulate.
+
+Evidence that it catches what other tests cannot: a spec-level change was
+planted in a worktree. Drawing E' one step narrower in `lwe.rs` would be
+shared by the reference implementation, and the known-answer vectors would
+simply be regenerated for it, but it makes docs/16's figure wrong. It moves
+the error's variance by only 2.8%, and the 3-second run failed on it at
+12.3 standard errors.
+
+**simulate** (`tools/simulate.py`) checks docs/16's law itself on the GPU.
+Three methods share no code:
+
+- `dfr.rs`'s numbers, printed by `bombe dfr-tail`, against an independent
+  FFT convolution. They must agree within the FFT's measured rounding error,
+  and they do, to between 7e-12 and 2e-5 relative. The FFT is itself
+  checked against direct convolution, to 1.2e-16.
+- Both against X sampled exactly, from table lookups of random bits with no
+  floating point: 2.7e8 samples of a small law (2n = 128, CBD(2)) and
+  1.7e7 of Turing-1026's own (2n = 2052, CBD(18)) per run, in about 45 s.
+  The counts beyond 15 thresholds, from 2^-8 down to 2^-36, are compared by
+  an exact Poisson test at 1e-6 per threshold.
+- The same samples against wrong laws, which they must reject wherever the
+  sample is large enough that rejection is certain. Every run also first
+  tests the sampler: the full histogram of 4.2 million draws must fit the
+  exact law (chi-square) and must reject the law with the wrong noise.
+
+Counts accumulate in `research/workfiles/sim/failures-state.json` per
+version of the sampler, so the deep thresholds fill in over time. Over n
+looks at the accumulated counts, the chance of a false alarm is at most
+n x 1e-6 per threshold. `--status` judges the evidence so far. Without a
+GPU the same tool samples with NumPy for 15 s per law, which reaches about
+2^-15; that is what GitHub's runners do.
+
+Evidence: with the round-7 bug planted in `dfr.rs` (n products instead of
+2n), the FFT check fails at all 15 thresholds. The samples reject the
+buggy law at all 11 thresholds where any event was seen; at t = 1200, for
+example, 54,931 events fell where the buggy law predicts 561.
+
+**noise-negative** and **simulate-negative** are the two checks' negative
+controls, and they run on data that is wrong by construction. noise
+encrypts with CBD(17) noise, and docs/16's law must reject it (it does, at
+about 55 standard errors, and the CBD(17) law then fits). simulate samples
+CBD(eta - 1) in place of each law, and dfr.rs's law must be rejected
+wherever that is certain (at 7 thresholds per run).
+
+**mlkem-million** runs CCTV's accumulated ML-KEM test at its published
+1,000,000-case size for all three parameter sets. That is three million
+key generations, encapsulations and pairs of decapsulations, spread over
+every thread, and it takes 2.5 minutes here. The parallel runner absorbs
+each case's outputs in order, and it must first reproduce the sequential
+10,000-case hashes, so a scheduling mistake cannot pass. All three
+1,000,000-case hashes match CCTV's.
+
 **mutation-patterns** checks that every planted bug of every set of
 `tools/mutate.py` still matches the code it is meant to change (133 bugs
 in 8 sets). `mutate.py --check` on its own checks only the default set,
@@ -118,6 +210,14 @@ inside WSL with `tools/wsl_linux.py`, which exercises the Linux-only code
 **campaign-deep** and **mutation-*** are the long runs: the deep campaign,
 and every planted-bug set, each in its own worktree.
 
+**soak** (`tools/soak.py --minutes 60`) runs simulate and noise side by
+side for an hour: the GPU samples while every CPU thread encrypts. Both
+save their evidence as they go, so stopping early keeps what was measured.
+Run it on its own whenever the machine is idle:
+
+    python tools/soak.py --minutes 60
+    python tools/simulate.py --status
+
 ## Not covered yet, and why
 
 - Coverage-guided fuzzing (cargo-fuzz): its Windows support is "basic" and
@@ -129,3 +229,9 @@ and every planted-bug set, each in its own worktree.
   `cfg(miri)` path, since Miri has no shim for `VirtualLock` or `mlock`.
 - Generated-code audits across compilers and targets, and GitHub-hosted
   runs, are being handled separately.
+- docs/16's far tail. The per-coefficient failure probability is 2^-274,
+  and no sampling reaches it. simulate shows that the exact computation is
+  right down to 2^-36, including on the very law that gives the 2^-274. The
+  far tail itself rests on the convolution, on its FrodoKEM
+  reproduction, on the Chernoff bracket in math-audit, and on the
+  independent FFT.
