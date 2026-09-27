@@ -515,6 +515,13 @@ def main():
         path = ROOT / rel
         original = path.read_bytes()
         text = original.decode("utf-8")
+        # Patterns are written with "\n", but a checkout with
+        # core.autocrlf=true (this repository's setting on Windows) gives
+        # "\r\n" files, where every multi-line pattern silently failed to
+        # match: 21 planted bugs in six sets on 2026-09-27. Match and write
+        # in the file's own line ending instead.
+        if "\r\n" in text:
+            old, new = old.replace("\n", "\r\n"), new.replace("\n", "\r\n")
         if text.count(old) != 1:
             print(f"SKIP {name}: pattern found {text.count(old)} times")
             all_caught = False

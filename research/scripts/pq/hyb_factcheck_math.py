@@ -306,7 +306,10 @@ def part10():
         wraps_cpa += ct[0] == 0xFF
         wraps_fo += ct_fo[0] == 0xFF
     print(f"  low byte 0xff (tamper is -255, not +1): CPA {wraps_cpa}/64, FO {wraps_fo}/64")
-    check("wrap count computed (informational; verdicts of B3 unaffected either way)", True)
+    # Informational only, so printed rather than passed to check(), which
+    # would count a line that cannot fail as a passed check
+    # (tools/mathaudit.py's lint).
+    print("  (informational: the B3 verdicts do not depend on the wrap count)")
 
 
 def main():

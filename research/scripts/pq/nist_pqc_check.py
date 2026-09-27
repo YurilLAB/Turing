@@ -246,8 +246,13 @@ rows = [
 for name, n, q, sigma, cat in rows:
     print(f"      {name:14s} n = {n:4d}  log2 q = {math.log2(q):5.2f}  sigma = {sigma:4.2f}  "
           f"log2(q/sigma) = {math.log2(q / sigma):5.2f}  claimed category {cat}")
+# Was check(..., True, ...), which could never fail (found by the
+# fact-check of 2026-09-27 and by tools/mathaudit.py's lint): now the
+# categories of the sets with n in [900, 1100] are actually compared.
+near_1000 = {name: cat for name, n, q, sigma, cat in rows if 900 <= n <= 1100}
 check("an LWE dimension near 1000 appears in category 3 (FrodoKEM-976) and category 5 (ML-KEM-1024)",
-      True, "dimension alone does not fix the category; q and sigma matter")
+      near_1000.get("FrodoKEM-976") == 3 and near_1000.get("ML-KEM-1024") == 5 and len(set(near_1000.values())) > 1,
+      "dimension alone does not fix the category; q and sigma matter")
 
 # ---------------------------------------------------------------- 11. errata dates
 print("== 11. FIPS 203 errata spreadsheet: Excel serial dates")
