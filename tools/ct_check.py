@@ -35,9 +35,13 @@ DIVISION_ALLOWANCE = {"expanded": 3}
 
 
 def emit_asm():
-    """Build the production turing lib and return the path to its assembly."""
+    """Build the production turing lib and return the path to its assembly.
+
+    codegen-units=1 puts the whole crate in one .s file; with the default many
+    units the lattice functions scatter across several files (and CI then read
+    one without them)."""
     out = subprocess.run(
-        ["cargo", "rustc", "-p", "turing", "--release", "--lib", "--", "--emit", "asm"],
+        ["cargo", "rustc", "-p", "turing", "--release", "--lib", "--", "--emit", "asm", "-C", "codegen-units=1"],
         capture_output=True, text=True,
     )
     if out.returncode != 0:

@@ -246,7 +246,7 @@ fn packing_round_trips_at_every_width_and_length() {
             let mut again = vec![0u8; bytes_len];
             lwe::pack(log_q, &fields, &mut again);
             let used = len * log_q as usize;
-            if used % 8 != 0 {
+            if !used.is_multiple_of(8) {
                 *arbitrary.last_mut().expect("a partial byte") &= (1u8 << (used % 8)) - 1;
             }
             assert_eq!(again, arbitrary, "log_q {log_q}, {len} values from arbitrary bytes");

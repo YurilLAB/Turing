@@ -1,0 +1,6 @@
+# Pin the toolchain so a build is reproducible: the same Rust everywhere, and
+# CI's lint results do not change under it when a new stable adds a lint. Bump
+# deliberately, running `cargo clippy --workspace --all-targets` first.
+[toolchain]
+channel = "1.94.1"
+components = ["clippy", "rustfmt"]

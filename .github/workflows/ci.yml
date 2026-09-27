@@ -1,9 +1,11 @@
 # Continuous integration for Turing (docs/16, tools/CI.md). The audit stages
 # are the same ones tools/ci.py runs locally, so a green run here means the
 # same as a green `python tools/ci.py`; this workflow adds the one thing a
-# single developer machine cannot give: the tests built and run on Linux,
-# macOS and Windows, which exercise the library's per-platform memory and
-# randomness code.
+# single developer machine cannot give: the tests built and run on Linux and
+# Windows, which exercise the library's per-platform memory and randomness
+# code (bombe's memory scanner has Linux and Windows back-ends only, so the
+# matrix stops there). The Rust version is pinned by rust-toolchain.toml, so
+# every job and every local build lint against the same compiler.
 name: CI
 
 on:
@@ -21,12 +23,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+        run: rustup show      # installs the version rust-toolchain.toml pins
       # cargo build --release --workspace
       - name: Build
         run: cargo build --release --workspace
@@ -40,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        run: rustup toolchain install stable --profile minimal --no-self-update --component clippy && rustup default stable
+        run: rustup show
       # cargo clippy --release --workspace --all-targets -- -D warnings
       - name: Clippy
         run: cargo clippy --release --workspace --all-targets -- -D warnings
@@ -56,10 +58,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+        run: rustup show
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Python dependencies
+        run: pip install numpy mpmath
       # python tools/ci.py --only math-audit,constant-time,mutation-patterns
       - name: Audits
         run: python tools/ci.py --only math-audit,constant-time,mutation-patterns
