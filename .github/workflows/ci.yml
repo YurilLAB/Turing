@@ -1,0 +1,65 @@
+# Continuous integration for Turing (docs/16, tools/CI.md). The audit stages
+# are the same ones tools/ci.py runs locally, so a green run here means the
+# same as a green `python tools/ci.py`; this workflow adds the one thing a
+# single developer machine cannot give: the tests built and run on Linux,
+# macOS and Windows, which exercise the library's per-platform memory and
+# randomness code.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      # cargo build --release --workspace
+      - name: Build
+        run: cargo build --release --workspace
+      # cargo test --release --workspace
+      - name: Test
+        run: cargo test --release --workspace
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update --component clippy && rustup default stable
+      # cargo clippy --release --workspace --all-targets -- -D warnings
+      - name: Clippy
+        run: cargo clippy --release --workspace --all-targets -- -D warnings
+
+  # The generated-code and maths audits, run through the canonical local
+  # runner so CI and `python tools/ci.py` check exactly the same things:
+  #   math-audit     docs/16, docs/14, docs/15 numbers recomputed independently
+  #   constant-time  the release build's assembly divides no secret (tools/ct_check.py)
+  #   mutation-patterns  every planted bug of every set still matches the code
+  audit:
+    name: generated-code and maths audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # python tools/ci.py --only math-audit,constant-time,mutation-patterns
+      - name: Audits
+        run: python tools/ci.py --only math-audit,constant-time,mutation-patterns

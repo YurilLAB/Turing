@@ -48,6 +48,8 @@ def stages(profile):
          "rare, boundary and out-of-range inputs against the independent references"),
         ("math-audit", "quick", [], [PY, "tools/mathaudit.py"], 1200, False,
          "documented numbers recomputed independently; checks that cannot fail"),
+        ("constant-time", "quick", [["CARGO_TARGET_DIR", "target/ci-release"]], [PY, "tools/ct_check.py"], 900, False,
+         "the release build's assembly divides no secret in the lattice code (KyberSlash class)"),
         ("math-audit-negative", "full", [], [PY, "tools/mathaudit.py", "--negative-control"], 1200, False,
          "every math-audit comparison must flag a planted wrong value"),
         # `mutate.py --check` alone checks only the default set; every set is
