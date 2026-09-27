@@ -13,6 +13,8 @@ Usage:
   bombe rounds [ROUNDS]
   bombe vectors [--turing-256 | --turing-1026] [--out PATH]
   bombe attack [--quick] [--deep] [--report PATH | --no-report]
+  bombe weak-keys [KEYS]      Turing-1026's per-key failure rates (default 100,000 keys)
+  bombe fault-map             Turing-1026 decapsulation under transient faults
   bombe trace [--key HEX] [--plaintext HEX] [--rounds N]
               [--flip-plaintext-bit N | --flip-key-bit N | --key2 HEX | --plaintext2 HEX]
 
@@ -365,6 +367,26 @@ fn run_vectors(args: &[String]) -> Result<bool, String> {
     Ok(true)
 }
 
+fn run_fault_map(args: &[String]) -> Result<bool, String> {
+    if !args.is_empty() {
+        return Err("usage: bombe fault-map".into());
+    }
+    let (text, ok) = bombe::fault1026::report(1);
+    print!("{text}");
+    Ok(ok)
+}
+
+fn run_weak_keys(args: &[String]) -> Result<bool, String> {
+    let keys = match args {
+        [] => 100_000,
+        [k] => k.parse::<usize>().map_err(|_| format!("bad key count {k:?}"))?,
+        _ => return Err("usage: bombe weak-keys [KEYS]".into()),
+    };
+    let (text, ok) = bombe::weakkeys::report(keys, 5, "weak key distribution");
+    print!("{text}");
+    Ok(ok)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -376,6 +398,8 @@ fn main() -> ExitCode {
         Some("vectors") => run_vectors(&args[1..]),
         Some("trace") => run_trace(&args[1..]),
         Some("attack") => run_attack(&args[1..]),
+        Some("weak-keys") => run_weak_keys(&args[1..]),
+        Some("fault-map") => run_fault_map(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
