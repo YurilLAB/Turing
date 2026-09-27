@@ -589,8 +589,15 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         format!("{blind} of {tried} leave it unchanged: each would release a ciphertext under the wrong keys"),
         caught_if(blind == tried && tried > 0),
     );
+    let (caught, tried) = fault::point_faults("campaign point faults");
+    log.add(
+        s,
+        "persistent faults that move the checksum's secret point",
+        format!("{caught} of {tried} caught: each of its 128 bits alone, and paired with every other stored bit"),
+        pass_if(caught == tried && tried > 0),
+    );
     let (caught, trials) = fault::multi_bit_key_faults(scale(20_000, 2_000), "campaign multi-bit key faults");
-    log.add(s, "persistent faults of 2 to 16 random bits in the stored round keys", format!("{caught} of {trials} caught"), pass_if(caught == trials));
+    log.add(s, "persistent faults of 2 to 16 random bits in the keys, checksum and point", format!("{caught} of {trials} caught"), pass_if(caught == trials));
 
     // --- Interpolation and invariants -----------------------------------------------------
     let s = "13. Interpolation and invariant attacks (Jakobsen-Knudsen 1997; PRINTcipher 2011; Midori-64 2016)";

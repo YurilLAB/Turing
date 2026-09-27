@@ -141,6 +141,37 @@ the fault, so the fault escapes with probability at most
 25/2^127 ≈ 2^-122.4, whatever its weight. Each failed attempt rules out at
 most 25 values of H, so repeated attempts learn next to nothing.
 
+That argument holds H fixed, so it covers faults in the round keys and the
+stored checksum only. A fault can also move H itself, to H + d with d ≠ 0;
+the check then recomputes the checksum at H + d from the faulted keys and
+compares it with the faulted stored value. The fault goes unseen exactly
+when
+
+    P = Σ_i ((H + d)^(i+1) + H^(i+1)) · RK_i + Σ_i (H + d)^(i+1) · E_i + e = 0.
+
+For i = 0 the first sum's term is ((H + d) + H) · RK_0 = d · RK_0, with no
+H in it, and no other term contains RK_0. So P = d · RK_0 + Q, where Q
+depends on H, RK_1 … RK_24 and the fault but not on RK_0, and P = 0 exactly
+when RK_0 = d^-1 · Q: one value of RK_0 for each H and each choice of the
+other round keys. With round key 0 unknown (uniform, independent of the
+rest, the model docs/12's bounds also use), the fault escapes with
+probability 2^-128, even for someone who knows H. Nothing weaker suffices:
+whoever knows every round key can compute Q and match any moved point with
+a new stored checksum (the control test does), but has nothing left to
+attack. Together: every fault arranged without knowledge of the key escapes
+with probability at most 25/2^127.
+
+The weights start at H^1 for a reason. With Σ H^i · RK_i, round key 0
+would carry weight 1, and flipping bit j of RK_0 together with bit j of the
+stored checksum would cancel for every H.
+
+Checked by brute force in the same algebra at a size where everything can be
+enumerated, GF(2^8) with 4 round keys and weights H^1 … H^4. Over 300 random
+faults: with d = 0, for each of the 256 values of RK_0 (the other keys
+fixed), no fault passed at more than 3 of the 128 odd points (the bound is
+4); with d ≠ 0, at every one of the 256 points exactly one of the 256 values
+of RK_0 let the fault through.
+
 Linearity (for a fixed H) is why the masked cipher can keep the checksum as
 shares: C(k0) ⊕ C(k1) = C(k0 ⊕ k1), and re-randomising both key shares with
 the same masks moves both sides of the comparison by the same amount.

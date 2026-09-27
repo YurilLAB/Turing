@@ -10,7 +10,7 @@ tests, and the new defences are each shown to matter by a planted bug that
 the tests catch.
 
 ```
-cargo run --release -p bombe -- attack          # 21 sections, 136 findings (139 with --deep), 0 failures
+cargo run --release -p bombe -- attack          # 21 sections, 137 findings (140 with --deep), 0 failures
 cargo test --release                            # the whole suite
 python tools/wsl_linux.py test -p turing --lib  # the Linux code paths, run in WSL
 python tools/mutate.py --round4                 # the planted bugs of this round
@@ -25,7 +25,7 @@ python tools/mutate.py --round4                 # the planted bugs of this round
 | Where the key lives and what it touches | Locked, dump-excluded pages per secret; stack burned after key setup; nothing found by a memory-dump attacker | campaign 20, `tests/memory.rs` |
 | Randomising secrets before and after use | First-order masked cipher (fresh shares every call), OpenSSH-style shielded key, fork-safe mask generator, keys derived from a hashed OS seed | campaign 19, `tests/leakage.rs` |
 | Timing, TOCTOU and other breaking attacks | dudect on eight code paths; assembly read for jumps and table lookups; a second key check closes the check-to-use window; concurrency and fork tested | campaign 8, 21 |
-| Fact-checking | Primary sources for every claim (`research/`); 34 planted bugs (§7) | `tools/mutate.py --round4` |
+| Fact-checking | Primary sources for every claim (`research/`); 35 planted bugs (§7) | `tools/mutate.py --round4` |
 
 ## 1. Less linear: the S-box
 
@@ -306,12 +306,29 @@ GCM polynomial x^128 + x^7 + x^2 + x + 1), at a secret point H. A plain
 `Turing` derives H from the key (cSHAKE256 of K' under the label "Turing v2
 key check", made odd); a `MaskedTuring` draws it at random, so checking it
 handles no value that depends on the key. The checksum is linear in the
-round keys, so it works on shares. A fault that changes the keys by E_i and
-the stored checksum by e goes unseen only if Σ H^(i+1) · E_i = e, a
-non-zero polynomial equation in H of degree at most 25, true for at most 25
-of the 2^127 odd points. A fault arranged without knowing the key therefore
-escapes with probability at most 25/2^127 ≈ 2^-122.4, however many bits it
-flips and wherever they are; a fault in H itself changes every term.
+round keys, so it works on shares.
+
+A fault that changes the keys by E_i and the stored checksum by e, and
+leaves H alone, goes unseen only if Σ H^(i+1) · E_i = e: a non-zero
+polynomial equation in H of degree at most 25, true for at most 25 of the
+2^127 odd points, whatever the keys. A fault that also moves H by d ≠ 0 is
+checked at H + d, and goes unseen only if
+Σ ((H + d)^(i+1) + H^(i+1)) · RK_i + Σ (H + d)^(i+1) · E_i = e. Round
+key 0's term there is exactly d · RK_0, and RK_0 appears nowhere else, so
+the equation holds for one value of RK_0 only, whatever H and the other
+round keys are: probability 2^-128 while round key 0 is unknown, as it is
+to anyone who still needs a fault attack to learn it. Someone who knew
+every round key could match a moved point with a recomputed checksum, but
+would have nothing left to attack; a unit test shows both. Either way, a
+fault arranged without knowing the key escapes with probability at most
+25/2^127 ≈ 2^-122.4, however many bits it flips and wherever they are, H
+included. An earlier version of this page only asserted the case of a
+fault in H. The weights start at H^1: with H^0, bit j of RK_0 and bit j of
+the stored checksum would cancel whatever H is. Both cases were also
+checked exhaustively in GF(2^8) with four round keys, where every point and
+every RK_0 can be tried: with H untouched no fault tried passed at more
+than 3 of the 128 odd points (the bound is 4), and with H moved each passed
+for exactly one RK_0 in 256, at every point.
 
 The point has to be secret. Version 2 first used the public point x,
 Σ x^i · RK_i, and said that changes in several round keys escape only if
@@ -323,8 +340,9 @@ stored checksum: 0.7% of all two-bit faults, each of which the checked calls
 passed, releasing a ciphertext under the wrong keys. A pair in round keys 23
 and 24 is the last-round DFA setting of docs/11. With the keyed checksum
 none of the 5,118,400 pairs of round-key bits passes a checked call, and the
-unit tests show, through linearity, that no fault of one or two bits
-anywhere in the round keys or the stored checksum goes unseen. Each
+unit tests show that no fault of one or two bits anywhere in the stored
+material goes unseen: through linearity for the round keys and the stored
+checksum, and one by one for the 434,240 that move the point. Each
 checksum is 25 constant-time multiplications in GF(2^128) (integer
 multiplications of operands with holes, as in BearSSL's ctmul64), about
 1.5 µs, so a checked call now costs 2.6 encryptions instead of 2.1.
@@ -342,7 +360,8 @@ last S-box layer (docs/11).
 |---|---|
 | Every two-bit fault that cancels in Σ x^i · RK_i, flipped in a cipher's stored round keys (12) | all 35,800 caught by the keyed checksum, block wiped |
 | Control: version 2's first checksum, Σ x^i · RK_i, same faults (12) | all 35,800 leave it unchanged (caught) |
-| Persistent faults of 2 to 16 random bits in the stored round keys (12) | every one caught |
+| Every one- and two-bit fault that moves the checksum's point: each of its 128 bits alone and paired with every other stored bit (12) | all 434,240 caught |
+| Persistent faults of 2 to 16 random bits in the round keys, their checksum and its point (12) | every one caught |
 | A round-key bit flipped between the first check and the computation, through the analysis build's hook (21) | every one caught by the second check, block wiped |
 | Control: decrypt-and-compare alone, same flips (21) | every one would have released a ciphertext under the wrong key (caught) |
 | The same with a share bit of the masked cipher | every one caught |
@@ -401,10 +420,10 @@ power is too.
 
 ## 7. Planted bugs
 
-`python tools/mutate.py --round4` plants 34 bugs in this round's code and
+`python tools/mutate.py --round4` plants 35 bugs in this round's code and
 checks the tests catch each one: 24 of the first 25 (the 25th, a
 multiplication by x without reduction, went with the public checksum), and
-ten that came with the fixes of docs/08, review 6. Among them:
+eleven that came with the fixes of docs/08, review 6. Among them:
 
 | Planted bug | Caught by |
 |---|---|
@@ -415,11 +434,11 @@ ten that came with the fixes of docs/08, review 6. Among them:
 | unmasked product in SecMult; missing refresh; recombined S-box output (all with correct ciphertexts) | operation-level TVLA |
 | shield refresh not re-masking; key stored in the clear | shield tests |
 | second key check removed (plain and masked); checksum skipping the last round key | fault-window tests |
-| checksum back at the public point x; its point not derived from the key, or never drawn in the masked cipher; a GF(2^128) product left unreduced, its overflow not folded back, or its high half misaligned | checksum and field unit tests |
+| checksum back at the public point x; weights starting at H^0 (RK_0 and the checksum cancel); its point not derived from the key, or never drawn in the masked cipher; a GF(2^128) product left unreduced, its overflow not folded back, or its high half misaligned | checksum and field unit tests |
 | scanner that never matches; scanning after the worker moves on; CPA predicting with S^-1 | Bombe's controls |
 
 The first 25 were all caught on Windows, with the Linux paths in WSL. After
-review 6 the set was run again on Linux, where 33 of the 34 apply (the
+review 6 the set was run again on Linux, where 34 of the 35 apply (the
 page-locking bug is in Windows code): all caught by failing tests except
 "scanning after the worker moves on", which needs the key-schedule residue
 that only the Windows build leaves where the scanner looks (§3); it survives

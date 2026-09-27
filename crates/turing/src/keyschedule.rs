@@ -75,13 +75,19 @@ fn feistel_round(l: &mut Block, r: &mut Block, constants: &mut impl XofReader) {
 /// Integrity checksum Σ_i H^(i+1) · k_i in GF(2^128) at the secret point H,
 /// by Horner's rule: a fixed number of constant-time multiplications.
 ///
-/// A fault that changes the keys by E_i and the stored checksum by e goes
-/// unseen only if Σ_i H^(i+1) · E_i = e, a non-zero polynomial equation in H
-/// of degree at most N, true for at most N points. H is secret and odd
-/// (2^127 values), so a fault arranged without knowing H escapes with
-/// probability at most N / 2^127, however many bits it flips and wherever
-/// they are; a fault in H itself changes every term. The point must stay
-/// secret: at a public point the attacker can solve for faults that cancel,
+/// A fault that changes the keys by E_i and the stored checksum by e, and
+/// leaves H alone, goes unseen only if Σ_i H^(i+1) · E_i = e: a non-zero
+/// polynomial equation in H of degree at most N, true for at most N of the
+/// 2^127 odd points, whatever the keys. A fault that also moves H by d ≠ 0
+/// is checked at H + d and goes unseen only if
+/// Σ_i ((H + d)^(i+1) + H^(i+1)) · k_i + Σ_i (H + d)^(i+1) · E_i = e. Round
+/// key 0's term there is exactly d · k_0, and k_0 appears nowhere else, so
+/// the equation holds for one value of k_0 only, whatever H and the other
+/// keys: probability 2^-128 while k_0 is unknown. A fault arranged without
+/// knowing the key therefore escapes with probability at most N / 2^127,
+/// however many bits it flips and wherever they are, H included
+/// (research/notes/derivations.md). The point must stay secret: at a public
+/// point the attacker can solve for faults that cancel,
 /// as flipping bit b of RK_i and bit b - 1 of RK_i+1 did in version 2's
 /// first checksum, Σ x^i · RK_i (docs/13). The checksum is linear in the
 /// keys, so the checksums of two XOR shares of the keys XOR to the checksum
@@ -171,11 +177,30 @@ impl<const N: usize> RoundKeys<N> {
         &self.material.keys
     }
 
+    /// Bits of stored material that the integrity check reads: the round
+    /// keys, the checksum and its point, 128 bits each.
+    pub const STORED_BITS: usize = (N + 2) * 128;
+
     /// Flips one bit of a stored round key, as a Rowhammer-style fault would.
     /// Tests and analysis builds only (feature `analysis`).
     #[cfg(any(test, feature = "analysis"))]
     pub fn flip_bit(&mut self, round: usize, bit: usize) {
         self.material.keys[round][bit / 8] ^= 1 << (bit % 8);
+    }
+
+    /// Flips bit `bit` of the stored material, numbered through the round
+    /// keys, then the checksum, then its point: a fault anywhere the check
+    /// reads. Tests and analysis builds only (feature `analysis`).
+    #[cfg(any(test, feature = "analysis"))]
+    pub fn flip_stored_bit(&mut self, bit: usize) {
+        assert!(bit < Self::STORED_BITS);
+        let (block, bit) = (bit / 128, bit % 128);
+        let target = match block {
+            b if b < N => &mut self.material.keys[b],
+            b if b == N => &mut self.material.check,
+            _ => &mut self.material.point,
+        };
+        target[bit / 8] ^= 1 << (bit % 8);
     }
 
     /// The same through the allocation's raw pointer, with only `&self`: a
@@ -311,18 +336,6 @@ mod tests {
         assert_eq!(streaming, wiped);
     }
 
-    /// Flips bit `bit` of the stored material, numbered through the round
-    /// keys, then the stored checksum, then the point.
-    fn flip<const N: usize>(k: &mut RoundKeys<N>, bit: usize) {
-        let (block, bit) = (bit / 128, bit % 128);
-        let target = match block {
-            b if b < N => &mut k.material.keys[b],
-            b if b == N => &mut k.material.check,
-            _ => &mut k.material.point,
-        };
-        target[bit / 8] ^= 1 << (bit % 8);
-    }
-
     /// How flipping each stored bit changes the comparison between the
     /// recomputed and the stored checksum: a key bit by its column of the
     /// (linear) checksum, a bit of the stored checksum by itself. A fault is
@@ -371,23 +384,85 @@ mod tests {
     fn faults_that_cancelled_in_the_public_checksum_are_caught() {
         let mut k = expand::<25>(&key(4));
         for (a, b) in [(1, 128), (23 * 128 + 1, 24 * 128), (23, 23 * 128), (5, 25 * 128 + 5)] {
-            flip(&mut k, a);
-            flip(&mut k, b);
+            k.flip_stored_bit(a);
+            k.flip_stored_bit(b);
             assert!(!k.intact(), "bits {a} and {b}");
-            flip(&mut k, a);
-            flip(&mut k, b);
+            k.flip_stored_bit(a);
+            k.flip_stored_bit(b);
             assert!(k.intact());
         }
     }
 
+    // Faults in the point are not linear in it, so they are tried one by
+    // one: each of its 128 bits alone, and each paired with every other
+    // stored bit (434,112 pairs). With the test above, that is every one-
+    // and two-bit fault anywhere in the stored material.
     #[test]
-    fn a_fault_in_the_point_is_caught() {
+    fn every_one_and_two_bit_fault_touching_the_point_is_seen() {
         let mut k = expand::<25>(&key(5));
-        for bit in 26 * 128..27 * 128 {
-            flip(&mut k, bit);
-            assert!(!k.intact(), "point bit {}", bit % 128);
-            flip(&mut k, bit);
+        let point = 26 * 128..RoundKeys::<25>::STORED_BITS;
+        let mut tried = 0;
+        for a in point.clone() {
+            k.flip_stored_bit(a);
+            assert!(!k.intact(), "point bit {}", a % 128);
+            for b in (0..RoundKeys::<25>::STORED_BITS).filter(|&b| !point.contains(&b) || b > a) {
+                k.flip_stored_bit(b);
+                assert!(!k.intact(), "bits {a} and {b}");
+                k.flip_stored_bit(b);
+                tried += 1;
+            }
+            k.flip_stored_bit(a);
         }
+        assert_eq!(tried, 128 * 26 * 128 + 128 * 127 / 2);
+        assert!(k.intact());
+    }
+
+    // What the bound for faults in the point rests on: moving H by d changes
+    // round key 0's term by exactly d · RK_0, with no H in it, so changing
+    // RK_0 by t changes the effect of the move by d · t whatever H and the
+    // other keys are. Such a fault therefore passes for one RK_0 only.
+    #[test]
+    fn moving_the_point_changes_round_key_0s_term_by_d_times_it() {
+        let mut s = 0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c834u128;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let moved = |keys: &[Block; 25], h: u128, d: u128| {
+            u128::from_le_bytes(checksum(keys, &(h ^ d).to_le_bytes())) ^ u128::from_le_bytes(checksum(keys, &h.to_le_bytes()))
+        };
+        for _ in 0..300 {
+            let (h, d, t) = (next() | 1, next(), next());
+            let keys: [Block; 25] = core::array::from_fn(|_| next().to_le_bytes());
+            let mut other = keys;
+            other[0] = (u128::from_le_bytes(keys[0]) ^ t).to_le_bytes();
+            assert_eq!(moved(&keys, h, d) ^ moved(&other, h, d), gf::mul128(d, t));
+        }
+    }
+
+    // Control: whoever knows every round key can match a moved point with a
+    // recomputed checksum, and then the check passes; wrong about round key 0
+    // in any single bit, it fails. The bound for faults in the point assumes
+    // round key 0 is unknown, as it is to anyone who still needs a fault
+    // attack to learn it.
+    #[test]
+    fn control_a_moved_point_passes_only_if_matched_with_every_key_known() {
+        let mut k = expand::<25>(&key(12));
+        let (point, check) = (k.material.point, k.material.check);
+        let moved: Block = core::array::from_fn(|i| point[i] ^ 0x5a ^ i as u8);
+        k.material.point = moved;
+        k.material.check = checksum(&k.material.keys, &moved);
+        assert!(k.intact(), "control: matched with every key known");
+        for bit in 0..128 {
+            let mut guess = k.material.keys;
+            guess[0][bit / 8] ^= 1 << (bit % 8);
+            k.material.check = checksum(&guess, &moved);
+            assert!(!k.intact(), "round key 0 wrong in bit {bit}");
+        }
+        k.material.point = point;
+        k.material.check = check;
         assert!(k.intact());
     }
 
@@ -403,12 +478,12 @@ mod tests {
             (s % n as u64) as usize
         };
         for trial in 0..3000 {
-            let mut bits: Vec<usize> = (0..2 + trial % 15).map(|_| next(27 * 128)).collect();
+            let mut bits: Vec<usize> = (0..2 + trial % 15).map(|_| next(RoundKeys::<25>::STORED_BITS)).collect();
             bits.sort_unstable();
             bits.dedup();
-            bits.iter().for_each(|&b| flip(&mut k, b));
+            bits.iter().for_each(|&b| k.flip_stored_bit(b));
             assert!(!k.intact(), "{bits:?}");
-            bits.iter().for_each(|&b| flip(&mut k, b));
+            bits.iter().for_each(|&b| k.flip_stored_bit(b));
         }
         assert!(k.intact());
     }

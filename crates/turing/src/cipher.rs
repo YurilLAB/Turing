@@ -165,6 +165,14 @@ impl Turing {
         self.keys.flip_bit(round, bit);
     }
 
+    /// Flips one bit anywhere the integrity check reads: the round keys, then
+    /// their checksum, then its secret point (`RoundKeys::STORED_BITS` bits).
+    /// Analysis builds only (feature `analysis`).
+    #[cfg(feature = "analysis")]
+    pub fn flip_stored_bit(&mut self, bit: usize) {
+        self.keys.flip_stored_bit(bit);
+    }
+
     /// The first `rounds` rounds only, with the last of them missing its
     /// linear layer exactly like the full cipher's last round. Reduced-round
     /// versions exist for cryptanalysis: attacks are measured by how many

@@ -103,6 +103,10 @@ fn persistent_key_faults_the_public_checksum_missed_are_caught() {
     assert_eq!(blind, tried, "control: the public checksum sees none of them");
     let (caught, trials) = fault::multi_bit_key_faults(2000, "test multi-bit key faults");
     assert_eq!(caught, trials);
+    // Faults that move the checksum's secret point itself.
+    let (caught, tried) = fault::point_faults("test point faults");
+    assert_eq!(tried, 128 + 128 * 26 * 128 + 128 * 127 / 2);
+    assert_eq!(caught, tried);
 }
 
 // Interpolation: Turing's S-box and its inverse are as dense as a random

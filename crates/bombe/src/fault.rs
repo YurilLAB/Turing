@@ -13,6 +13,7 @@
 //! is then solved separately.
 
 use crate::rng::Rng;
+use turing::keyschedule::RoundKeys;
 use turing::structure::{self, ROUNDS, ROUND_KEYS};
 use turing::{gf, linear, sbox, Block, FaultDetected, Turing};
 
@@ -198,20 +199,54 @@ pub fn two_bit_key_faults(label: &str) -> (usize, usize, usize) {
     (caught, blind, pairs.len())
 }
 
-/// Persistent faults of 2 to 16 random bits anywhere in the stored round
-/// keys: how many of `trials` checked encryptions caught them.
+/// Whether a checked encryption of a fixed block reports the fault and
+/// wipes the block.
+fn checked_call_catches(t: &Turing) -> bool {
+    let mut b: Block = [0x5a; 16];
+    t.encrypt_block_checked(&mut b) == Err(FaultDetected) && b == [0u8; 16]
+}
+
+/// Persistent faults of 2 to 16 random bits anywhere the check reads (the
+/// round keys, their checksum and its secret point): how many of `trials`
+/// checked encryptions caught them.
 pub fn multi_bit_key_faults(trials: usize, label: &str) -> (usize, usize) {
     let mut rng = Rng::new(label);
     let mut t = Turing::new(&rng.bytes());
+    let stored = RoundKeys::<ROUND_KEYS>::STORED_BITS;
     let mut caught = 0;
     for _ in 0..trials {
-        let mut bits: Vec<usize> = (0..2 + rng.below(15)).map(|_| rng.below(ROUND_KEYS as u64 * 128) as usize).collect();
+        let mut bits: Vec<usize> = (0..2 + rng.below(15)).map(|_| rng.below(stored as u64) as usize).collect();
         bits.sort_unstable();
         bits.dedup();
-        bits.iter().for_each(|&bit| t.flip_round_key_bit(bit / 128, bit % 128));
-        let mut b: Block = rng.bytes();
-        caught += usize::from(t.encrypt_block_checked(&mut b) == Err(FaultDetected) && b == [0u8; 16]);
-        bits.iter().for_each(|&bit| t.flip_round_key_bit(bit / 128, bit % 128));
+        bits.iter().for_each(|&bit| t.flip_stored_bit(bit));
+        caught += usize::from(checked_call_catches(&t));
+        bits.iter().for_each(|&bit| t.flip_stored_bit(bit));
     }
     (caught, trials)
+}
+
+/// Persistent faults that move the checksum's secret point H: each of its
+/// 128 bits alone, and each paired with every other stored bit. Such a
+/// fault passes only for one value of round key 0 (keyschedule.rs), so
+/// none should. Returns how many checked encryptions caught them, and how
+/// many were tried.
+pub fn point_faults(label: &str) -> (usize, usize) {
+    let mut rng = Rng::new(label);
+    let mut t = Turing::new(&rng.bytes());
+    let stored = RoundKeys::<ROUND_KEYS>::STORED_BITS;
+    let point = stored - 128..stored;
+    let (mut caught, mut tried) = (0, 0);
+    for a in point.clone() {
+        t.flip_stored_bit(a);
+        caught += usize::from(checked_call_catches(&t));
+        tried += 1;
+        for b in (0..stored).filter(|&b| !point.contains(&b) || b > a) {
+            t.flip_stored_bit(b);
+            caught += usize::from(checked_call_catches(&t));
+            tried += 1;
+            t.flip_stored_bit(b);
+        }
+        t.flip_stored_bit(a);
+    }
+    (caught, tried)
 }
