@@ -127,3 +127,28 @@ fn key_generation_faults_are_caught() {
     let (ct, key) = dk.encapsulation_key().encapsulate_with(&[4; 32], &[5; 64]);
     assert_eq!(dk.decapsulate(&ct).expect("length")[..], key[..]);
 }
+
+// End to end: the sender's lattice encapsulation gives the Turing-256 key,
+// and only the recipient's lattice decryption (Decode(C - B'S), then the
+// re-encryption check) gives it back. A tampered ciphertext gives the
+// rejection key instead, which does not decrypt.
+#[test]
+fn turing_1026_keys_turing_256() {
+    use turing::Turing256;
+    let recipient = DecapsulationKey::from_seed(&[7; 32]).expect("consistent");
+    let public = EncapsulationKey::from_bytes(recipient.encapsulation_key().as_bytes()).expect("length");
+    let (ciphertext, sender_key) = public.encapsulate().expect("OS randomness");
+    let plaintext: [u8; 32] = *b"a file key, wrapped post-quantum";
+    let mut block = plaintext;
+    Turing256::new(&sender_key).encrypt_block(&mut block);
+    assert_ne!(block, plaintext);
+    let recipient_key = recipient.decapsulate(&ciphertext).expect("length");
+    let mut opened = block;
+    Turing256::new(&recipient_key).decrypt_block(&mut opened);
+    assert_eq!(opened, plaintext);
+    let mut tampered = ciphertext;
+    tampered[500] ^= 1;
+    let mut wrong = block;
+    Turing256::new(&recipient.decapsulate(&tampered).expect("length")).decrypt_block(&mut wrong);
+    assert_ne!(wrong, plaintext);
+}
