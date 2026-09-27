@@ -1,3 +1,7 @@
 /target
 # Third-party papers: kept locally, indexed with links in research/README.md
 /research/papers/
+# PQ research working files (extracted paper text, vectors, logs, third-party sources): local-only
+/research/workfiles/
+# Python bytecode from the research scripts
+__pycache__/

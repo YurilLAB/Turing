@@ -1,0 +1,34 @@
+# Cargo manifest for research/scripts/pq/rpi_oracle_probe.rs (topic rust-pqc-implementations).
+# Do NOT build inside the Turing repository. research/scripts/pq/rpi_oracle_probe_run.sh copies this
+# file to <scratch>/pq/rpi/oracle-probe/Cargo.toml and the .rs file to .../src/main.rs, then builds there.
+# Exact versions are pinned so a re-run tests the same code that the notes describe.
+[package]
+name = "rpi_oracle_probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Scratch probe for research/notes/pq/rust-pqc-implementations.md: differential tests and timings of existing ML-KEM / FrodoKEM / X25519 crates. Not part of the Turing repository."
+
+[dependencies]
+ml-kem = { version = "=0.3.2", features = ["hazmat"] }
+libcrux-ml-kem = { version = "=0.0.10", features = ["simd256"] }
+fips203 = { version = "=0.4.3" }
+pqcrypto-mlkem = { version = "=0.1.1" }
+pqcrypto-traits = { version = "=0.3.5" }
+frodo-kem = { version = "=0.1.0" }
+x25519-dalek = { version = "=3.0.0" }
+rand_core = { version = "=0.10.1" }
+aes = { version = "=0.9.3" }
+sha3 = { version = "=0.10.9" }
+hex = "=0.4.3"
+serde_json = "1"
+flate2 = "1"
+aws-lc-rs = { version = "=1.18.1", optional = true }
+
+[features]
+awslc = ["dep:aws-lc-rs"]
+
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 1
