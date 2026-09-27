@@ -52,5 +52,7 @@ pub mod timing;
 pub mod toctou;
 pub mod trace;
 pub mod trail;
+pub mod fault1026;
+pub mod weakkeys;
 pub mod wide;
 pub mod yoyo;

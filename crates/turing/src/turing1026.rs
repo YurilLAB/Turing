@@ -211,12 +211,20 @@ impl EncapsulationKey {
     /// The deterministic encryption of w.mu: (r, k) = G(H(pk), mu, salt) into
     /// w.coins, then Enc(pk, mu; r), packed into w.packed.
     fn encrypt_message(&self, salt: &[u8; SALT_BYTES], w: &mut Workspace) {
+        self.encrypt_message_faulted(salt, w, &NoFault);
+    }
+
+    /// The same, with fault hooks on the coins and the packed re-encryption,
+    /// for the decapsulation fault analysis. `NoFault` makes this the plain
+    /// `encrypt_message`.
+    fn encrypt_message_faulted(&self, salt: &[u8; SALT_BYTES], w: &mut Workspace, fault: &impl DecapFault) {
         let mut g = SecretXof::new(COINS_LABEL);
         g.absorb(&self.hash);
         g.absorb(&w.mu);
         g.absorb(salt);
         g.squeeze(&mut w.coins);
         drop(g);
+        fault.coins(&mut w.coins);
         let mut noise = SecretXof::new(ENCRYPTION_NOISE_LABEL);
         noise.absorb(&w.coins[..COIN_SEED_BYTES]);
         let Workspace { mu, sp, bp, c, packed, .. } = w;
@@ -224,6 +232,7 @@ impl EncapsulationKey {
         let (packed_bp, packed_c) = packed.split_at_mut(B_PRIME_BYTES);
         lwe::pack(LOG_Q, bp, packed_bp);
         lwe::pack(LOG_Q, c, packed_c);
+        fault.reencryption(packed);
     }
 }
 
@@ -251,6 +260,59 @@ fn eq_mask(a: &[u8], b: &[u8]) -> u8 {
     let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
     (opaque(u64::from(diff)).wrapping_sub(1) >> 8) as u8
 }
+
+/// The same for u16 slices: 0xff if equal, else 0. Decapsulation compares
+/// the re-encryption with the received ciphertext twice, once on the packed
+/// bytes (`eq_mask`) and once on these coefficients, so no single fault on
+/// one comparison's data or verdict accepts a ciphertext the other rejects.
+fn eq_mask_u16(a: &[u16], b: &[u16]) -> u8 {
+    assert_eq!(a.len(), b.len());
+    let diff = a.iter().zip(b).fold(0u16, |acc, (x, y)| acc | (x ^ y));
+    (opaque(u64::from(diff)).wrapping_sub(1) >> 8) as u8
+}
+
+/// Hooks for injecting transient faults into decapsulation, so the fault
+/// analysis (Bombe's `fault1026`) runs on the real decapsulation code rather
+/// than a copy that could drift from it. In production the only implementor
+/// is the zero-sized `NoFault`, whose methods are the identity and compile
+/// away, so `decapsulate` is exactly `decapsulated_faulted(.., &NoFault)`.
+/// Every method is a place a glitch could strike, one per item of the fault
+/// model in docs/16.
+trait DecapFault {
+    /// The decoded message mu' = Dec(sk, c), before re-encryption.
+    fn message(&self, _mu: &mut [u8]) {}
+    /// The coins (rho' || k') = G(h, mu', salt).
+    fn coins(&self, _coins: &mut [u8]) {}
+    /// The packed re-encryption that the byte comparison reads.
+    fn reencryption(&self, _packed: &mut [u8]) {}
+    /// The verdict of the packed-byte comparison.
+    fn accept_packed(&self, mask: u8) -> u8 {
+        mask
+    }
+    /// The verdict of the coefficient comparison.
+    fn accept_coeffs(&self, mask: u8) -> u8 {
+        mask
+    }
+    /// Whether to skip absorbing z into the rejection key (an XOF-state
+    /// fault that would make the rejection key independent of the secret).
+    fn skip_rejection_z(&self) -> bool {
+        false
+    }
+    /// The rejection key K-bar, after it is derived.
+    fn rejection_key(&self, _key: &mut [u8]) {}
+    /// The accepted key K', after it is derived.
+    fn accepted_key(&self, _key: &mut [u8]) {}
+    /// Whether to skip the final masked selection (the copy pqm4 faults
+    /// skipped); default-fail order means a skip leaves the rejection key.
+    fn skip_selection(&self) -> bool {
+        false
+    }
+}
+
+/// No fault: the production path. Every hook is the identity and inlines to
+/// nothing, so decapsulation's machine code is unchanged.
+struct NoFault;
+impl DecapFault for NoFault {}
 
 struct Secret {
     seed: [u8; SEED_BYTES],
@@ -373,6 +435,24 @@ impl DecapsulationKey {
 
     #[inline(never)]
     fn decapsulated(&self, ciphertext: &[u8]) -> SecretBox<[u8; SHARED_KEY_BYTES]> {
+        self.decapsulated_faulted(ciphertext, &NoFault)
+    }
+
+    /// Decapsulation with fault hooks. `NoFault` is the production path and
+    /// compiles to the same code; the analysis-only `decapsulate_with_faults`
+    /// drives the other implementors.
+    ///
+    /// The re-encryption is checked twice, independently: `eq_mask` on the
+    /// packed bytes and `eq_mask_u16` on the coefficients B' and C, read from
+    /// separate memory and reduced by different code. The output starts as
+    /// the rejection key and two chained selections install the accepted key
+    /// only if *both* verdicts accept. So forcing either verdict, or skipping
+    /// either selection, still yields the rejection key: no single transient
+    /// fault on the check turns a rejected ciphertext into an accepted one
+    /// (the fault map in Bombe confirms it, and shows the single-comparison
+    /// version being bypassed).
+    #[inline(never)]
+    fn decapsulated_faulted(&self, ciphertext: &[u8], fault: &impl DecapFault) -> SecretBox<[u8; SHARED_KEY_BYTES]> {
         let (body, salt) = ciphertext.split_at(PKE_BYTES);
         let salt: &[u8; SALT_BYTES] = salt.try_into().expect("64 bytes");
         let mut received_bp = vec![0u16; MBAR * N];
@@ -381,22 +461,35 @@ impl DecapsulationKey {
         lwe::unpack(LOG_Q, &body[B_PRIME_BYTES..], &mut received_c);
         let mut w: SecretBox<Workspace> = SecretBox::zeroed();
         lwe::decrypt(&PARAMS, &self.secret.s, &received_bp, &received_c, &mut w.mu);
-        self.public.encrypt_message(salt, &mut w);
-        let accept = eq_mask(&w.packed, body);
-        // Default-fail order: the output is the rejection key unless the
-        // mask installs the accepted one, so a skipped instruction leaves it
-        // rejecting (the pqm4 fault attacks skipped the final copy).
+        fault.message(&mut w.mu);
+        self.public.encrypt_message_faulted(salt, &mut w, fault);
+        // Two independent verdicts: the packed bytes, and the coefficients.
+        let accept_bytes = fault.accept_packed(eq_mask(&w.packed, body));
+        let accept_coeffs = fault.accept_coeffs(eq_mask_u16(&w.bp, &received_bp) & eq_mask_u16(&w.c, &received_c));
+        // Default-fail order: the output is the rejection key unless both
+        // masks install the accepted one, so a skipped instruction or a
+        // forced mask leaves it rejecting (the pqm4 fault attacks skipped the
+        // final copy; forcing one comparison is the accept-mask fault).
         let mut key: SecretBox<[u8; SHARED_KEY_BYTES]> = SecretBox::zeroed();
         let mut h = SecretXof::new(REJECTION_KEY_LABEL);
-        h.absorb(&self.secret.z);
+        if !fault.skip_rejection_z() {
+            h.absorb(&self.secret.z);
+        }
         h.absorb(&self.public.hash);
         h.absorb(ciphertext);
         h.squeeze(&mut key[..]);
         drop(h);
+        fault.rejection_key(&mut key[..]);
         let Workspace { coins, key: accepted, .. } = &mut *w;
         shared_key(ciphertext, &coins[COIN_SEED_BYTES..], accepted);
-        for (out, &k) in key.iter_mut().zip(accepted.iter()) {
-            *out ^= (*out ^ k) & accept;
+        fault.accepted_key(accepted);
+        if !fault.skip_selection() {
+            for (out, &k) in key.iter_mut().zip(accepted.iter()) {
+                // tmp = K' if the byte comparison accepts, else K-bar;
+                // out = tmp if the coefficient comparison accepts, else K-bar.
+                let tmp = *out ^ ((*out ^ k) & accept_bytes);
+                *out ^= (*out ^ tmp) & accept_coeffs;
+            }
         }
         key
     }
@@ -453,6 +546,139 @@ impl DecapsulationKey {
     #[cfg(feature = "analysis")]
     pub fn from_seed_without_stack_burn(seed: &[u8; SEED_BYTES]) -> DecapsulationKey {
         DecapsulationKey::expanded(seed)
+    }
+
+    /// Decapsulation with a set of transient faults injected, for the fault
+    /// analysis. The faults run on the real decapsulation code path (through
+    /// the same hooks `NoFault` leaves inert), and several at once model a
+    /// correlated multi-fault attack. No stack burn. Analysis builds only.
+    #[cfg(feature = "analysis")]
+    pub fn decapsulate_with_faults(&self, ciphertext: &[u8], faults: &[Fault]) -> Result<SecretBox<[u8; SHARED_KEY_BYTES]>, LengthError> {
+        if ciphertext.len() != CIPHERTEXT_BYTES {
+            return Err(LengthError);
+        }
+        Ok(self.decapsulated_faulted(ciphertext, &Faults(faults)))
+    }
+
+    /// The shared key decapsulation would return for `ciphertext` if the
+    /// re-encryption check accepted it: K' = X("shared key", c || k'),
+    /// k' from G(h, Dec(sk, c), salt). This is what a fault that defeats the
+    /// check leaks; the fault map compares against it to tell an FO bypass
+    /// (the check defeated, the bare decryption exposed) from a mere denial
+    /// of service. Analysis builds only.
+    #[cfg(feature = "analysis")]
+    pub fn accepted_key_for(&self, ciphertext: &[u8]) -> [u8; SHARED_KEY_BYTES] {
+        assert_eq!(ciphertext.len(), CIPHERTEXT_BYTES);
+        let (body, salt) = ciphertext.split_at(PKE_BYTES);
+        let salt: &[u8; SALT_BYTES] = salt.try_into().expect("64 bytes");
+        let mut received_bp = vec![0u16; MBAR * N];
+        let mut received_c = [0u16; MBAR * NBAR];
+        lwe::unpack(LOG_Q, &body[..B_PRIME_BYTES], &mut received_bp);
+        lwe::unpack(LOG_Q, &body[B_PRIME_BYTES..], &mut received_c);
+        let mut w: SecretBox<Workspace> = SecretBox::zeroed();
+        lwe::decrypt(&PARAMS, &self.secret.s, &received_bp, &received_c, &mut w.mu);
+        self.public.encrypt_message(salt, &mut w);
+        let mut out = [0u8; SHARED_KEY_BYTES];
+        shared_key(ciphertext, &w.coins[COIN_SEED_BYTES..], &mut out);
+        out
+    }
+}
+
+/// Where a transient fault strikes decapsulation, one per hook of
+/// `DecapFault`. Analysis builds only.
+#[cfg(feature = "analysis")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultPoint {
+    /// The decoded message mu' before re-encryption.
+    Message,
+    /// The coins (rho' || k').
+    Coins,
+    /// The packed re-encryption the byte comparison reads.
+    Reencryption,
+    /// The verdict of the packed-byte comparison.
+    AcceptBytes,
+    /// The verdict of the coefficient comparison.
+    AcceptCoeffs,
+    /// Absorbing the secret z into the rejection key (skipped).
+    RejectionZ,
+    /// The rejection key K-bar.
+    RejectionKey,
+    /// The accepted key K'.
+    AcceptedKey,
+    /// The final masked selection (skipped).
+    Selection,
+}
+
+/// One transient fault. Analysis builds only.
+#[cfg(feature = "analysis")]
+#[derive(Clone, Copy, Debug)]
+pub enum Fault {
+    /// Flip bit `bit` of byte `byte` of a byte-buffer point (Message, Coins,
+    /// Reencryption, RejectionKey, AcceptedKey).
+    FlipBit(FaultPoint, usize, u32),
+    /// Force a verdict mask (AcceptBytes, AcceptCoeffs) to this value: 0xff
+    /// accepts, 0 rejects.
+    Verdict(FaultPoint, u8),
+    /// Skip a step (RejectionZ, Selection).
+    Skip(FaultPoint),
+}
+
+#[cfg(feature = "analysis")]
+struct Faults<'a>(&'a [Fault]);
+
+#[cfg(feature = "analysis")]
+impl Faults<'_> {
+    fn flip(&self, point: FaultPoint, buf: &mut [u8]) {
+        for f in self.0 {
+            if let Fault::FlipBit(p, byte, bit) = *f {
+                if p == point {
+                    buf[byte] ^= 1u8 << bit;
+                }
+            }
+        }
+    }
+    fn verdict(&self, point: FaultPoint, mask: u8) -> u8 {
+        self.0
+            .iter()
+            .find_map(|f| match f {
+                Fault::Verdict(p, v) if *p == point => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(mask)
+    }
+    fn skip(&self, point: FaultPoint) -> bool {
+        self.0.iter().any(|f| matches!(f, Fault::Skip(p) if *p == point))
+    }
+}
+
+#[cfg(feature = "analysis")]
+impl DecapFault for Faults<'_> {
+    fn message(&self, mu: &mut [u8]) {
+        self.flip(FaultPoint::Message, mu);
+    }
+    fn coins(&self, coins: &mut [u8]) {
+        self.flip(FaultPoint::Coins, coins);
+    }
+    fn reencryption(&self, packed: &mut [u8]) {
+        self.flip(FaultPoint::Reencryption, packed);
+    }
+    fn accept_packed(&self, mask: u8) -> u8 {
+        self.verdict(FaultPoint::AcceptBytes, mask)
+    }
+    fn accept_coeffs(&self, mask: u8) -> u8 {
+        self.verdict(FaultPoint::AcceptCoeffs, mask)
+    }
+    fn skip_rejection_z(&self) -> bool {
+        self.skip(FaultPoint::RejectionZ)
+    }
+    fn rejection_key(&self, key: &mut [u8]) {
+        self.flip(FaultPoint::RejectionKey, key);
+    }
+    fn accepted_key(&self, key: &mut [u8]) {
+        self.flip(FaultPoint::AcceptedKey, key);
+    }
+    fn skip_selection(&self) -> bool {
+        self.skip(FaultPoint::Selection)
     }
 }
 
