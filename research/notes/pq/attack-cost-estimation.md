@@ -11,11 +11,14 @@ the sibling note `lattice-foundations.md`; decryption-failure probability is in 
 the standards' status is in `nist-pqc-standards.md`.
 
 **Revision log.** Pass 1 (2026-09-27 morning) wrote this note and `coresvp.py`. Pass 2 (2026-09-27
-afternoon, in progress) re-ran every script with a timeout and re-read the cited tables in the PDFs
-(Kyber r3 Table 4 and pp. 26-28, FrodoKEM r3 Table 10, Saber r3 Table 1, ADPS16 p. 9: all match). Pass 2
-findings so far: the printed dual-attack advantage formula differs between papers and scripts (Sec. 6.3,
-new item "epsilon factor"); the `adps16` convention in `coresvp.py` did not use the printed factor 4 and
-is being corrected.
+afternoon) re-ran every script with a timeout (identical outputs), re-read the cited tables in the PDFs
+(Kyber r3 Table 4 and pp. 26-28, FrodoKEM r3 Table 10, Saber r3 Table 1, NewHope r2 Tables 12-13, ADPS16
+p. 9, MATZOV p. 4, Pouly-Shen p. 1: all match), and added: the epsilon-factor discrepancy between papers
+and scripts (Sec. 6.3; a pass-1 slip in the `adps16` convention was fixed); the 2025-2026 dual-attack
+literature (Sec. 4.3); memory-cost evidence including NIST's Kyber512 FAQ (Sec. 3.5); ring-structure and
+sparse-secret attacks (Sec. 4.4); two 2026 quantum claims (Sec. 8); and a run of the real
+lattice-estimator through a validated SageMath stand-in (Sec. 5.1, Sec. 7 T6), which shows that the
+dual-hybrid, not the primal attack, is the cheapest attack at n ~ 1000 whenever the secret is narrow.
 
 ## Key findings
 
@@ -65,21 +68,28 @@ is being corrected.
    (Kyber-style) samples. The estimator prices coded-BKW on Kyber512 at 2^178.8 operations and 2^166.8
    samples (Sec. 4.5-4.6).
 8. **Small or sparse secrets open extra attacks** (hybrid lattice/meet-in-the-middle, May 2021's S^0.25
-   ternary MITM, Albrecht 2017's small-secret dual). The core-SVP formulas do not model them. With a
-   secret of std 0.816 (uniform ternary) instead of 2.8, primal core-SVP at n = 1024, q = 2^15 already drops
-   from 249.2 to 214.1 before any hybrid attack (Sec. 4.4, T2b).
+   ternary MITM, Albrecht 2017's small-secret dual, and 2024-2026 GPU and machine-learning attacks on
+   sparse secrets). The core-SVP formulas do not model them. With a secret of std 0.816 (uniform ternary)
+   instead of 2.8, primal core-SVP at n = 1024, q = 2^15 already drops from 249.2 to 214.1 (T2b), and the
+   estimator's dual-hybrid takes it further to 202.7 (T6). Pass 2 estimator runs at n ~ 1000: the
+   dual-hybrid beats the primal attack by 6-14 bits (core-SVP model) whenever the secret std is <= 1.4, and
+   loses to it by 4-5 bits for std 2.3-2.8 (Sec. 7, T6). A wide secret is therefore a published,
+   estimate-backed way to stay in the "primal is best" regime.
 9. **"About 1000 dimensions" already exists in the standards.** ML-KEM-1024 is Module-LWE of rank 4 over
    degree 256, a 1024-dimensional LWE instance (core-SVP 256 classical); FrodoKEM-976 is plain LWE in
    dimension 976 (216.0 classical, FrodoKEM convention). A Turing lattice layer at ~1000 dimensions sits
    between these two known points (Sec. 7).
-10. **At n ~ 1000 the security depends almost only on sigma^2/q.** With m ~ n samples the primal attack
-    succeeds when sigma is below about delta^(...) * sqrt(q), so doubling q and multiplying sigma by
-    sqrt(2) leaves the cost unchanged: at n = 1024, (q, sigma) = (2^13, 1.0), (2^14, 1.4), (2^15, 2.0),
-    (2^16, 2.8) all give 229.0-229.6 bits classical core-SVP (T1, COMPUTED).
+10. **For the PRIMAL attack at n ~ 1000 the security depends almost only on sigma^2/q; for the
+    dual-hybrid it does not.** With m ~ n samples the primal attack succeeds when sigma is below about
+    delta^(...) * sqrt(q), so doubling q and multiplying sigma by sqrt(2) leaves its cost unchanged: at
+    n = 1024, (q, sigma) = (2^13, 1.0), (2^14, 1.4), (2^15, 2.0), (2^16, 2.8) all give 229.0-229.6 bits
+    classical core-SVP (T1, COMPUTED). The estimator's dual-hybrid breaks the tie in favour of the wide
+    secret: 217.9 at (2^13, 1.0) but 233.3 at (2^16, 2.8), both in the core-SVP model (T6, COMPUTED).
 11. **Plain LWE at n ~ 1000 is strong.** At n = 1024, q = 2^16: sigma = 1.0 gives 182.2, 2.0 gives 212.0,
-    2.8 gives 229.0, 4.0 gives 249.8 bits classical core-SVP. Classical core-SVP >= 256 needs sigma >= 4.42 at
-    q = 2^16 or sigma >= 1.56 at q = 2^13 (T2). Larger sigma or smaller q raise decryption-failure risk,
-    which is the sibling topic's job.
+    2.8 gives 229.0, 4.0 gives 249.8 bits classical primal core-SVP. Primal core-SVP >= 256 needs
+    sigma >= 4.42 at q = 2^16 or sigma >= 1.56 at q = 2^13 (T2), but with sigma < ~2 the dual-hybrid is
+    cheaper than these primal numbers (T6), so T1/T2 are upper bounds there. Larger sigma or smaller q raise
+    decryption-failure risk, which is the sibling topic's job.
 12. **The reference tool is the lattice-estimator** (github.com/malb/lattice-estimator, LGPLv3+, a
     SageMath module; default cost model MATZOV). It covers primal uSVP, primal BDD, hybrid, dual,
     dual-hybrid, coded-BKW and Arora-Gröbner. SageMath is not installed here, so pass 2 wrote a small
@@ -174,6 +184,13 @@ Notes for the learner:
   2410.13759, PDF p. 1) estimate ~10^13 physical qubits and ~10^31 years at dimension 400, "roughly the
   same" as one 6 GHz classical core. The Kyber and FrodoKEM teams therefore treat a refined quantum gate
   count as "essentially irrelevant" (Kyber spec PDF p. 28; FrodoKEM 2025 proposal PDF p. 18).
+- **What has been done in practice (pass 2).** The TU Darmstadt SVP Challenge hall of fame, read on
+  2026-09-27, lists dimension 210 as the largest solved instance (J. Ding, Z. Zhao), then 200, 192, 190 and
+  188. Solving SVP-210 needs sieving in dimension about 210 - d4f(210) = 185.9. Kyber's refined analysis
+  sieves in dimension 375 / 586 / 829 for Kyber512 / 768 / 1024 (Table 4). At 0.2925 bits per dimension
+  the gap from the record is about 55 / 117 / 188 bits of exponent (COMPUTED, one-line script in the
+  ledger, row 113). Record dates and hardware were not on the page read; the practical-records literature
+  (e.g. Zhao-Ding, disk-based sieving) was not read here.
 - Hhan (arXiv 2609.02764v1, 2026-09-02) claims exact SVP in 2^(n/2+o(n)) time and space. It is
   unreviewed and discloses heavy AI assistance; even if correct it is slower than 2^(0.292 n) heuristic
   sieving, so it does not change attack estimates.
@@ -1007,6 +1024,7 @@ UNVERIFIED = not settled. "coresvp" = `python research/scripts/pq/coresvp.py` (v
 | 110 | Estimator (shim) Kyber1024: rough dual_hybrid 2^241.8 and full dual_hybrid 2^262.3, equal to the MATZOV C0 241.8 and within 0.1 of CC 262.4 printed by Carrier et al. from [AS22] | COMPUTED vs VERIFIED | estimator_turing_main.log; ePrint 2022/1750 Table 5.1 PDF p. 27 |
 | 111 | Estimator (shim) on ~1000-dim candidates, non-hybrid attacks (T6 rows) | COMPUTED | `ACS_ATTACKS=... python acs_estimator_run.py turing`, log attack-cost/estimator_turing_main.log |
 | 112 | Estimator rough usvp equals coresvp.py's primal core-SVP within 0.1-1.6 bits on every T6 row (GSA vs q-ary profile explains the MLWE rows) | COMPUTED | T6 vs `python coresvp.py table` |
+| 113 | SVP Challenge record dimension 210 (Ding, Zhao), then 200, 192, 190, 188; d4f(210) = 24.1, sieving dim 185.9; gap to Kyber sieving dims 375/586/829 = 55.3/117.0/188.1 bits at 0.2925 | VERIFIED (record list) / COMPUTED (gap) | latticechallenge.org/svp-challenge (read 2026-09-27); `python -c "import math; d4f=lambda b: b*math.log(4/3)/math.log(b/(2*math.pi*math.e)); s=210-d4f(210); print(s, [0.2925*(t-s) for t in (375,586,829)])"` |
 | 63 | T0: MATZOV-model gates at our (b, d): 143.8/205.5/276.2 (Kyber), 166.2/228.4/291.2 (Frodo); refined - core = 30.5-33.7 | COMPUTED | table (T0) |
 | 64 | T1 rows as tabulated in Sec. 7; sigma^2/q invariance at n = 1024 (229.0-229.6) | COMPUTED | table (T1) |
 | 65 | T2 minimum sigma values | COMPUTED | table (T2) |

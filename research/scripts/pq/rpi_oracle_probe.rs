@@ -898,6 +898,66 @@ fn cmd_vectors(args: &[String]) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 3b. X-Wing (RustCrypto x-wing 0.1.0) against draft-connolly-cfrg-xwing-kem Appendix C
+// ---------------------------------------------------------------------------------------------
+
+fn cmd_xwing(args: &[String]) {
+    use x_wing::{Decapsulate, Decapsulator, KeyExport};
+    let txt = std::fs::read_to_string(&args[0]).unwrap();
+    // the heading also appears in the table of contents; the vectors follow the last occurrence
+    let start = txt.rfind("Appendix C.  Test vectors").expect("Appendix C");
+    let body = &txt[start..];
+    let body = &body[body.find('\n').unwrap() + 1..];
+    // records: a key at column 0 (seed, sk, pk, eseed, ct, ss) with hex on the same line or on
+    // the following indented lines; a new "seed" starts a new record.
+    let mut recs: Vec<std::collections::HashMap<String, String>> = Vec::new();
+    let mut cur: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut key = String::new();
+    for line in body.lines() {
+        if line.starts_with("Appendix") || line.starts_with("Acknowledg") || line.starts_with("Authors") {
+            break;
+        }
+        if line.trim().is_empty() || line.contains("[Page") || line.starts_with("Connolly") || line.starts_with("Internet-Draft") {
+            continue;
+        }
+        let t = line.trim();
+        if !line.starts_with(' ') {
+            let mut it = t.split_whitespace();
+            let k = it.next().unwrap().to_string();
+            if !["seed", "sk", "pk", "eseed", "ct", "ss"].contains(&k.as_str()) {
+                continue;
+            }
+            if k == "seed" && !cur.is_empty() {
+                recs.push(std::mem::take(&mut cur));
+            }
+            key = k;
+            cur.insert(key.clone(), it.collect::<Vec<_>>().join(""));
+        } else if !key.is_empty() && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            cur.get_mut(&key).unwrap().push_str(t);
+        }
+    }
+    if !cur.is_empty() {
+        recs.push(cur);
+    }
+    let (mut ok, mut bad) = (0, 0);
+    for r in &recs {
+        let seed: [u8; 32] = unhex(&r["seed"]).try_into().unwrap();
+        let dk = x_wing::DecapsulationKey::from(seed);
+        let pk = dk.encapsulation_key().to_bytes().to_vec();
+        let eseed: [u8; 64] = unhex(&r["eseed"]).try_into().unwrap();
+        let (ct, ss) = dk.encapsulation_key().encapsulate_deterministic(&ml_kem::array::Array::from(eseed));
+        let ss2 = dk.decapsulate(&ct);
+        let good = unhex(&r["sk"]) == seed.to_vec()
+            && pk == unhex(&r["pk"])
+            && ct.to_vec() == unhex(&r["ct"])
+            && ss.to_vec() == unhex(&r["ss"])
+            && ss2 == ss;
+        if good { ok += 1 } else { bad += 1 }
+    }
+    println!("XWING x-wing 0.1.0 vs {} Appendix C: vectors={} pass={} fail={} {}", args[0].rsplit(['/', '\\']).next().unwrap(), recs.len(), ok, bad, if bad == 0 && ok > 0 { "PASS" } else { "FAIL" });
+}
+
+// ---------------------------------------------------------------------------------------------
 // 4. Interop with PQClean's randomised API (and aws-lc-rs when built with --features awslc)
 // ---------------------------------------------------------------------------------------------
 
@@ -1291,11 +1351,12 @@ fn main() {
         "reject" => cmd_reject(rest),
         "vectors" => cmd_vectors(rest),
         "interop" => cmd_interop(rest),
+        "xwing" => cmd_xwing(rest),
         "frodo-kat" => cmd_frodo_kat(rest),
         "frodo-mu" => cmd_frodo_mu(rest),
         "bench" => cmd_bench(rest),
         _ => {
-            eprintln!("usage: rpi_oracle_probe accumulated N [512|768|1024 ...] | reject N | vectors VECTOR_DIR [RFC7748_TXT] | interop N [VECTOR_DIR] | frodo-kat RSP VARIANT | frodo-mu N VARIANT | bench REPS FRODO_REPS");
+            eprintln!("usage: rpi_oracle_probe accumulated N [512|768|1024 ...] | reject N | vectors VECTOR_DIR [RFC7748_TXT] | interop N [VECTOR_DIR] | xwing DRAFT_TXT | frodo-kat RSP VARIANT | frodo-mu N VARIANT | bench REPS FRODO_REPS");
             std::process::exit(2);
         }
     }

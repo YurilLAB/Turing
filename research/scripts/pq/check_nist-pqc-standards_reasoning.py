@@ -245,6 +245,26 @@ check("ML-KEM-768 ct: 768 x 10 bits = 960 bytes, 256 x 4 bits = 128 bytes, total
 check("Kyber r3 margins as printed in the notes: 8.5 / 8.1 / 15.3",
       [round(151.5 - 143, 1), round(215.1 - 207, 1), round(287.3 - 272, 1)] == [8.5, 8.1, 15.3])
 
+# ------------------------------------------------------------------ 11. q/sigma alone?
+print("== 11. Does q/sigma alone fix the reduction needed? (Lindner-Peikert 2011 Sec. 5 heuristic)")
+# LP11: delta = 2^( lg^2(beta) / (4 n lg q) ), beta ~ (q/s) * const for the distinguishing attack.
+# The constant is dropped here (same for all rows), so only the comparison is meaningful.
+
+
+def lg_delta(n, q, sigma):
+    return math.log2(q / sigma) ** 2 / (4 * n * math.log2(q))
+
+
+rows = [("ML-KEM-512", 512, 3329, math.sqrt(1.5)), ("ML-KEM-768", 768, 3329, 1.0),
+        ("ML-KEM-1024", 1024, 3329, 1.0), ("FrodoKEM-976", 976, 65536, 2.3), ("FrodoKEM-1344", 1344, 65536, 1.4)]
+for name, n, q, s in rows:
+    print(f"      {name:14s} lg(q/sigma) = {math.log2(q / s):5.2f}  heuristic lg(delta) = {lg_delta(n, q, s):.5f}")
+# same n, same ratio q/sigma, different q
+a = lg_delta(1000, 2 ** 16, 2 ** 16 / 2 ** 13)
+b = lg_delta(1000, 2 ** 12, 2 ** 12 / 2 ** 13)  # sigma = 0.5, ratio 2^13 in both
+check("finding: same n and same q/sigma but different q give different required delta (heuristic)",
+      abs(a - b) / a > 0.2, f"lg delta {a:.5f} (q = 2^16) vs {b:.5f} (q = 2^12)")
+
 print()
 findings = [f for f in FAILS if not f.startswith("negative control")]
 print("ALL CHECKS PASSED" if not FAILS else f"{len(FAILS)} CHECK(S) FAILED: {FAILS}")

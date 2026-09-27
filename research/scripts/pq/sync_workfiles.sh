@@ -12,8 +12,10 @@
 #   D:\Dev\.toolchains\valgrind-3.26.0-ubuntu\   stock Ubuntu Valgrind .deb,
 #                            unpacked without root
 #
-# Build outputs that are regenerated on demand (cargo target/build dirs) are
-# skipped. Usage: bash sync_workfiles.sh          one pass
+# Build outputs that are regenerated on demand are skipped: every directory
+# whose name starts with "target" (the runs used target-a, target-b,
+# target-linux, target-msvc, target2, ...; 1.47 GB on 2026-09-27) and
+# sc-rust/build. Their logs and comparison results are kept. Usage: bash sync_workfiles.sh          one pass
 #                 bash sync_workfiles.sh --loop   every 5 minutes, for at most 6 hours
 set -u
 export MSYS_NO_PATHCONV=1
@@ -25,7 +27,7 @@ RC='/R:1 /W:1 /NFL /NDL /NJH /NJS /NP'
 one_pass() {
   # robocopy exit codes 0-7 mean success (8+ = failure).
   robocopy "$SRC\\pq" "$DST\\pq" /E $RC \
-    /XD "$SRC\\pq\\sc-rust\\build" "$SRC\\pq\\vg-varlat" "$SRC\\pq\\vg\\root" target .git \
+    /XD "$SRC\\pq\\sc-rust\\build" "$SRC\\pq\\vg-varlat" "$SRC\\pq\\vg\\root" 'target*' .git \
     /XF '*.deb' '*.tmp' > /dev/null
   a=$?
   robocopy "$SRC" "$DST\\pq\\session-misc" /LEV:1 $RC /XF wfcheck.js > /dev/null
