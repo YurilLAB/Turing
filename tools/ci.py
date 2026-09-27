@@ -32,7 +32,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PY = sys.executable
 PROFILES = ["quick", "full", "deep"]
 ITERS = {"quick": "1", "full": "5", "deep": "25"}
-MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7", "--review1"]
+MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7", "--review1", "--mlkem"]
 
 
 def stages(profile):

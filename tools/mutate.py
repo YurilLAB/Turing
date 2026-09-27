@@ -5,7 +5,7 @@ tests caught it and always restores the original file (and verifies it). A
 test run that exceeds the time limit has not passed either: it counts as
 caught, and the whole process tree is killed.
 
-    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7 | --review1] [--check] [NAME ...]
+    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7 | --review1 | --mlkem] [--check] [NAME ...]
 
 --check only verifies that every pattern still matches the current code
 exactly once, without running any tests. NAME filters mutations by name.
@@ -522,6 +522,52 @@ MUTATIONS_REVIEW1 = [
      TURING + ["a_key_flip_between_check_and_use_is_caught"]),
 ]
 
+# ML-KEM (turing::mlkem, FIPS 203): the classic ways an implementation goes
+# wrong. Each must fail the official vectors (bombe tests/mlkem.rs) or the
+# module's own exhaustive tests.
+MLKEM_VECTORS = ["-p", "bombe", "--release", "--test", "mlkem"]
+MUTATIONS_MLKEM = [
+    ("ml-kem: key generation hashes G(d) without k (the FIPS 203 draft)", "crates/turing/src/mlkem.rs",
+     "    let (rho, mut sigma) = if ipd { g(&[d]) } else { g(&[d, &k_byte]) };",
+     "    let (rho, mut sigma) = if ipd { g(&[d]) } else { g(&[d]) };",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+    ("ml-kem: SampleNTT reads rho || i || j", "crates/turing/src/mlkem.rs",
+     "            sample_ntt(rho, j as u8, i as u8, entry);", "            sample_ntt(rho, i as u8, j as u8, entry);",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+    ("ml-kem: e1 drawn with eta1", "crates/turing/src/mlkem.rs",
+     "    for ei in e1.iter_mut().take(p.k) {\n        prf_cbd(p.eta2, r, nonce, ei);",
+     "    for ei in e1.iter_mut().take(p.k) {\n        prf_cbd(p.eta1, r, nonce, ei);",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+    ("ml-kem: Compress rounds down", "crates/turing/src/mlkem.rs",
+     "    let v = (u32::from(x) << d) + 1664;", "    let v = u32::from(x) << d;",
+     TURING + ["mlkem"]),
+    ("ml-kem: inverse NTT scaled by 3302", "crates/turing/src/mlkem.rs",
+     "        *x = mul(*x, 3303);", "        *x = mul(*x, 3302);",
+     TURING + ["mlkem"]),
+    ("ml-kem: base-case multiply uses zeta instead of gamma", "crates/turing/src/mlkem.rs",
+     "        let c0 = add(mul(a0, b0), mul(mul(a1, b1), GAMMAS[i]));",
+     "        let c0 = add(mul(a0, b0), mul(mul(a1, b1), ZETAS[i]));",
+     TURING + ["mlkem"]),
+    ("ml-kem: ByteDecode12 does not reduce mod q", "crates/turing/src/mlkem.rs",
+     "        *c = if d == 12 { csub(v) } else { v as u16 };", "        *c = v as u16;",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+    ("ml-kem: modulus check skipped", "crates/turing/src/mlkem.rs",
+     "        again[..] == ek[384 * i..384 * (i + 1)]", "        true",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+    ("ml-kem: decapsulation-key hash check skipped", "crates/turing/src/mlkem.rs",
+     "    h(&dk[pke..pke + p.ek_bytes()])[..] == dk[pke + p.ek_bytes()..pke + p.ek_bytes() + 32]", "    true",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+    ("ml-kem: rejection returns the decrypted key", "crates/turing/src/mlkem.rs",
+     "        *out ^= (*out ^ a) & accept;", "        *out = a;",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+    ("ml-kem: re-encryption compared on its first half only", "crates/turing/src/mlkem.rs",
+     "    let accept = eq_mask(c, again);", "    let accept = eq_mask(&c[..c.len() / 2], &again[..c.len() / 2]);",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+    ("ml-kem: noise sign flipped", "crates/turing/src/mlkem.rs",
+     "        *c = csub(x + Q - y);", "        *c = csub(y + Q - x);",
+     MLKEM_VECTORS + ["every_official_vector_passes"]),
+]
+
 def kill_tree(p):
     """Kills cargo and the test binary it started."""
     if os.name == "nt":
@@ -552,7 +598,7 @@ def run(args):
 
 
 def main():
-    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7, "--review1": MUTATIONS_REVIEW1}
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7, "--review1": MUTATIONS_REVIEW1, "--mlkem": MUTATIONS_MLKEM}
     check_only = "--check" in sys.argv
     only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
     mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)

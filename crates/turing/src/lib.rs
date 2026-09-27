@@ -13,6 +13,7 @@ pub mod keyschedule256;
 pub mod linear;
 pub mod linear256;
 pub mod lwe;
+pub mod mlkem;
 pub mod masked;
 pub mod memory;
 pub mod random;

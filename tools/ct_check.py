@@ -30,7 +30,7 @@ import sys
 # Functions whose machine code must not divide secrets, by mangled-name
 # substring, and the per-function allowance (page-size divides of public
 # constant sizes).
-LATTICE = ("lwe", "turing1026")
+LATTICE = ("lwe", "turing1026", "mlkem")
 DIVISION_ALLOWANCE = {"expanded": 3}
 
 
