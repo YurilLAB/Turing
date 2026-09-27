@@ -272,6 +272,28 @@ pub fn decrypt(p: &Params, s: &[u16], bp: &[u16], c: &[u16], msg: &mut [u8]) {
     m.zeroize();
 }
 
+/// C - B' S, mbar x nbar values mod q, into `out`: decryption without the
+/// decoding, for Turing-1026's fault-tolerant decapsulation, which computes
+/// it three times and decodes each in its own order (turing1026.rs).
+/// Never inlined, so three calls stay three computations.
+#[inline(never)]
+pub fn decrypt_values(p: &Params, s: &[u16], bp: &[u16], c: &[u16], out: &mut [u16]) {
+    p.validate();
+    assert!(s.len() == p.n * p.nbar && bp.len() == p.mbar * p.n && c.len() == p.mbar * p.nbar && out.len() == c.len());
+    let mask = p.q_mask();
+    out.copy_from_slice(c);
+    for r in 0..p.mbar {
+        let m = &mut out[r * p.nbar..(r + 1) * p.nbar];
+        for k in 0..p.n {
+            let v = bp[r * p.n + k];
+            for (x, &y) in m.iter_mut().zip(&s[k * p.nbar..(k + 1) * p.nbar]) {
+                *x = x.wrapping_sub(v.wrapping_mul(y));
+            }
+        }
+        m.iter_mut().for_each(|x| *x &= mask);
+    }
+}
+
 /// Packs coefficients of log_q bits each, least significant bit first:
 /// coefficient i occupies bits [i log_q, (i + 1) log_q) of `out` read as one
 /// little-endian number. Entries are reduced mod q first.

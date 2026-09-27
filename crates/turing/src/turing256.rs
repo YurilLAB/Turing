@@ -143,6 +143,12 @@ impl Turing256 {
         self.keys.locked()
     }
 
+    /// The round-key blocks, the check and its point (the residue sweep).
+    #[cfg(test)]
+    pub(crate) fn secret_blocks(&self) -> Vec<crate::Block> {
+        self.keys.secret_blocks()
+    }
+
     /// Whether the round keys' memory is left out of core dumps (Linux).
     pub fn keys_dump_excluded(&self) -> bool {
         self.keys.dump_excluded()

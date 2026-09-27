@@ -1568,14 +1568,49 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         s,
         "faults in decapsulation (the fault map)",
         format!(
-            "over the three verdicts, each re-encryption's coefficients, decoded message, coins, rejection and accepted keys and the selection: {} single faults bypass the re-encryption check, {} give a validity oracle (skipping z, which redundancy cannot stop); forcing both selection verdicts {}; the cheapest bypass takes {} correlated faults (both re-encryptions' data), forcing verdicts alone {}",
+            "over the three verdicts, each re-encryption's coefficients, decoded message, coins, both rejection-key computations and their agreement, the accepted key and the selection: {} single faults bypass the re-encryption check, {} give a validity oracle (the cheapest takes {} faults: z skipped in both rejection hashes); forcing both selection verdicts {}; the cheapest bypass takes {} correlated faults (both re-encryptions' data), forcing verdicts alone {}",
             fault_map.bypasses,
             fault_map.validity_oracles,
+            fault_map.cheapest_validity_oracle,
             if fault_map.verdict_pair_bypasses { "BYPASSES" } else { "gives a key bound to the comparison (no bypass)" },
             fault_map.cheapest_bypass,
             if fault_map.all_verdicts_bypass { "three" } else { "more" }
         ),
-        pass_if(fault_map.bypasses == 0 && !fault_map.verdict_pair_bypasses && fault_map.cheapest_bypass == 2 && fault_map.all_verdicts_bypass),
+        pass_if(
+            fault_map.bypasses == 0
+                && fault_map.validity_oracles == 0
+                && fault_map.cheapest_validity_oracle == 2
+                && !fault_map.verdict_pair_bypasses
+                && fault_map.cheapest_bypass == 2
+                && fault_map.all_verdicts_bypass,
+        ),
+    );
+    let decoder = crate::fault1026::decoder_sweep(3);
+    log.add(
+        s,
+        "decoder faults (Pessl-Prokop)",
+        format!(
+            "one skipped rounding at every step of every decryption pass: {} of {} change a valid ciphertext's result (three voted passes, each in a random order); one fault in a pass's arithmetic: {} of 768; control, one pass in order as before: {} of 256 steps change it, {} the {} coefficients with negative noise; the same step in two passes: {} of 256; vote skipped: {} of 256 outcomes follow the noise signs by index; two aimed arithmetic faults (the boundary): {} of 256, {}",
+            decoder.protected_effective,
+            decoder.protected_tried,
+            decoder.arithmetic_effective,
+            decoder.unprotected_effective,
+            if decoder.unprotected_matches_noise_sign { "exactly" } else { "NOT" },
+            decoder.negative_noise,
+            decoder.two_pass_effective,
+            decoder.vote_skipped_agreement,
+            decoder.arithmetic_two_pass_effective,
+            if decoder.arithmetic_two_pass_matches_noise_sign { "the noise signs" } else { "not the noise signs" }
+        ),
+        pass_if(
+            decoder.protected_effective == 0
+                && decoder.arithmetic_effective == 0
+                && decoder.unprotected_matches_noise_sign
+                && decoder.arithmetic_unprotected_matches_noise_sign
+                && decoder.two_pass_effective <= 8
+                && decoder.vote_skipped_effective >= 64
+                && decoder.vote_skipped_agreement < 200,
+        ),
     );
     let n = scale(200_000, 50_000);
     let packed = vec![0x3cu8; 15_870];

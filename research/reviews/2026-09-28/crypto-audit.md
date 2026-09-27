@@ -375,3 +375,50 @@ residue tests were also run on the unfixed code, where they fail for the reason 
 
 CI: a `production` stage and workflow step test the library without `analysis` (the build users
 get, where R1 lived), and `--review2` joins the planted-bug sets.
+
+## Follow-up: the decoder and rejection-key faults closed
+
+R6 and the z-skip fault docs/16 named were single faults that leak without any bypass. Both are
+now closed in code, each by more than one defence, and each defence is shown to hold on its own.
+
+| Fault | Defences | Evidence |
+|---|---|---|
+| Decoder (R6): skipping one coefficient's `+ q/4` told the sign of its noise (Pessl-Prokop) | (1) three decryption passes, each computing C − B'S afresh, and a bitwise majority (`decrypt_voted`, `majority`); (2) each pass decodes in its own random order, a Fisher-Yates shuffle with no secret-dependent branch or memory access (`shuffle_order`), drawn from cSHAKE256 of z, a per-key decapsulation count and 32 OS bytes (`randomness`), each source enough on its own; (3) `ct_check.py` fails unless the release build calls `decode_pass` three times, each pass `decrypt_values` and `shuffle_order`, and the vote | Fault map: 0 of 768 single skipped roundings and 0 of 768 single arithmetic faults (C − B'S shifted by −q/4 at one coefficient of one pass) change a valid ciphertext's result; its control (one pass in order, as before) changes exactly the 128 coefficients of 256 whose noise is negative. With the vote skipped, the outcomes follow the noise signs by index at chance level (128 of 256). The boundary, measured and asserted: two faults aimed at one coefficient's arithmetic in two passes leak its sign, since C − B'S runs in a fixed order (the check's cheapest bypass also takes two faults). Unit tests: `shuffled_orders_are_uniform_permutations` (chi-square and fixed points), `each_decapsulation_decodes_in_fresh_orders`, `each_source_of_the_orders_randomness_counts` (with a control), `voted_decryption_equals_plain_decryption` |
+| Rejection key: skipping z in the hash made K̄ computable, a validity oracle | (1) K̄ computed twice, by separate non-inlined calls (`rejection_key`); (2) a disagreement XORs a fresh unpredictable value into it (`infect`, the verdict behind a value barrier); (3) `ct_check.py` fails unless the release build calls `rejection_key` twice and `infect` once | Fault map: z skipped in either computation gives denial of service, and forcing the agreement verdict alone does nothing; its control (one computation, as before) is a validity oracle; the cheapest validity oracle now takes two faults |
+
+Cost: decapsulation 12.9 → 13.4 ms, medians of the release build on this machine.
+
+Detectors for each class of bug the review found, so the next one of its kind fails a test
+instead of waiting for a review:
+
+- secrets in dead stack (R1, R3, R4): `crates/turing/src/residue_sweep.rs` runs all 30 public
+  operations that handle a secret, in the analysis and the production build, and searches the
+  stack each leaves for its keys, seeds, checksum points, shared keys and sponge states (two
+  planted-copy controls);
+- the optimiser merging a redundant computation (R2): `ct_check.py` checks every redundant
+  computation the fault defences rely on, and the two key checks per direction of the checked
+  calls, on Windows and on Linux-target assembly (where calls go through the GOT, a form the first
+  version of the rules missed); `ct_check.py --self-test` runs each rule on synthetic assembly, one
+  correct file and 12 broken ones, as a CI stage (`ct-self-test`);
+- a check that never read its target (R7): one of those broken files leaves the lattice module
+  out of the build;
+- the self-test's coverage (R9): `self_test()` also runs ML-KEM-1024 against a vector from the
+  independent Python reference;
+- input handling (R10): `entry_points_never_panic_on_arbitrary_input`;
+- locking (R11): `a_realistic_workload_stays_locked_on_windows`;
+- the docs against the code (R13): `mathaudit.py` compares docs/16's label count and names with
+  the labels the code defines (its negative control plants a wrong count).
+
+`tools/mutate.py --review3` plants 28 bugs, each removing one of these defences or disarming one
+of these detectors, and every one is caught by the test or check written for it: the fault map
+for a lost pass, vote, fresh C − B'S or per-pass order, and for the rejection key computed once,
+compared with itself, not infected or infected with zeros; the order tests for an unshuffled
+order, each of the three sources of its randomness dropped, and Sattolo's off-by-one (which
+usually passes the chi-square test; the fixed-point count catches it); `ct_check.py` for an inlined
+pass, rejection key or infection; the residue sweep for the stack burn removed from `Turing::new`,
+`new_key`, `ShieldedKey::refresh`, Turing-1026 encapsulation and ML-KEM decapsulation; the
+self-test for an ML-KEM rejection bug; the entry-point tests for a skipped length check;
+`mathaudit.py` for a stale label count; and the checker's self-test for its count rule and its
+division pattern weakened. The voted decoder's own rounding is one of them, since round 7's
+"decoding rounds down" now reaches only `lwe::decrypt`, which decapsulation no longer calls.
+Round 7's two rejection-key bugs now plant into `rejection_key`, where the code moved.

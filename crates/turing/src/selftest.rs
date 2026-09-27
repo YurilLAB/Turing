@@ -19,7 +19,7 @@
 
 use crate::random::{self, MaskStream};
 use crate::turing1026::DecapsulationKey;
-use crate::{xof, MaskedTuring, Turing, Turing256};
+use crate::{mlkem, xof, MaskedTuring, Turing, Turing256};
 use sha3::digest::XofReader;
 use sha3::{Digest, Sha3_256};
 
@@ -40,6 +40,8 @@ pub enum SelfTestError {
     Masks,
     /// The operating system gave no randomness for the masked cipher.
     Randomness,
+    /// ML-KEM-1024 produced a wrong key, ciphertext or shared key.
+    MlKem,
 }
 
 /// NIST SP 800-185 cSHAKE256 sample #3: S = "Email Signature", X = 00010203.
@@ -114,6 +116,27 @@ pub const KEM_VECTOR: KemVector = KemVector {
     rejected_key: hex32("17f5a1f3b474d09537d086af62abcc95af225a8f0e949e637af5f52b53318c4c"),
 };
 
+/// ML-KEM-1024 (FIPS 203) from d = 00..1f, z = 20..3f and m = 40..5f: SHA3-256
+/// of ek, dk and c, the shared key, and the key decapsulation returns once
+/// c's first byte is flipped (J(z || c')). Computed with the independent
+/// pure-Python reference `research/scripts/pq/cca_mlkem_ref.py` (validated
+/// against NIST's ACVP and C2SP's CCTV vectors), not with this crate.
+pub struct MlKemVector {
+    pub ek_sha3: [u8; 32],
+    pub dk_sha3: [u8; 32],
+    pub ciphertext_sha3: [u8; 32],
+    pub shared_key: [u8; 32],
+    pub rejected_key: [u8; 32],
+}
+
+pub const ML_KEM_VECTOR: MlKemVector = MlKemVector {
+    ek_sha3: hex32("61349e5c131a7e116a0463861d7d18663c5627c38c7147ddaadfd48acd7a4535"),
+    dk_sha3: hex32("f0db5d938027fcd9bad87847d52c14cf0c4abcf0703b749793f212111ffb303b"),
+    ciphertext_sha3: hex32("c1579fa02c614f3762b2a799b51e41cebb8f820f34fa736af02c56de2460ce3c"),
+    shared_key: hex32("0ad8d1ea1b8dd788979b4379581218df9321bdce5567eca42ae6be7d395f1a54"),
+    rejected_key: hex32("8f2c880890996c587aa500cf8b6da03372de706a9f96075744bb0956ea6fbaac"),
+};
+
 const fn hex_digit(c: u8) -> u8 {
     match c {
         b'0'..=b'9' => c - b'0',
@@ -155,6 +178,30 @@ fn kem_self_test() -> Result<(), SelfTestError> {
         Ok(())
     } else {
         Err(SelfTestError::Kem)
+    }
+}
+
+/// ML-KEM-1024 through the entry points the hybrid will call.
+fn mlkem_self_test() -> Result<(), SelfTestError> {
+    let v = &ML_KEM_VECTOR;
+    let p = mlkem::ML_KEM_1024;
+    let d: [u8; 32] = core::array::from_fn(|i| i as u8);
+    let z: [u8; 32] = core::array::from_fn(|i| 32 + i as u8);
+    let m: [u8; 32] = core::array::from_fn(|i| 64 + i as u8);
+    let (mut ek, mut dk, mut c) = (vec![0u8; p.ek_bytes()], vec![0u8; p.dk_bytes()], vec![0u8; p.ct_bytes()]);
+    let (mut key, mut back, mut rejected) = ([0u8; 32], [0u8; 32], [0u8; 32]);
+    let fail = |_| SelfTestError::MlKem;
+    mlkem::keygen(&p, &d, &z, &mut ek, &mut dk).map_err(fail)?;
+    mlkem::encapsulate(&p, &ek, &m, &mut c, &mut key).map_err(fail)?;
+    mlkem::decapsulate(&p, &dk, &c, &mut back).map_err(fail)?;
+    let digests_right = Sha3_256::digest(&ek)[..] == v.ek_sha3 && Sha3_256::digest(&dk)[..] == v.dk_sha3 && Sha3_256::digest(&c)[..] == v.ciphertext_sha3;
+    c[0] ^= 1;
+    mlkem::decapsulate(&p, &dk, &c, &mut rejected).map_err(fail)?;
+    dk.iter_mut().for_each(|x| *x = 0);
+    if digests_right && key == v.shared_key && back == v.shared_key && rejected == v.rejected_key {
+        Ok(())
+    } else {
+        Err(SelfTestError::MlKem)
     }
 }
 
@@ -211,7 +258,8 @@ pub fn self_test() -> Result<(), SelfTestError> {
             return Err(SelfTestError::Decrypt);
         }
     }
-    kem_self_test()
+    kem_self_test()?;
+    mlkem_self_test()
 }
 
 #[cfg(test)]

@@ -35,10 +35,6 @@
 //! written straight into the caller's buffers and wiped; and every entry
 //! point runs its work below a stack burn.
 
-// ML-KEM is compiled into the library for the hybrid that will call it (docs/18),
-// which does not exist yet: until then only tests and analysis builds use it.
-#![cfg_attr(not(any(test, feature = "analysis")), allow(dead_code))]
-
 use crate::linear::opaque;
 use crate::xof::SecretXof;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -905,6 +901,47 @@ mod tests {
             assert_eq!(decapsulate(&p, &bad_dk, &c, &mut back), Err(InputError::DecapsulationKey));
             decapsulate(&p, &dk, &c, &mut back).expect("valid");
             assert_eq!(back, key);
+        }
+    }
+
+    // Arbitrary inputs to the entry points: every length from empty to
+    // beyond the right one, and random bytes at the right one. Each call
+    // returns (an error, or implicit rejection) and none panics (FIPS 203
+    // section 7; research/reviews/2026-09-28 R10: the internal functions
+    // panicked on a byte too few).
+    #[test]
+    fn entry_points_never_panic_on_arbitrary_input() {
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        };
+        for p in [ML_KEM_512, ML_KEM_768, ML_KEM_1024] {
+            let (mut ek, mut dk) = (vec![0u8; p.ek_bytes()], vec![0u8; p.dk_bytes()]);
+            keygen(&p, &[7; 32], &[8; 32], &mut ek, &mut dk).expect("lengths");
+            let mut key = [0u8; 32];
+            for len in (0..p.dk_bytes() + 40).step_by(37) {
+                let junk: Vec<u8> = (0..len).map(|_| next()).collect();
+                let mut out = vec![0u8; len];
+                let _ = encapsulate(&p, &junk, &[1; 32], &mut out, &mut key);
+                let _ = decapsulate(&p, &junk, &junk, &mut key);
+                let _ = decapsulate(&p, &dk, &junk, &mut key);
+                let mut other = out.clone();
+                let _ = keygen(&p, &[1; 32], &[2; 32], &mut out, &mut other);
+            }
+            for _ in 0..40 {
+                let ek_junk: Vec<u8> = (0..p.ek_bytes()).map(|_| next()).collect();
+                let c_junk: Vec<u8> = (0..p.ct_bytes()).map(|_| next()).collect();
+                let mut c = vec![0u8; p.ct_bytes()];
+                match encapsulate(&p, &ek_junk, &[1; 32], &mut c, &mut key) {
+                    Ok(()) | Err(InputError::EncapsulationKey) => {}
+                    Err(e) => panic!("{p:?}: a right-length key gave {e:?}"),
+                }
+                decapsulate(&p, &dk, &c_junk, &mut key).expect("any ciphertext of the right length is decapsulated");
+                let mut dk_junk = dk.clone();
+                dk_junk[next() as usize % dk.len()] ^= 1 << (next() % 8);
+                let _ = decapsulate(&p, &dk_junk, &c_junk, &mut key);
+            }
         }
     }
 

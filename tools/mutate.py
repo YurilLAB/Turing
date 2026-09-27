@@ -5,7 +5,7 @@ tests caught it and always restores the original file (and verifies it). A
 test run that exceeds the time limit has not passed either: it counts as
 caught, and the whole process tree is killed.
 
-    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7 | --review1 | --mlkem | --review2] [--check] [NAME ...]
+    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7 | --review1 | --mlkem | --review2 | --review3] [--check] [NAME ...]
 
 --check only verifies that every pattern still matches the current code
 exactly once, without running any tests. NAME filters mutations by name.
@@ -434,12 +434,12 @@ MUTATIONS_ROUND7 = [
      "        // as coefficients: reads a separate computation from the first.\n        {\n            let Workspace { bp, c, .. } = &mut *w;\n            fault.intermediate(2, bp, c);\n        }",
      ["-p", "bombe", "--release", "--lib", "fault1026"]),
     ("turing-1026: rejection key without z", "crates/turing/src/turing1026.rs",
-     "        if !fault.skip_rejection_z() {\n            h.absorb(&self.secret.z);\n        }\n        h.absorb(&self.public.hash);",
+     "        if !fault.skip_rejection_z(which) {\n            h.absorb(&self.secret.z);\n        }\n        h.absorb(&self.public.hash);",
      "        h.absorb(&self.public.hash);",
      TURING),
     ("turing-1026: rejection key without H(pk)", "crates/turing/src/turing1026.rs",
-     "        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);\n        h.squeeze(&mut key[..]);",
-     "        h.absorb(ciphertext);\n        h.squeeze(&mut key[..]);",
+     "        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);\n        h.squeeze(out);",
+     "        h.absorb(ciphertext);\n        h.squeeze(out);",
      TURING),
     ("turing-1026: salt left out of the coins", "crates/turing/src/turing1026.rs",
      "        g.absorb(&w.mu);\n        g.absorb(salt);", "        g.absorb(&w.mu);",
@@ -607,7 +607,7 @@ MUTATIONS_REVIEW2 = [
     ("turing-1026: selection inlined", "crates/turing/src/turing1026.rs",
      "#[inline(never)]\nfn select_into(", "#[inline(always)]\nfn select_into(",
      CT_CHECK),
-    # R3 and R7: ML-KEM's division check
+    # R7: ML-KEM's division check (R3, ML-KEM's residue, is in --review3's sweep)
     ("ml-kem: Compress divides by q (KyberSlash)", "crates/turing/src/mlkem.rs",
      "    let quotient = ((u64::from(v) * COMPRESS_M) >> 40) as u32;", "    let quotient = v / core::hint::black_box(Q);",
      CT_CHECK),
@@ -653,6 +653,119 @@ MUTATIONS_REVIEW2 = [
      ["--wsl", "-p", "turing", "--lib", "memlock"]),
 ]
 
+# The two single faults closed after the 2026-09-28 review (docs/16): the
+# decoder (Pessl-Prokop) and the rejection key's z. Each planted bug removes
+# one layer; the fault map (with its controls), the order tests or
+# `ct_check.py` must catch it. Then the detectors added for the review's
+# classes of bug, each shown to fire on a bug of its class: the residue sweep
+# (R1, R3, R4), the self-test's ML-KEM vector (R9), the ML-KEM entry points'
+# input checks (R10), the docs label check (R13) and the assembly checker's
+# own self-test (R2, R7).
+DECODER_FAULTS = BOMBE_LIB + ["a_skipped_rounding"]
+Z_FAULTS = BOMBE_LIB + ["skipping_z"]
+SWEEP = TURING + ["every_public_operation"]
+CT_SELF_TEST = ["--python", "tools/ct_check.py", "--self-test"]
+MUTATIONS_REVIEW3 = [
+    # The decoder: the vote, fresh arithmetic per pass, random orders.
+    ("turing-1026: one decryption pass, no vote", "crates/turing/src/turing1026.rs",
+     "        self.decode_pass(1, bp, c, order_stream, w, fault);\n        self.decode_pass(2, bp, c, order_stream, w, fault);\n        let Workspace { votes, mu, .. } = w;\n        if fault.skip_vote() {",
+     "        let Workspace { votes, mu, .. } = w;\n        if true {",
+     DECODER_FAULTS),
+    ("turing-1026: the vote follows the first pass", "crates/turing/src/turing1026.rs",
+     "        *o = (a & b) | (a & c) | (b & c);", "        let _ = (b, c);\n        *o = a;",
+     DECODER_FAULTS),
+    # The voted decoder replaced lwe::decrypt in decapsulation (round 7's
+    # "decoding rounds down" now reaches only the reference path).
+    ("turing-1026: the voted decoder rounds down", "crates/turing/src/turing1026.rs",
+     "        let add = if fault.skip_rounding(pass, step) { 0 } else { quarter };",
+     "        let add = if fault.skip_rounding(pass, step) { 0 } else { 0 * quarter };",
+     TURING),
+    ("turing-1026: one C - B'S shared by the three passes", "crates/turing/src/turing1026.rs",
+     "        lwe::decrypt_values(&PARAMS, &self.secret.s, bp, c, values);\n        fault.values(pass, values);",
+     "        if pass == 0 {\n            lwe::decrypt_values(&PARAMS, &self.secret.s, bp, c, values);\n        }\n        fault.values(pass, values);",
+     DECODER_FAULTS),
+    ("turing-1026: every pass decodes in the first pass's order", "crates/turing/src/turing1026.rs",
+     "        fault.values(pass, values);\n        shuffle_order(order_stream, order);",
+     "        fault.values(pass, values);\n        if pass == 0 {\n            shuffle_order(order_stream, order);\n        }",
+     DECODER_FAULTS),
+    ("turing-1026: decoding order not shuffled", "crates/turing/src/turing1026.rs",
+     "    let mut r = [0u8; 4];\n    for i in (1..order.len()).rev() {", "    let mut r = [0u8; 4];\n    for i in (1..1).rev() {",
+     TURING + ["orders"]),
+    ("turing-1026: the shuffle never leaves a coefficient in place (Sattolo's off-by-one)", "crates/turing/src/turing1026.rs",
+     "        let j = ((u64::from(u32::from_le_bytes(r)) * (i as u64 + 1)) >> 32) as usize;",
+     "        let j = ((u64::from(u32::from_le_bytes(r)) * (i as u64)) >> 32) as usize;",
+     TURING + ["shuffled_orders"]),
+    ("turing-1026: the orders ignore the decapsulation count", "crates/turing/src/turing1026.rs",
+     "        x.absorb(&n.to_le_bytes());", "        let _ = n;",
+     TURING + ["orders_randomness"]),
+    ("turing-1026: the count never moves on", "crates/turing/src/turing1026.rs",
+     "self.decapsulations.fetch_add(1, Ordering::Relaxed)", "self.decapsulations.fetch_add(0, Ordering::Relaxed)",
+     TURING + ["orders_randomness"]),
+    ("turing-1026: the orders ignore z", "crates/turing/src/turing1026.rs",
+     "        x.absorb(&self.secret.z);\n        x.absorb(&n.to_le_bytes());", "        x.absorb(&n.to_le_bytes());",
+     TURING + ["orders_randomness"]),
+    ("turing-1026: the orders ignore the OS bytes", "crates/turing/src/turing1026.rs",
+     "        x.absorb(&w.os_seed);", "        let _ = &w.os_seed;",
+     TURING + ["orders_randomness"]),
+    ("turing-1026: decryption pass inlined", "crates/turing/src/turing1026.rs",
+     "    #[inline(never)]\n    fn decode_pass(", "    #[inline(always)]\n    fn decode_pass(",
+     CT_CHECK),
+    # The rejection key: two computations, their comparison, the infection.
+    ("turing-1026: rejection key computed once", "crates/turing/src/turing1026.rs",
+     "            self.rejection_key(ciphertext, 2, fault, rejection2);", "            rejection2.copy_from_slice(&key[..]);",
+     Z_FAULTS),
+    ("turing-1026: agreement compares the first key with itself", "crates/turing/src/turing1026.rs",
+     "eq_mask(&key[..], &rejection2[..])", "eq_mask(&key[..], &key[..])",
+     Z_FAULTS),
+    ("turing-1026: disagreement not infected", "crates/turing/src/turing1026.rs",
+     "            infect(&mut key, infection, agree);", "            let _ = (infection, agree);",
+     Z_FAULTS),
+    ("turing-1026: infection value never drawn (zero)", "crates/turing/src/turing1026.rs",
+     "        randomness.squeeze(&mut w.infection);\n        randomness.wipe();", "        randomness.wipe();",
+     Z_FAULTS),
+    ("turing-1026: rejection key inlined", "crates/turing/src/turing1026.rs",
+     "    #[inline(never)]\n    fn rejection_key(&self, ciphertext", "    #[inline(always)]\n    fn rejection_key(&self, ciphertext",
+     CT_CHECK),
+    ("turing-1026: infection inlined", "crates/turing/src/turing1026.rs",
+     "#[inline(never)]\nfn infect(", "#[inline(always)]\nfn infect(",
+     CT_CHECK),
+    # The residue sweep: a stack burn removed from an operation no other
+    # residue test covers, one per kind of secret.
+    ("residue: Turing::new without its stack burn", "crates/turing/src/cipher.rs",
+     "        let t = Turing::expanded(key);\n        crate::memory::burn_stack();\n        t", "        let t = Turing::expanded(key);\n        t",
+     SWEEP),
+    ("residue: random::new_key without its stack burn", "crates/turing/src/random.rs",
+     "    let key = new_key_below_the_burn();\n    crate::memory::burn_stack();\n    key", "    let key = new_key_below_the_burn();\n    key",
+     SWEEP),
+    ("residue: ShieldedKey::refresh without its stack burn", "crates/turing/src/shield.rs",
+     "        self.prekey = fresh;\n        memory::burn_stack();\n        Ok(())", "        self.prekey = fresh;\n        Ok(())",
+     SWEEP),
+    ("residue: Turing-1026 encapsulation without its stack burn", "crates/turing/src/turing1026.rs",
+     "        let result = self.encapsulated();\n        crate::memory::burn_stack();\n        result", "        let result = self.encapsulated();\n        result",
+     SWEEP),
+    ("residue: ML-KEM decapsulation without its stack burn", "crates/turing/src/mlkem.rs",
+     "    decaps_below_the_burn(p, dk, c, key);\n    crate::memory::burn_stack();\n    Ok(())", "    decaps_below_the_burn(p, dk, c, key);\n    Ok(())",
+     SWEEP),
+    # ML-KEM: the self-test's vector, the entry points' input checks.
+    ("selftest: ML-KEM rejection returns the decrypted key", "crates/turing/src/mlkem.rs",
+     "        *out ^= (*out ^ a) & accept;", "        *out = a;",
+     TURING + ["self_test"]),
+    ("ml-kem: encapsulate skips its length check", "crates/turing/src/mlkem.rs",
+     "    if c.len() != p.ct_bytes() || ek.len() != p.ek_bytes() {\n        return Err(InputError::Length);\n    }\n    if !ek_valid(p, ek) {",
+     "    if !ek_valid(p, ek) {",
+     TURING + ["entry_points"]),
+    # The docs label check and the assembly checker's own rules.
+    ("docs/16: label count stale", "docs/16-turing-1026.md",
+     "All eleven labels begin", "All ten labels begin",
+     ["--python", "tools/mathaudit.py"]),
+    ("ct_check: redundancy rules ignore the count", "tools/ct_check.py",
+     "report(bool(bodies) and exists and found >= least,", "report(bool(bodies) and exists,",
+     CT_SELF_TEST),
+    ("ct_check: unsigned divisions not matched", "tools/ct_check.py",
+     'r"^i?div[bwlq]?', 'r"^idiv[bwlq]?',
+     CT_SELF_TEST),
+]
+
 
 def kill_tree(p):
     """Kills cargo and the test binary it started."""
@@ -686,14 +799,16 @@ def run(args):
 
 
 def main():
-    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7, "--review1": MUTATIONS_REVIEW1, "--mlkem": MUTATIONS_MLKEM, "--review2": MUTATIONS_REVIEW2}
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7, "--review1": MUTATIONS_REVIEW1, "--mlkem": MUTATIONS_MLKEM, "--review2": MUTATIONS_REVIEW2, "--review3": MUTATIONS_REVIEW3}
     check_only = "--check" in sys.argv
     only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
     mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)
     all_caught = True
+    ran = 0
     for name, rel, old, new, args in mutations:
         if only and not any(o in name for o in only):
             continue
+        ran += 1
         path = ROOT / rel
         original = path.read_bytes()
         text = original.decode("utf-8")
@@ -724,6 +839,10 @@ def main():
         else:
             how = ", ".join(failed) if failed else ("compile error" if compile_error else "exit %d" % code)
         print(f"{'CAUGHT' if caught else 'MISSED'}  {name}: {how}", flush=True)
+    if not ran:
+        # A filter that matches nothing checked nothing: that is not a pass.
+        print(f"no planted bug matches {only}")
+        return 1
     if check_only:
         print("all patterns match" if all_caught else "SOME PATTERNS ARE STALE")
     else:

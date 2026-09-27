@@ -35,6 +35,7 @@ use crate::lwe::{self, Params, SEED_A_BYTES};
 use crate::memory::{SecretBox, Zeroable};
 use crate::random::{self, RandomnessError};
 use crate::xof::{self, SecretXof};
+use core::sync::atomic::{AtomicU64, Ordering};
 use sha3::digest::XofReader;
 use zeroize::Zeroize;
 
@@ -74,6 +75,7 @@ const COINS_LABEL: &str = "Turing-1026 v1 coins";
 const ENCRYPTION_NOISE_LABEL: &str = "Turing-1026 v1 encryption noise";
 const SHARED_KEY_LABEL: &str = "Turing-1026 v1 shared key";
 const REJECTION_KEY_LABEL: &str = "Turing-1026 v1 rejection key";
+const DECODE_ORDER_LABEL: &str = "Turing-1026 v1 decode order";
 
 /// A public key or ciphertext of the wrong length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +105,18 @@ struct Workspace {
     key: [u8; SHARED_KEY_BYTES],
     /// The first selection's result (decapsulation), read by the second.
     tmp: [u8; SHARED_KEY_BYTES],
+    /// C - B'S of the current decryption pass (decapsulation).
+    values: [u16; MBAR * NBAR],
+    /// The current pass's random decoding order.
+    order: [u8; MBAR * NBAR],
+    /// The three passes' decoded messages, before the vote.
+    votes: [[u8; MESSAGE_BYTES]; 3],
+    /// The rejection key's second computation.
+    rejection2: [u8; SHARED_KEY_BYTES],
+    /// What replaces the rejection key if its two computations disagree.
+    infection: [u8; SHARED_KEY_BYTES],
+    /// Operating-system randomness for the decoding orders.
+    os_seed: [u8; 32],
 }
 
 impl Zeroize for Workspace {
@@ -115,6 +129,12 @@ impl Zeroize for Workspace {
         self.packed.zeroize();
         self.key.zeroize();
         self.tmp.zeroize();
+        self.values.zeroize();
+        self.order.zeroize();
+        self.votes.zeroize();
+        self.rejection2.zeroize();
+        self.infection.zeroize();
+        self.os_seed.zeroize();
     }
 }
 
@@ -291,6 +311,96 @@ fn bind_to_verdict(k: &mut [u8], rejection: &[u8; SHARED_KEY_BYTES], accept: u8)
     }
 }
 
+/// K-bar computed twice must agree; if the two disagree (`agree` = 0), a
+/// fault changed one of them, which could have made it computable from
+/// public values (skipping z), so the output becomes K-bar xor a fresh
+/// unpredictable value. Whichever computation was faulted, the key that
+/// comes out is then useless to the attacker. Never inlined, the verdict
+/// behind a value barrier.
+#[inline(never)]
+fn infect(key: &mut [u8; SHARED_KEY_BYTES], infection: &[u8; SHARED_KEY_BYTES], agree: u8) {
+    let differ = !(opaque(u64::from(agree)) as u8);
+    for (k, &r) in key.iter_mut().zip(infection) {
+        *k ^= r & differ;
+    }
+}
+
+/// 0xff if `a == b`, else 0, with no branch: for positions of a secret
+/// random order.
+fn index_mask(a: usize, b: usize) -> u8 {
+    zero_mask((a ^ b) as u64)
+}
+
+/// values[idx] for a secret idx, reading every entry, so no memory access
+/// tells where idx is.
+fn read_oblivious(values: &[u16; MBAR * NBAR], idx: usize) -> u16 {
+    let mut v = 0u16;
+    for (k, &x) in values.iter().enumerate() {
+        v |= x & u16::from(index_mask(k, idx)).wrapping_mul(0x0101);
+    }
+    v
+}
+
+/// Sets bit idx of `out` (zeroed before) to `bit`, touching every byte.
+fn write_bit_oblivious(out: &mut [u8; MESSAGE_BYTES], idx: usize, bit: u8) {
+    let shifted = bit << (idx & 7);
+    for (b, o) in out.iter_mut().enumerate() {
+        *o |= shifted & index_mask(b, idx >> 3);
+    }
+}
+
+/// A uniformly random order of the 256 coefficients (Fisher-Yates), drawn
+/// from `stream`, built with no branch or memory access that depends on it:
+/// each swap reads and writes every position it could touch. The index is a
+/// multiply and shift, uniform up to a bias below 2^-24, not a division
+/// (whose time depends on its operands).
+#[inline(never)]
+fn shuffle_order(stream: &mut SecretXof, order: &mut [u8; MBAR * NBAR]) {
+    for (i, o) in order.iter_mut().enumerate() {
+        *o = i as u8;
+    }
+    let mut r = [0u8; 4];
+    for i in (1..order.len()).rev() {
+        stream.squeeze(&mut r);
+        let j = ((u64::from(u32::from_le_bytes(r)) * (i as u64 + 1)) >> 32) as usize;
+        let last = order[i];
+        let mut picked = 0u8;
+        for (k, &x) in order[..=i].iter().enumerate() {
+            picked |= x & index_mask(k, j);
+        }
+        for (k, x) in order[..=i].iter_mut().enumerate() {
+            let m = index_mask(k, j);
+            *x = (*x & !m) | (last & m);
+        }
+        order[i] = picked;
+    }
+    r.zeroize();
+}
+
+/// Decodes the 256 values in `order` into `out`, each rounded to the nearer
+/// of 0 and q/2. `fault` can skip the rounding at one step (Pessl-Prokop's
+/// fault; only Bombe's fault map does).
+fn decode_in_order(values: &[u16; MBAR * NBAR], order: &[u8; MBAR * NBAR], out: &mut [u8; MESSAGE_BYTES], pass: u8, fault: &impl DecapFault) {
+    out.fill(0);
+    let (mask, quarter, shift) = (PARAMS.q_mask(), 1u16 << (LOG_Q - 2), LOG_Q - 1);
+    for (step, &idx) in order.iter().enumerate() {
+        let idx = usize::from(idx);
+        let v = read_oblivious(values, idx);
+        let add = if fault.skip_rounding(pass, step) { 0 } else { quarter };
+        let bit = ((v.wrapping_add(add) & mask) >> shift) as u8;
+        write_bit_oblivious(out, idx, bit);
+    }
+}
+
+/// Each bit of `out` is the majority of the three passes' bits.
+#[inline(never)]
+fn majority(votes: &[[u8; MESSAGE_BYTES]; 3], out: &mut [u8; MESSAGE_BYTES]) {
+    for (i, o) in out.iter_mut().enumerate() {
+        let (a, b, c) = (votes[0][i], votes[1][i], votes[2][i]);
+        *o = (a & b) | (a & c) | (b & c);
+    }
+}
+
 /// `eq_mask`, for Bombe's timing test of the re-encryption check. Analysis
 /// builds only.
 #[cfg(feature = "analysis")]
@@ -359,9 +469,43 @@ trait DecapFault {
     fn accept_binding(&self, mask: u8) -> u8 {
         mask
     }
-    /// Whether to skip absorbing z into the rejection key (an XOF-state
-    /// fault that would make the rejection key independent of the secret).
-    fn skip_rejection_z(&self) -> bool {
+    /// Whether to skip absorbing z into rejection-key computation `which` (1
+    /// or 2): an XOF-state fault that makes that computation independent of
+    /// the secret.
+    fn skip_rejection_z(&self, _which: u8) -> bool {
+        false
+    }
+    /// The verdict that the rejection key's two computations agree.
+    fn infection_mask(&self, mask: u8) -> u8 {
+        mask
+    }
+    /// Whether to skip the rounding (+ q/4) of the coefficient decoded at
+    /// `step` of decryption pass `pass`: Pessl and Prokop's decoder fault.
+    fn skip_rounding(&self, _pass: u8, _step: usize) -> bool {
+        false
+    }
+    /// C - B'S as decryption pass `pass` computed it, before it is decoded:
+    /// a fault in that pass's arithmetic.
+    fn values(&self, _pass: u8, _values: &mut [u16]) {}
+    /// Whether to skip the vote and take the first pass's bits.
+    fn skip_vote(&self) -> bool {
+        false
+    }
+    /// Sees each pass's decoding order (tests of its randomness).
+    fn decode_order(&self, _pass: u8, _order: &[u8]) {}
+    /// Whether to take the operating system's randomness as failed, so the
+    /// orders rest on z and the count alone (tests of that fallback).
+    fn no_os_randomness(&self) -> bool {
+        false
+    }
+    /// The negative control of the decoder fault: one pass, in order, as
+    /// decapsulation decoded before the review of 2026-09-28.
+    fn unprotected_decoder(&self) -> bool {
+        false
+    }
+    /// The negative control of the rejection-key fault: one computation, no
+    /// infection, as before the review of 2026-09-28.
+    fn single_rejection_hash(&self) -> bool {
         false
     }
     /// The rejection key K-bar, after it is derived.
@@ -406,6 +550,9 @@ unsafe impl Zeroable for Secret {}
 pub struct DecapsulationKey {
     secret: SecretBox<Secret>,
     public: EncapsulationKey,
+    /// Decapsulations so far: part of each one's randomness, so no two share
+    /// their decoding orders even without operating-system randomness.
+    decapsulations: AtomicU64,
 }
 
 impl DecapsulationKey {
@@ -472,7 +619,7 @@ impl DecapsulationKey {
         bytes[..SEED_A_BYTES].copy_from_slice(&seed_a);
         lwe::pack(LOG_Q, &b[..], &mut bytes[SEED_A_BYTES..]);
         let public = EncapsulationKey::assemble(bytes, seed_a, b[..].into());
-        DecapsulationKey { secret, public }
+        DecapsulationKey { secret, public, decapsulations: AtomicU64::new(0) }
     }
 
     /// The pair-wise check. Never inlined, and its XOF is wiped in place:
@@ -500,6 +647,12 @@ impl DecapsulationKey {
     /// The seed: the one thing to store.
     pub fn seed(&self) -> &[u8; SEED_BYTES] {
         &self.secret.seed
+    }
+
+    /// The seed and the rejection secret z (the residue sweep).
+    #[cfg(test)]
+    pub(crate) fn secrets(&self) -> [[u8; 32]; 2] {
+        [self.secret.seed, self.secret.z]
     }
 
     /// Whether the operating system locked the secret's memory.
@@ -546,10 +699,20 @@ impl DecapsulationKey {
     /// - a bypass takes both runs' data (two correlated faults), or all
     ///   three verdicts (three).
     ///
-    /// Bombe's fault map checks each case; `tools/ct_check.py` checks that
-    /// the release build keeps the selections apart (it had fused them into
-    /// one mask, research/reviews/2026-09-28 R2). The cost is a second
-    /// re-encryption, decapsulation's main work done twice.
+    /// Two faults that need no bypass are handled before the check:
+    /// - the decryption runs three times in random orders and is voted
+    ///   (`decrypt_voted`), so one skipped rounding step, which told the sign
+    ///   of a noise coefficient (Pessl and Prokop), changes nothing;
+    /// - the rejection key is computed twice, and a disagreement infects it
+    ///   with a fresh unpredictable value (`infect`), so skipping z in one
+    ///   computation, which made it computable, gives an unpredictable key.
+    ///
+    /// Bombe's fault map checks each case against a control that runs the
+    /// code as it was before; `tools/ct_check.py` checks that the release
+    /// build keeps every redundant computation and verdict apart (it had
+    /// fused the selections into one mask, research/reviews/2026-09-28 R2).
+    /// The cost is a second re-encryption, decapsulation's main work done
+    /// twice; the three decryptions and the second rejection key add 4%.
     #[inline(never)]
     fn decapsulated_faulted(&self, ciphertext: &[u8], fault: &impl DecapFault) -> SecretBox<[u8; SHARED_KEY_BYTES]> {
         let (body, salt) = ciphertext.split_at(PKE_BYTES);
@@ -559,7 +722,12 @@ impl DecapsulationKey {
         lwe::unpack(LOG_Q, &body[..B_PRIME_BYTES], &mut received_bp);
         lwe::unpack(LOG_Q, &body[B_PRIME_BYTES..], &mut received_c);
         let mut w: SecretBox<Workspace> = SecretBox::zeroed();
-        lwe::decrypt(&PARAMS, &self.secret.s, &received_bp, &received_c, &mut w.mu);
+        // The decryption, fault-tolerant: three voted passes in random orders
+        // (`decrypt_voted`), with this decapsulation's own randomness.
+        let mut randomness = self.randomness(&mut w, fault);
+        self.decrypt_voted(&received_bp, &received_c, &mut randomness, &mut w, fault);
+        randomness.squeeze(&mut w.infection);
+        randomness.wipe();
         fault.message(&mut w.mu);
         self.public.derive_coins(salt, &mut w);
         fault.coins(&mut w.coins);
@@ -587,15 +755,17 @@ impl DecapsulationKey {
         // selections install the accepted one, so a skipped instruction or a
         // forced mask leaves it rejecting (the pqm4 fault attacks skipped the
         // final copy; forcing one comparison is the accept-mask fault).
+        // The rejection key, computed twice, independently: a fault that skips
+        // z in one computation makes the two disagree, and the result is then
+        // infected with a fresh unpredictable value (`infect`).
         let mut key: SecretBox<[u8; SHARED_KEY_BYTES]> = SecretBox::zeroed();
-        let mut h = SecretXof::new(REJECTION_KEY_LABEL);
-        if !fault.skip_rejection_z() {
-            h.absorb(&self.secret.z);
+        self.rejection_key(ciphertext, 1, fault, &mut key);
+        if !fault.single_rejection_hash() {
+            let Workspace { rejection2, infection, .. } = &mut *w;
+            self.rejection_key(ciphertext, 2, fault, rejection2);
+            let agree = fault.infection_mask(eq_mask(&key[..], &rejection2[..]));
+            infect(&mut key, infection, agree);
         }
-        h.absorb(&self.public.hash);
-        h.absorb(ciphertext);
-        h.squeeze(&mut key[..]);
-        h.wipe();
         fault.rejection_key(&mut key[..]);
         let Workspace { coins, key: accepted, tmp, .. } = &mut *w;
         bind_to_verdict(&mut coins[COIN_SEED_BYTES..], &key, accept_binding);
@@ -609,6 +779,88 @@ impl DecapsulationKey {
             select_into(&mut key, tmp, accept_coeffs);
         }
         key
+    }
+
+    /// This decapsulation's randomness, for the decoding orders and the
+    /// infection value: cSHAKE256 of z, a count of this key's decapsulations
+    /// and 32 bytes from the operating system. The OS bytes make every order
+    /// fresh, across processes too; should the OS give none, z and the count
+    /// still make each order unpredictable and different from the last.
+    fn randomness(&self, w: &mut Workspace, fault: &impl DecapFault) -> SecretXof {
+        let n = self.decapsulations.fetch_add(1, Ordering::Relaxed);
+        if fault.no_os_randomness() || random::os_random(&mut w.os_seed).is_err() {
+            w.os_seed.fill(0);
+        }
+        let mut x = SecretXof::new(DECODE_ORDER_LABEL);
+        x.absorb(&self.secret.z);
+        x.absorb(&n.to_le_bytes());
+        x.absorb(&w.os_seed);
+        w.os_seed.zeroize();
+        x
+    }
+
+    /// mu' = Decode(C - B'S), tolerating a fault (docs/16). Three passes, each
+    /// computing C - B'S afresh and decoding it in its own random order, and
+    /// each message bit by majority. A fault anywhere in one pass is outvoted
+    /// and changes nothing, whatever the key: the effective/ineffective oracle
+    /// of Pessl and Prokop (TCHES 2021(2)), a skipped rounding step whose
+    /// effect told the sign of one noise coefficient, gets no answer
+    /// (research/reviews/2026-09-28, decoder fault). The random orders hide
+    /// which coefficient a rounding step works on, so skipped roundings in
+    /// two passes meet on one coefficient only by chance (1 in 256), and with
+    /// the vote itself skipped the attacker still cannot tell which
+    /// coefficient it hit. C - B'S runs in a fixed order: two faults aimed at
+    /// one coefficient in two passes are the boundary (Bombe's fault map
+    /// measures it). The three passes are three separate calls, written out,
+    /// so the compiler cannot compute them once (`tools/ct_check.py` checks
+    /// the machine code).
+    #[inline(never)]
+    fn decrypt_voted(&self, bp: &[u16], c: &[u16], order_stream: &mut SecretXof, w: &mut Workspace, fault: &impl DecapFault) {
+        if fault.unprotected_decoder() {
+            lwe::decrypt_values(&PARAMS, &self.secret.s, bp, c, &mut w.values);
+            fault.values(0, &mut w.values);
+            for (i, o) in w.order.iter_mut().enumerate() {
+                *o = i as u8;
+            }
+            let Workspace { values, order, mu, .. } = w;
+            decode_in_order(values, order, mu, 0, fault);
+            return;
+        }
+        self.decode_pass(0, bp, c, order_stream, w, fault);
+        self.decode_pass(1, bp, c, order_stream, w, fault);
+        self.decode_pass(2, bp, c, order_stream, w, fault);
+        let Workspace { votes, mu, .. } = w;
+        if fault.skip_vote() {
+            mu.copy_from_slice(&votes[0]);
+        } else {
+            majority(votes, mu);
+        }
+    }
+
+    /// One pass of `decrypt_voted`: C - B'S, a fresh random order, the decode.
+    #[inline(never)]
+    fn decode_pass(&self, pass: u8, bp: &[u16], c: &[u16], order_stream: &mut SecretXof, w: &mut Workspace, fault: &impl DecapFault) {
+        let Workspace { values, order, votes, .. } = w;
+        lwe::decrypt_values(&PARAMS, &self.secret.s, bp, c, values);
+        fault.values(pass, values);
+        shuffle_order(order_stream, order);
+        fault.decode_order(pass, order);
+        decode_in_order(values, order, &mut votes[usize::from(pass)], pass, fault);
+    }
+
+    /// K-bar = cSHAKE256(z || H(pk) || c, "rejection key"), computation
+    /// `which` (1 or 2), into `out`. Never inlined: two calls stay two
+    /// computations.
+    #[inline(never)]
+    fn rejection_key(&self, ciphertext: &[u8], which: u8, fault: &impl DecapFault, out: &mut [u8; SHARED_KEY_BYTES]) {
+        let mut h = SecretXof::new(REJECTION_KEY_LABEL);
+        if !fault.skip_rejection_z(which) {
+            h.absorb(&self.secret.z);
+        }
+        h.absorb(&self.public.hash);
+        h.absorb(ciphertext);
+        h.squeeze(out);
+        h.wipe();
     }
 
     /// S. Analysis builds only.
@@ -740,8 +992,12 @@ pub enum FaultPoint {
     AcceptCoeffs,
     /// The third verdict, which binds the accepted key to the comparison.
     AcceptBinding,
-    /// Absorbing the secret z into the rejection key (skipped).
+    /// Absorbing the secret z into the rejection key's first computation (skipped).
     RejectionZ,
+    /// Absorbing z into its second computation (skipped).
+    RejectionZ2,
+    /// The verdict that the two computations agree.
+    Infection,
     /// The rejection key K-bar.
     RejectionKey,
     /// The accepted key K'.
@@ -771,11 +1027,26 @@ pub enum Fault {
     /// re-encryption (Intermediate1, Intermediate2): the coefficient-level
     /// fault that can force a re-encryption to match a chosen ciphertext.
     AddCoeff(FaultPoint, Matrix, usize, u16),
-    /// Force a verdict mask (AcceptBytes, AcceptCoeffs) to this value: 0xff
-    /// accepts, 0 rejects.
+    /// Force a verdict mask (AcceptBytes, AcceptCoeffs, AcceptBinding,
+    /// Infection) to this value: 0xff accepts (or agrees), 0 rejects.
     Verdict(FaultPoint, u8),
-    /// Skip a step (RejectionZ, Selection).
+    /// Skip a step (RejectionZ, RejectionZ2, Selection).
     Skip(FaultPoint),
+    /// Skip the rounding (+ q/4) at step `usize` of decryption pass `u8`
+    /// (Pessl and Prokop's decoder fault).
+    SkipRounding(u8, usize),
+    /// Add `u16` (mod q) to coefficient `usize` of C - B'S as decryption pass
+    /// `u8` computed it: a fault in that pass's arithmetic, which runs in a
+    /// fixed order. Adding -q/4 has the effect of skipping the rounding.
+    ShiftValue(u8, usize, u16),
+    /// Skip the vote: the first pass's bits become the message.
+    SkipVote,
+    /// Not a fault: decode as before the review of 2026-09-28 (one pass, in
+    /// order), the decoder fault's negative control.
+    UnprotectedDecoder,
+    /// Not a fault: one rejection-key computation, no infection, as before the
+    /// review of 2026-09-28, the rejection-key fault's negative control.
+    SingleRejectionHash,
 }
 
 #[cfg(feature = "analysis")]
@@ -843,8 +1114,32 @@ impl DecapFault for Faults<'_> {
     fn accept_binding(&self, mask: u8) -> u8 {
         self.verdict(FaultPoint::AcceptBinding, mask)
     }
-    fn skip_rejection_z(&self) -> bool {
-        self.skip(FaultPoint::RejectionZ)
+    fn skip_rejection_z(&self, which: u8) -> bool {
+        self.skip(if which == 1 { FaultPoint::RejectionZ } else { FaultPoint::RejectionZ2 })
+    }
+    fn infection_mask(&self, mask: u8) -> u8 {
+        self.verdict(FaultPoint::Infection, mask)
+    }
+    fn skip_rounding(&self, pass: u8, step: usize) -> bool {
+        self.0.iter().any(|f| matches!(*f, Fault::SkipRounding(p, s) if p == pass && s == step))
+    }
+    fn values(&self, pass: u8, values: &mut [u16]) {
+        for f in self.0 {
+            if let Fault::ShiftValue(p, j, d) = *f {
+                if p == pass {
+                    values[j] = values[j].wrapping_add(d) & PARAMS.q_mask();
+                }
+            }
+        }
+    }
+    fn skip_vote(&self) -> bool {
+        self.0.iter().any(|f| matches!(f, Fault::SkipVote))
+    }
+    fn unprotected_decoder(&self) -> bool {
+        self.0.iter().any(|f| matches!(f, Fault::UnprotectedDecoder))
+    }
+    fn single_rejection_hash(&self) -> bool {
+        self.0.iter().any(|f| matches!(f, Fault::SingleRejectionHash))
     }
     fn rejection_key(&self, key: &mut [u8]) {
         self.flip(FaultPoint::RejectionKey, key);
@@ -992,6 +1287,26 @@ mod tests {
             .expect("test thread");
     }
 
+    // A realistic workload stays in locked memory: four key pairs and an
+    // encapsulation and decapsulation with each. Under Windows' default
+    // limits the third key and every per-operation workspace after the
+    // second key used to go unlocked, unreported (research/reviews/
+    // 2026-09-28 R11); the working set now grows, and the process-wide count
+    // of unlocked secrets does not move.
+    #[test]
+    #[cfg(windows)]
+    fn a_realistic_workload_stays_locked_on_windows() {
+        let keys: Vec<DecapsulationKey> = (0..4u8).map(|i| DecapsulationKey::from_seed(&[i + 0x70; 32]).expect("consistent")).collect();
+        let unlocked_keys = keys.iter().filter(|k| !k.keys_locked()).count();
+        assert_eq!(unlocked_keys, 0, "{unlocked_keys} of 4 keys unlocked");
+        let before = crate::memory::unlocked_allocations();
+        for k in &keys {
+            let (ct, key) = k.encapsulation_key().encapsulate().expect("randomness");
+            assert_eq!(k.decapsulate(&ct).expect("length")[..], key[..]);
+        }
+        assert_eq!(crate::memory::unlocked_allocations(), before, "an operation's secret scratch went unlocked");
+    }
+
     // Single-bit faults in S that the one-ciphertext pair-wise check missed
     // (found by sampling 3,000 flips of seed [0x3c; 32], research/reviews/
     // 2026-09-28 R5): the pair-wise check alone still passes them (the
@@ -1008,6 +1323,120 @@ mod tests {
             assert!(dk.pair_consistent(), "control: the pair-wise check alone misses S[{entry}] bit {bit}");
             assert!(!lwe::check_key(&PARAMS, &dk.public.seed_a, &dk.secret.s, &dk.public.b), "S[{entry}] bit {bit} passed the key check");
             assert!(!dk.checks_pass(), "S[{entry}] bit {bit} passed");
+        }
+    }
+
+    // Every shuffled order is a permutation of the 256 positions, and where
+    // coefficient 0 lands is uniform: a chi-square test over 25,600 orders in
+    // 256 cells (a uniform shuffle exceeds 382 with probability 4e-7, the
+    // chi-square law with 255 degrees of freedom; a sorted, rotated or biased
+    // shuffle is far above it). A uniform permutation also leaves one
+    // coefficient in place on average (the count is Poisson(1), so 25,600
+    // orders give 25,600 +- 160): Sattolo's off-by-one, a classic shuffle bug
+    // that draws j below i instead of up to it, leaves none, and usually
+    // passes the chi-square test (its mean there is about 355).
+    #[test]
+    fn shuffled_orders_are_uniform_permutations() {
+        let mut stream = SecretXof::new("Turing-1026 v1 test");
+        stream.absorb(b"orders");
+        let mut order = [0u8; MBAR * NBAR];
+        let mut counts = [0u32; 256];
+        let mut fixed = 0usize;
+        let mut previous = [0u8; MBAR * NBAR];
+        for trial in 0..25_600 {
+            shuffle_order(&mut stream, &mut order);
+            let mut seen = [false; 256];
+            order.iter().for_each(|&x| seen[usize::from(x)] = true);
+            assert!(seen.iter().all(|&s| s), "not a permutation");
+            let where_0 = order.iter().position(|&x| x == 0).expect("present");
+            counts[where_0] += 1;
+            fixed += order.iter().enumerate().filter(|&(k, &x)| usize::from(x) == k).count();
+            assert!(trial == 0 || order != previous, "an order repeated");
+            previous = order;
+        }
+        let expected = 100.0;
+        let chi2: f64 = counts.iter().map(|&c| (f64::from(c) - expected).powi(2) / expected).sum();
+        assert!(chi2 < 382.0, "position of coefficient 0 not uniform: chi-square {chi2:.1}");
+        assert!((23_000..28_200).contains(&fixed), "{fixed} coefficients left in place in 25,600 orders, about 25,600 expected");
+    }
+
+    /// Records every decoding order a decapsulation uses, optionally with
+    /// the operating system's randomness taken as failed.
+    #[derive(Default)]
+    struct Orders(std::cell::RefCell<Vec<(u8, Vec<u8>)>>, bool);
+    impl DecapFault for Orders {
+        fn decode_order(&self, pass: u8, order: &[u8]) {
+            self.0.borrow_mut().push((pass, order.to_vec()));
+        }
+        fn no_os_randomness(&self) -> bool {
+            self.1
+        }
+    }
+
+    /// The three orders of one decapsulation of `ct` by `dk`.
+    fn orders_of(dk: &DecapsulationKey, ct: &[u8], without_os: bool) -> Vec<Vec<u8>> {
+        let o = Orders(Default::default(), without_os);
+        dk.decapsulated_faulted(ct, &o);
+        o.0.into_inner().into_iter().map(|(_, order)| order).collect()
+    }
+
+    // Each source of the orders' randomness is enough on its own. Without
+    // the operating system's bytes, the count still changes a key's orders
+    // from one decapsulation to the next, and z still makes two keys' first
+    // orders differ; with them, two copies of one key (the same z and count)
+    // still decode in different orders. The control shows the copies' orders
+    // are the same without the OS bytes, so the last check has teeth.
+    #[test]
+    fn each_source_of_the_orders_randomness_counts() {
+        let dk = DecapsulationKey::expanded(&[14; 32]);
+        let (ct, _) = dk.encapsulation_key().encapsulate_with(&[5; 32], &[6; 64]);
+        let (first, second) = (orders_of(&dk, &ct, true), orders_of(&dk, &ct, true));
+        assert_eq!(first.len(), 3, "three passes");
+        assert!(first.iter().zip(&second).all(|(x, y)| x != y), "without OS randomness the count must still change the orders");
+        let (a, b) = (DecapsulationKey::expanded(&[15; 32]), DecapsulationKey::expanded(&[16; 32]));
+        assert!(orders_of(&a, &ct, true).iter().zip(&orders_of(&b, &ct, true)).all(|(x, y)| x != y), "without OS randomness z must still make two keys' orders differ");
+        let (c1, c2) = (DecapsulationKey::expanded(&[17; 32]), DecapsulationKey::expanded(&[17; 32]));
+        assert!(orders_of(&c1, &ct, false).iter().zip(&orders_of(&c2, &ct, false)).all(|(x, y)| x != y), "two copies of one key must decode in different orders");
+        let (d1, d2) = (DecapsulationKey::expanded(&[18; 32]), DecapsulationKey::expanded(&[18; 32]));
+        assert_eq!(orders_of(&d1, &ct, true), orders_of(&d2, &ct, true), "control: without OS randomness two copies must agree");
+    }
+
+    // Each decapsulation decodes in three orders of its own: the passes differ
+    // from each other and from those of the same ciphertext's next
+    // decapsulation, and the voted result is the plain decryption.
+    #[test]
+    fn each_decapsulation_decodes_in_fresh_orders() {
+        let dk = key(12);
+        let (ct, k) = dk.encapsulation_key().encapsulate_with(&[3; 32], &[4; 64]);
+        let (first, second) = (Orders::default(), Orders::default());
+        assert_eq!(dk.decapsulated_faulted(&ct, &first)[..], k[..]);
+        assert_eq!(dk.decapsulated_faulted(&ct, &second)[..], k[..]);
+        let (a, b) = (first.0.into_inner(), second.0.into_inner());
+        assert_eq!(a.iter().map(|(p, _)| *p).collect::<Vec<_>>(), [0, 1, 2], "three passes");
+        assert!(a[0].1 != a[1].1 && a[1].1 != a[2].1 && a[0].1 != a[2].1, "passes share an order");
+        assert!(a.iter().zip(&b).all(|(x, y)| x.1 != y.1), "a ciphertext's next decapsulation reuses an order");
+    }
+
+    // The voted, shuffled decryption equals the plain one, for valid
+    // ciphertexts and for arbitrary ones (whose decoding is far from any
+    // message the key produced).
+    #[test]
+    fn voted_decryption_equals_plain_decryption() {
+        let dk = key(13);
+        let mut w: SecretBox<Workspace> = SecretBox::zeroed();
+        for trial in 0..6u8 {
+            let (mut ct, _) = dk.encapsulation_key().encapsulate_with(&[trial; 32], &[trial ^ 0x55; 64]);
+            if trial % 2 == 1 {
+                ct.iter_mut().enumerate().for_each(|(i, x)| *x = (i as u8).wrapping_mul(31).wrapping_add(trial));
+            }
+            let (mut bp, mut c) = (vec![0u16; MBAR * N], [0u16; MBAR * NBAR]);
+            lwe::unpack(LOG_Q, &ct[..B_PRIME_BYTES], &mut bp);
+            lwe::unpack(LOG_Q, &ct[B_PRIME_BYTES..PKE_BYTES], &mut c);
+            let mut plain = [0u8; MESSAGE_BYTES];
+            lwe::decrypt(&PARAMS, &dk.secret.s, &bp, &c, &mut plain);
+            let mut stream = dk.randomness(&mut w, &NoFault);
+            dk.decrypt_voted(&bp, &c, &mut stream, &mut w, &NoFault);
+            assert_eq!(w.mu, plain, "trial {trial}");
         }
     }
 

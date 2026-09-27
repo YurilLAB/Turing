@@ -39,7 +39,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PY = sys.executable
 PROFILES = ["quick", "full", "deep"]
 ITERS = {"quick": "1", "full": "5", "deep": "25"}
-MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7", "--review1", "--mlkem", "--review2"]
+MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7", "--review1", "--mlkem", "--review2", "--review3"]
 SIM = ROOT / "research" / "workfiles" / "sim"
 SIM_STATE, NOISE_STATE = str(SIM / "failures-state.json"), str(SIM / "noise-state.txt")
 
@@ -74,7 +74,9 @@ def stages(profile):
         ("math-audit", "quick", [], [PY, "tools/mathaudit.py"], 1200, False,
          "documented numbers recomputed independently; checks that cannot fail"),
         ("constant-time", "quick", [["CARGO_TARGET_DIR", "target/ci-release"]], [PY, "tools/ct_check.py"], 900, False,
-         "the release build's assembly divides no secret in the lattice code (KyberSlash class)"),
+         "the release build's assembly divides no secret in the lattice code (KyberSlash class) and keeps every redundant fault check"),
+        ("ct-self-test", "quick", [], [PY, "tools/ct_check.py", "--self-test"], 120, False,
+         "the assembly checker's own rules: each must fail on synthetic assembly with its bug"),
         ("noise", "quick", [t_rel], ["cargo", "run", "--release", "-p", "bombe", "--", "noise", "--state", NOISE_STATE], 1800, False,
          "real Turing-1026 ciphertexts' decryption error against docs/16's exact law, on every CPU thread"),
         ("simulate", "quick", [t_rel], [gpu_python(), "tools/simulate.py", "--state", SIM_STATE], 1800, False,

@@ -175,9 +175,16 @@ docs/14
   ciphertext checks, dudect on decapsulation and on the re-encryption
   comparison (with an early-exit control), key-generation faults, the
   memory scan and stack depths for the KEM.
+- `fault1026` (`bombe fault-map`): every fault of docs/16's model injected
+  into the real decapsulation code, through hooks that compile to nothing
+  in production, and each classified (bypass, validity oracle, denial of
+  service, no effect); each countermeasure sits beside a negative control
+  that runs the code as it was before it. Its decoder sweep tries a skipped
+  rounding at every step, and a fault in the arithmetic at every
+  coefficient, of every decryption pass.
 - `tools/asm_branches.py --divs`: division instructions in the release
   build (the KyberSlash class of leaks).
-- `tools/mutate.py --round7`: 20 planted bugs.
+- `tools/mutate.py --round7`: 22 planted bugs.
 
 ## Planned
 

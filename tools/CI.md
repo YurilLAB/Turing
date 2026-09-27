@@ -8,7 +8,7 @@ gap nobody sees.
 
 | Profile | Stages | Time (this machine, warm build) |
 |---|---|---|
-| `quick` (default) | release, overflow, production, robustness, math-audit, constant-time, noise, simulate | about 5 min |
+| `quick` (default) | release, overflow, production, robustness, math-audit, constant-time, ct-self-test, noise, simulate | about 5 min |
 | `full` | quick + math-audit-negative, noise-negative, simulate-negative, mlkem-million, mutation-patterns, campaign, linux-wsl | tens of minutes |
 | `deep` | full + campaign-deep, an hour's soak and every planted-bug set of `tools/mutate.py` | hours |
 
@@ -50,7 +50,19 @@ build users get (R1), because there `pair_consistent` was inlined into
 `from_seed`, above the stack burn. The residue tests (`no_sponge_state_is_
 left_on_the_stack`, `checked_calls_leave_no_checksum_point_behind`, ML-KEM's
 `entry_points_leave_no_secret_on_the_stack`) run here in that configuration;
-each has a planted-copy control, and each fails on the unfixed code.
+each has a planted-copy control, and each fails on the unfixed code. The
+review found those three leftovers one operation at a time, so the residue
+sweep (`every_public_operation_leaves_no_secret_on_the_stack`,
+`crates/turing/src/residue_sweep.rs`) now runs every public operation that
+handles a secret (30 of them: key setup and the checked calls of all three
+ciphers, the shielded key, `new_key`, Turing-1026 and ML-KEM end to end)
+and searches the stack each leaves for its keys, seeds, checksum points,
+shared keys and sponge states. Bombe's memory scans cover several of these
+operations, but only in the analysis build, since Bombe turns the feature
+on; the sweep also runs here, in the build where R1 showed. Removing the
+stack burn from `Turing::new`, `new_key`, `ShieldedKey::refresh`,
+Turing-1026 encapsulation or ML-KEM decapsulation fails it (`mutate.py
+--review3`).
 
 **constant-time** (`tools/ct_check.py`) reads the release build's machine
 code. No division in the lattice code (the KyberSlash class): `lwe` and
@@ -62,7 +74,29 @@ passed; now it fails in two functions). And Turing-1026 decapsulation keeps
 its verdicts apart: three masks derived separately, `select_into` called
 twice and `bind_to_verdict` once, both real functions. The release build had
 fused the two selections into one mask, a single-fault bypass (R2); run on
-that build, the check reports all three failed.
+that build, the check reports all three failed. The same rule covers every
+redundant computation the fault defences rely on, since each is one the
+optimiser could merge: two re-encryptions, the rejection key computed twice
+and `infect` called, three decryption passes each computing C - B'S and
+drawing its own order, and the vote; and the checked calls of all three
+ciphers keep their two key checks per direction. Inlining a decryption
+pass, the rejection key or the infection fails it (`mutate.py --review3`).
+
+**ct-self-test** (`ct_check.py --self-test`) runs the checker on synthetic
+assembly, a correct file and one broken file per rule (12 of them: fused
+selections, one verdict mask, the rejection key computed once, no
+infection, two decryption passes, no vote, one order for all passes, one
+C - B'S for all passes, a checked call's second key check merged away, a
+division, a decryption pass inlined, and the lattice module missing from
+the build as in R7). Each broken file must fail and the correct one must
+pass, so a rule that can no longer fail is caught without building
+anything. Weakening the count rule, or the division pattern to signed
+divisions only, fails it. The rules were also run on Linux-target
+assembly, which GitHub's audit job reads: Linux's position-independent
+code calls a `pub` function through the GOT (`callq *sym@GOTPCREL(%rip)`),
+which the first version of the call pattern missed, failing seven rules
+there while all passed on Windows. The pattern takes both forms now, and
+one synthetic file makes its call the Linux way.
 
 **robustness** (`crates/bombe/tests/robustness.rs`) checks the inputs that
 random tests almost never draw, each against the independent reference
@@ -106,6 +140,9 @@ code that shares nothing with the code that produced them:
 - A sensitivity control inside each check: the same computation with a
   plausible mistake (the noise one step narrower) must fall outside the
   tolerance, or the check is reported as too weak to catch it.
+- docs/16's count and list of Turing-1026's cSHAKE labels against the
+  labels the code defines (R13 found "nine" where the code had ten; the
+  decoder fix added an eleventh). The negative control plants a wrong count.
 - A lint for checks that cannot fail: `check(..., True, ...)` or `assert
   True` in Python helpers, and Rust tests with no assertion (tests
   documented as measurements are allowed). Its first run found two real
@@ -125,7 +162,7 @@ pq-crystals' `MLWE_security.py` use exp(-2 pi^2 tau^2), and the published
 tables come from the scripts; the audit follows the tables.
 
 **math-audit-negative** plants a wrong claimed value into every comparison
-of the audit and requires every one to be flagged: 38 of 38 are.
+of the audit and requires every one to be flagged: 41 of 41 are.
 
 **noise** (`bombe noise`, `crates/bombe/src/noise1026.rs`) measures the
 decryption error of real Turing-1026 ciphertexts at the real parameters.
@@ -210,9 +247,11 @@ each case's outputs in order, and it must first reproduce the sequential
 1,000,000-case hashes match CCTV's.
 
 **mutation-patterns** checks that every planted bug of every set of
-`tools/mutate.py` still matches the code it is meant to change (174 bugs
-in 11 sets; `--review2` holds the 17 of the 2026-09-28 review's fixes,
-three of them checked by `ct_check.py` instead of a test). `mutate.py --check` on its own checks only the default set,
+`tools/mutate.py` still matches the code it is meant to change (202 bugs
+in 12 sets; `--review2` holds the 17 of the 2026-09-28 review's fixes,
+three of them checked by `ct_check.py` instead of a test, and `--review3`
+the 28 of the decoder and rejection-key fixes and of the detectors added
+with them). `mutate.py --check` on its own checks only the default set,
 and that hid a real problem: on 2026-09-27, 21 planted bugs in six sets
 (among them six of Turing-1026's, such as "rejection key without z" and
 "salt left out of the coins", and ten of the memory and masking ones)
@@ -221,10 +260,23 @@ repository has `core.autocrlf=true`, so files that git writes (a checkout,
 a pull, a worktree) get `\r\n`, while the patterns are written with `\n`,
 and every multi-line pattern stopped matching. `mutate.py` now matches in
 the file's own line ending; after the fix all 133 match, and "rejection
-key without z" planted in a fresh worktree is caught by three tests.
+key without z" planted in a fresh worktree is caught by three tests. A
+name filter (`mutate.py --review3 NAME`) that matches no planted bug is an
+error: it used to print "all mutations caught" having run nothing, which
+hid a pattern that a mangled edit had never added.
 
 **campaign** runs `bombe attack`, which exits 1 when any finding fails. Its
-timing tests are sensitive to load: run it on a quiet machine.
+timing tests are sensitive to load: run it on a quiet machine. Its fault
+map of Turing-1026 decapsulation (`crates/bombe/src/fault1026.rs`) injects
+every fault of docs/16's model into the real decapsulation code, and each
+countermeasure has a negative control that runs the code as it was before:
+skipping z in the one rejection hash is a validity oracle, and in the real
+code takes two faults; skipping one rounding, or faulting one pass's
+arithmetic, leaks exactly the negative-noise coefficients in the one-pass
+decoder, and changes none of 768 in the real one; with the vote skipped,
+the random orders alone hide the coefficient. Its measured boundary, two
+faults aimed at one coefficient's arithmetic in two passes, is asserted
+too, so a change to it cannot pass unnoticed.
 
 **linux-wsl** builds the library for Linux on Windows and runs its tests
 inside WSL with `tools/wsl_linux.py`, which exercises the Linux-only code

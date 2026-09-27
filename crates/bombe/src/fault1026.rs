@@ -22,13 +22,31 @@
 //! comparison (cSHAKE256(c || k' xor K-bar) unless it accepts). No single
 //! fault on the check bypasses it, and forcing both selection verdicts no
 //! longer does either: the map finds a bypass only from both runs' data
-//! (two correlated faults) or all three verdicts (three). The one
-//! single-fault hole on the check left is skipping the secret z in the
-//! rejection hash (an XOF-state fault), which no amount of comparison
-//! redundancy can close; it needs redundant or masked hashing, noted as not
-//! done. The decoder is outside this map: a skipped `+ q/4` makes the
-//! decapsulation's success depend on the sign of one noise coefficient
-//! (Pessl and Prokop, TCHES 2021(2)), docs/16's fault model.
+//! (two correlated faults) or all three verdicts (three).
+//!
+//! Two single faults used to leak without any bypass, and are closed now:
+//! - skipping the secret z in the rejection hash (an XOF-state fault) made
+//!   the returned key computable, a validity oracle. The rejection key is now
+//!   computed twice and a disagreement infected with a fresh random value, so
+//!   it takes two faults (z skipped in both computations, or one skip and the
+//!   infection suppressed);
+//! - skipping the rounding (`+ q/4`) of one coefficient in the decoder made a
+//!   valid ciphertext's decapsulation succeed exactly when that coefficient's
+//!   noise was non-negative (Pessl and Prokop, TCHES 2021(2)): a key-dependent
+//!   effective/ineffective oracle. Decryption now runs three times, each pass
+//!   computing C - B'S afresh and decoding it in its own random order, and
+//!   every bit is voted, so one skipped rounding, or one fault in a pass's
+//!   arithmetic, changes nothing (`decoder_sweep` tries every step and every
+//!   coefficient of every pass).
+//!
+//! Both have negative controls here, the decapsulation as it was (one pass
+//! in order; one rejection hash), so the map shows each hole was real and is
+//! closed. The decoder's layers are also shown one at a time: with the vote
+//! skipped (a fault), the random order alone still hides which coefficient a
+//! skipped rounding hit. Its boundary is measured, not assumed: the
+//! arithmetic runs in a fixed order, so two faults aimed at one coefficient
+//! in two passes do outvote the third and leak its noise sign, the decoder's
+//! cheapest attack, as the check's cheapest bypass also takes two faults.
 //!
 //! This map runs the `Faults` compilation of decapsulation. The production
 //! one (`NoFault`) is compiled separately, and its release build once fused
@@ -238,8 +256,11 @@ pub fn map(seed: u8) -> Vec<MapEntry> {
     let force2 = Fault::AddCoeff(FaultPoint::Intermediate2, Matrix::C, s.fault_index, s.fault_delta);
     out.push(s.run("force the first re-encryption to match (coefficients)", vec![force1]));
     out.push(s.run("force the second re-encryption to match (coefficients)", vec![force2]));
-    // Skipping the secret z in the rejection hash (an XOF-state fault).
+    // Skipping the secret z in either rejection hash (an XOF-state fault):
+    // the two computations disagree and the key is infected (no oracle).
     out.push(s.run("skip absorbing z into the rejection key", vec![Fault::Skip(FaultPoint::RejectionZ)]));
+    out.push(s.run("skip absorbing z into the second rejection key", vec![Fault::Skip(FaultPoint::RejectionZ2)]));
+    out.push(s.run("force the rejection keys' agreement verdict", vec![Fault::Verdict(FaultPoint::Infection, 0xff)]));
     // Skipping the final selection (pqm4's skipped copy).
     out.push(s.run("skip the final masked selection", vec![Fault::Skip(FaultPoint::Selection)]));
     // Both selection verdicts forced: the accepted key is still bound to the
@@ -259,6 +280,20 @@ pub fn map(seed: u8) -> Vec<MapEntry> {
     out.push(s.run(
         "force the second re-encryption AND the byte verdict (two correlated faults)",
         vec![force2, Fault::Verdict(FaultPoint::AcceptBytes, 0xff)],
+    ));
+    // The rejection key's cheapest oracle: two faults.
+    out.push(s.run(
+        "skip z in BOTH rejection keys (two faults)",
+        vec![Fault::Skip(FaultPoint::RejectionZ), Fault::Skip(FaultPoint::RejectionZ2)],
+    ));
+    out.push(s.run(
+        "skip z AND force the agreement verdict (two faults)",
+        vec![Fault::Skip(FaultPoint::RejectionZ), Fault::Verdict(FaultPoint::Infection, 0xff)],
+    ));
+    // Negative control: one rejection hash, as before, and z skipped in it.
+    out.push(s.run(
+        "control: one rejection hash, z skipped (as before the fix)",
+        vec![Fault::SingleRejectionHash, Fault::Skip(FaultPoint::RejectionZ)],
     ));
     // The cheapest bypasses: both re-encryptions' data (two correlated
     // faults), or all three verdicts (three).
@@ -296,14 +331,36 @@ pub fn report(seed: u8) -> (String, bool) {
     let s = single_fault_summary(seed);
     let _ = writeln!(
         out,
-        "\n{} single faults bypass the check; {} give a validity oracle (skipping z in the rejection hash,\nwhich comparison redundancy cannot close). Forcing both selection verdicts {}; the cheapest\nbypass takes {} faults (both re-encryptions' data), forcing verdicts alone {}.",
+        "\n{} single faults bypass the check; {} give a validity oracle. Forcing both selection verdicts {};\nthe cheapest bypass takes {} faults (both re-encryptions' data), forcing verdicts alone {}; the\ncheapest validity oracle takes {} faults (z skipped in both rejection hashes).",
         s.bypasses,
         s.validity_oracles,
         if s.verdict_pair_bypasses { "BYPASSES" } else { "does not bypass (the key is bound to the comparison)" },
         s.cheapest_bypass,
-        if s.all_verdicts_bypass { "three" } else { "more than three" }
+        if s.all_verdicts_bypass { "three" } else { "more than three" },
+        s.cheapest_validity_oracle
     );
-    (out, s.bypasses == 0 && !s.verdict_pair_bypasses)
+    let d = decoder_sweep(seed);
+    let _ = writeln!(
+        out,
+        "\nDecoder (Pessl-Prokop): skipping the rounding of one coefficient changes {} of {} decapsulations\nof a valid ciphertext (every step of every pass). Control, one pass in order: {} of 256 steps\nchange it, exactly the {} coefficients whose noise is negative ({}). The same step in two passes:\n{} of 256 change it (the random orders meet by chance).",
+        d.protected_effective,
+        d.protected_tried,
+        d.unprotected_effective,
+        d.negative_noise,
+        if d.unprotected_matches_noise_sign { "a key-dependent oracle" } else { "NOT the noise signs" },
+        d.two_pass_effective
+    );
+    let _ = writeln!(
+        out,
+        "A fault in one pass's arithmetic (C - B'S shifted by -q/4 at one coefficient): {} of 768 change it\n(control: {}). With the vote skipped, one skipped rounding changes {} of 256, and {} of 256 outcomes\nfollow the noise signs by index (the random order alone hides the coefficient). The boundary: the\nsame coefficient's arithmetic faulted in two passes changes {} of 256, {}.",
+        d.arithmetic_effective,
+        if d.arithmetic_unprotected_matches_noise_sign { "exactly the negative-noise coefficients" } else { "NOT the noise signs" },
+        d.vote_skipped_effective,
+        d.vote_skipped_agreement,
+        d.arithmetic_two_pass_effective,
+        if d.arithmetic_two_pass_matches_noise_sign { "exactly the negative-noise ones: two aimed faults leak" } else { "not the noise signs" }
+    );
+    (out, s.bypasses == 0 && s.validity_oracles == 0 && !s.verdict_pair_bypasses && d.protected_effective == 0 && d.arithmetic_effective == 0)
 }
 
 fn severity(e: &MapEntry) -> u8 {
@@ -327,6 +384,8 @@ pub struct SingleFaultSummary {
     pub verdict_pair_bypasses: bool,
     pub cheapest_bypass: usize,
     pub all_verdicts_bypass: bool,
+    /// Fewest faults of any validity oracle, the negative control excluded.
+    pub cheapest_validity_oracle: usize,
 }
 
 pub fn single_fault_summary(seed: u8) -> SingleFaultSummary {
@@ -339,6 +398,107 @@ pub fn single_fault_summary(seed: u8) -> SingleFaultSummary {
         verdict_pair_bypasses: named("BOTH selection verdicts").on_invalid == Outcome::Bypass,
         cheapest_bypass: m.iter().filter(|e| e.on_invalid == Outcome::Bypass).map(|e| e.faults.len()).min().unwrap_or(usize::MAX),
         all_verdicts_bypass: named("ALL THREE verdicts").on_invalid == Outcome::Bypass,
+        cheapest_validity_oracle: m
+            .iter()
+            .filter(|e| e.on_invalid == Outcome::ValidityOracle && !e.name.starts_with("control"))
+            .map(|e| e.faults.len())
+            .min()
+            .unwrap_or(usize::MAX),
+    }
+}
+
+/// The decoder faults across every step and coefficient: what one skipped
+/// rounding, or one fault in a pass's arithmetic, does to a valid
+/// ciphertext's decapsulation, in the real code and in the negative control
+/// (one pass, in order, as before the review of 2026-09-28); the random
+/// order's contribution alone (the vote skipped); and the two-fault
+/// boundary.
+pub struct DecoderSweep {
+    /// Single skipped roundings tried (3 passes x 256 steps) and how many
+    /// changed the result.
+    pub protected_tried: usize,
+    pub protected_effective: usize,
+    /// The control: how many of the 256 steps changed the result, how many
+    /// coefficients have negative noise, and whether the changed steps are
+    /// exactly those (the key-dependent oracle Pessl and Prokop exploit).
+    pub unprotected_effective: usize,
+    pub negative_noise: usize,
+    pub unprotected_matches_noise_sign: bool,
+    /// The same step skipped in passes 0 and 1, for every step: how many of
+    /// the 256 changed the result (only when both orders put one coefficient
+    /// there, and its noise is negative).
+    pub two_pass_effective: usize,
+    /// One pass's arithmetic faulted (its C - B'S shifted by -q/4 at one
+    /// coefficient, the effect of a skipped rounding), for every coefficient
+    /// of every pass: how many changed the result; and in the control (one
+    /// pass, as before), whether the changed coefficients are exactly those
+    /// with negative noise.
+    pub arithmetic_effective: usize,
+    pub arithmetic_unprotected_matches_noise_sign: bool,
+    /// The same coefficient's arithmetic faulted in passes 0 and 1, for every
+    /// coefficient: the arithmetic runs in a fixed order, so both faults can
+    /// be aimed, and they outvote the third pass. How many changed the
+    /// result, and whether exactly the negative-noise ones (the decoder's
+    /// two-fault boundary).
+    pub arithmetic_two_pass_effective: usize,
+    pub arithmetic_two_pass_matches_noise_sign: bool,
+    /// The vote skipped and one rounding skipped in the first pass, for every
+    /// step: how many changed the result, and at how many steps the outcome
+    /// agrees with the sign of the coefficient of the same index (all 256 in
+    /// order, as in the control; about half, chance, in random orders).
+    pub vote_skipped_effective: usize,
+    pub vote_skipped_agreement: usize,
+}
+
+/// The noise e_j of each coefficient of a valid ciphertext: C - B'S minus
+/// the encoded message bit, centred, computed from the secret and the known
+/// message (what the attacker's inequalities are about).
+fn noise_of(dk: &DecapsulationKey, ct: &[u8], message: &[u8; 32]) -> Vec<i32> {
+    let (mut bp, mut c) = (vec![0u16; PARAMS.mbar * PARAMS.n], vec![0u16; PARAMS.mbar * PARAMS.nbar]);
+    lwe::unpack(15, &ct[..BP_BYTES], &mut bp);
+    lwe::unpack(15, &ct[BP_BYTES..PKE_BYTES], &mut c);
+    let mut values = vec![0u16; c.len()];
+    lwe::decrypt_values(&PARAMS, dk.secret_matrix(), &bp, &c, &mut values);
+    values
+        .iter()
+        .enumerate()
+        .map(|(j, &v)| {
+            let bit = u16::from((message[j / 8] >> (j % 8)) & 1);
+            let e = i32::from(v.wrapping_sub(bit << 14) & Q_MASK);
+            if e >= 1 << 14 { e - (1 << 15) } else { e }
+        })
+        .collect()
+}
+
+pub fn decoder_sweep(seed: u8) -> DecoderSweep {
+    let dk = DecapsulationKey::from_seed(&[seed; 32]).expect("consistent");
+    let message = [0x5c; 32];
+    let (ct, key) = dk.encapsulation_key().encapsulate_with(&message, &[0x3a; 64]);
+    let changed = |faults: &[Fault]| dk.decapsulate_with_faults(&ct, faults).expect("length")[..] != key[..];
+    let negative: Vec<bool> = noise_of(&dk, &ct, &message).iter().map(|&e| e < 0).collect();
+    // Which of the 256 indices (steps or coefficients) change the result.
+    let by_index = |faults: &dyn Fn(usize) -> Vec<Fault>| -> Vec<bool> { (0..256).map(|i| changed(&faults(i))).collect() };
+    let count = |v: &[bool]| v.iter().filter(|&&x| x).count();
+    // -q/4 mod q: shifting a value by it has the effect of skipping its rounding.
+    let down = (1u16 << 15) - (1 << 13);
+    let every_pass = |fault: &dyn Fn(u8, usize) -> Fault| (0..3u8).map(|pass| count(&by_index(&|i| vec![fault(pass, i)]))).sum::<usize>();
+    let effective = by_index(&|step| vec![Fault::UnprotectedDecoder, Fault::SkipRounding(0, step)]);
+    let arithmetic_unprotected = by_index(&|j| vec![Fault::UnprotectedDecoder, Fault::ShiftValue(0, j, down)]);
+    let arithmetic_two_pass = by_index(&|j| vec![Fault::ShiftValue(0, j, down), Fault::ShiftValue(1, j, down)]);
+    let vote_skipped = by_index(&|step| vec![Fault::SkipVote, Fault::SkipRounding(0, step)]);
+    DecoderSweep {
+        protected_tried: 3 * 256,
+        protected_effective: every_pass(&|pass, step| Fault::SkipRounding(pass, step)),
+        unprotected_effective: count(&effective),
+        negative_noise: count(&negative),
+        unprotected_matches_noise_sign: effective == negative,
+        two_pass_effective: count(&by_index(&|step| vec![Fault::SkipRounding(0, step), Fault::SkipRounding(1, step)])),
+        arithmetic_effective: every_pass(&|pass, j| Fault::ShiftValue(pass, j, down)),
+        arithmetic_unprotected_matches_noise_sign: arithmetic_unprotected == negative,
+        arithmetic_two_pass_effective: count(&arithmetic_two_pass),
+        arithmetic_two_pass_matches_noise_sign: arithmetic_two_pass == negative,
+        vote_skipped_effective: count(&vote_skipped),
+        vote_skipped_agreement: vote_skipped.iter().zip(&negative).filter(|(a, b)| a == b).count(),
     }
 }
 
@@ -400,20 +560,52 @@ mod tests {
         }
     }
 
-    // Skipping z in the rejection hash is a validity oracle: the returned key
-    // is the rejection key anyone can compute from the public key.
+    // Skipping z in one rejection hash no longer gives a validity oracle: the
+    // two computations disagree and the key is infected (denial of service).
+    // The control, one rejection hash as before the fix, still shows the
+    // oracle, so the test can tell. Two faults are needed now.
     #[test]
-    fn skipping_z_is_a_validity_oracle() {
+    fn skipping_z_is_no_longer_a_validity_oracle() {
         let m = map(3);
-        let z = m.iter().find(|e| e.name.contains("skip absorbing z")).expect("entry");
-        assert_eq!(z.on_invalid, Outcome::ValidityOracle);
+        let entry = |part: &str| m.iter().find(|e| e.name.contains(part)).expect("entry").on_invalid;
+        assert_eq!(entry("skip absorbing z into the rejection key"), Outcome::DenialOfService);
+        assert_eq!(entry("skip absorbing z into the second rejection key"), Outcome::DenialOfService);
+        assert_eq!(entry("force the rejection keys' agreement verdict"), Outcome::NoEffect);
+        assert_eq!(entry("control: one rejection hash, z skipped"), Outcome::ValidityOracle, "the control must show the oracle");
+        assert_eq!(entry("skip z in BOTH rejection keys"), Outcome::ValidityOracle);
+        assert_eq!(entry("skip z AND force the agreement verdict"), Outcome::ValidityOracle);
+    }
+
+    // The decoder fault (Pessl and Prokop): in the control (one pass, in
+    // order, as before the fix) skipping the rounding of coefficient j, or
+    // shifting its value by -q/4 in the arithmetic, changes a valid
+    // ciphertext's result exactly when e_j < 0, a key-dependent oracle. In
+    // the real code no single fault of either kind, at any step or
+    // coefficient of any pass, changes anything; the same step skipped in two
+    // passes rarely lands on one coefficient; and with the vote skipped, the
+    // random order alone still hides which coefficient a skipped rounding
+    // hit. The boundary: two faults aimed at one coefficient's arithmetic in
+    // two passes leak its noise sign (docs/16 states it).
+    #[test]
+    fn a_skipped_rounding_leaks_nothing() {
+        let d = decoder_sweep(5);
+        assert!(d.unprotected_matches_noise_sign, "control: the unprotected decoder must leak the noise signs");
+        assert!(d.arithmetic_unprotected_matches_noise_sign, "control: an arithmetic fault in the unprotected decoder must leak them too");
+        assert!(d.negative_noise > 0 && d.negative_noise < 256, "the control needs both signs");
+        assert_eq!(d.protected_effective, 0, "{} of {} single skipped roundings changed the result", d.protected_effective, d.protected_tried);
+        assert_eq!(d.arithmetic_effective, 0, "{} of 768 single arithmetic faults changed the result", d.arithmetic_effective);
+        assert!(d.two_pass_effective <= 8, "{} of 256 two-pass skips changed the result", d.two_pass_effective);
+        assert!(d.vote_skipped_effective >= 64, "the vote-skip fault must take effect ({} of 256)", d.vote_skipped_effective);
+        assert!(d.vote_skipped_agreement < 200, "with the vote skipped, {} of 256 outcomes follow the noise signs by index", d.vote_skipped_agreement);
+        assert!(d.arithmetic_two_pass_matches_noise_sign, "the two-fault boundary moved: docs/16 says two aimed arithmetic faults leak");
     }
 
     #[test]
     fn single_fault_count_is_reported() {
         let s = single_fault_summary(11);
         assert_eq!(s.bypasses, 0, "no single fault gives a full bypass");
-        assert_eq!(s.validity_oracles, 1, "only skipping z is a single-fault validity oracle");
+        assert_eq!(s.validity_oracles, 0, "no single fault gives a validity oracle");
+        assert_eq!(s.cheapest_validity_oracle, 2, "a validity oracle takes two faults");
         assert!(!s.verdict_pair_bypasses, "forcing both selection verdicts must not bypass");
         assert_eq!(s.cheapest_bypass, 2, "the cheapest bypass is both re-encryptions' data");
         assert!(s.all_verdicts_bypass, "three verdict faults do bypass");

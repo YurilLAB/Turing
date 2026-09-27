@@ -222,6 +222,15 @@ impl<const N: usize> RoundKeys<N> {
         (self.material.point, self.material.check)
     }
 
+    /// Every block of secret material: the round keys, the check and its
+    /// point (the residue sweep's needles).
+    #[cfg(test)]
+    pub(crate) fn secret_blocks(&self) -> Vec<Block> {
+        let mut all = self.material.keys.to_vec();
+        all.extend([self.material.check, self.material.point]);
+        all
+    }
+
     /// Bits of stored material that the integrity check reads: the round
     /// keys, the checksum and its point, 128 bits each.
     pub const STORED_BITS: usize = (N + 2) * 128;

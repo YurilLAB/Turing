@@ -190,10 +190,12 @@ of LP, which nobody has bounded (next point).
   default-fail selections and the accepted key bound to the comparison --
   has no single-fault bypass, and `tools/ct_check.py` checks that the
   release build keeps the verdicts apart (it once fused them, research/
-  reviews/2026-09-28 R2). Two single-fault holes remain: an XOF-state fault
-  on the rejection hash, which wants masking, and a skipped rounding step in
-  the decoder, whose effect reveals the sign of a noise coefficient (Pessl
-  and Prokop, TCHES 2021(2)), which wants shuffling or control-flow
-  integrity (docs/16).
+  reviews/2026-09-28 R2). The two single faults that used to leak without a
+  bypass are closed by redundancy: the rejection key is computed twice and
+  a disagreement infected (skipping z in it gave a validity oracle), and
+  decryption runs three times in random orders and is voted (a skipped
+  rounding step revealed the sign of a noise coefficient, Pessl and Prokop,
+  TCHES 2021(2)). Every leak the fault map finds now takes two correlated
+  faults (docs/16).
 - *The concrete lattice term.* No reduction gives a number for
   Adv^LWE; docs/16's attack-cost analysis does.

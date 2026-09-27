@@ -411,6 +411,15 @@ impl MaskedTuring {
         self.shares.locked()
     }
 
+    /// What must never appear unshared: each round key (the XOR of its two
+    /// shares), the checksum (likewise) and the point (the residue sweep).
+    #[cfg(test)]
+    pub(crate) fn secret_blocks(&self) -> Vec<Block> {
+        let mut all: Vec<Block> = (0..ROUND_KEYS).map(|r| xor(&self.shares.keys[0][r], &self.shares.keys[1][r])).collect();
+        all.extend([xor(&self.shares.check[0], &self.shares.check[1]), self.shares.point]);
+        all
+    }
+
     /// Whether the operating system left the key shares' memory out of core
     /// dumps (Linux and Android only; always false on Windows).
     pub fn keys_dump_excluded(&self) -> bool {

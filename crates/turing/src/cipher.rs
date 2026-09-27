@@ -157,6 +157,12 @@ impl Turing {
         self.keys.locked()
     }
 
+    /// The round keys, the check and its point (the residue sweep).
+    #[cfg(test)]
+    pub(crate) fn secret_blocks(&self) -> Vec<Block> {
+        self.keys.secret_blocks()
+    }
+
     /// Whether the operating system left the round keys' memory out of core
     /// dumps: MADV_DONTDUMP, on Linux and Android only; always false on
     /// Windows, whose full crash dumps include it (docs/13).

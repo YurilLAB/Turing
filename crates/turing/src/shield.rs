@@ -122,6 +122,15 @@ impl ShieldedKey {
         mask_into(&self.prekey, out);
     }
 
+    /// The mask and the key it shields (the residue sweep).
+    #[cfg(test)]
+    pub(crate) fn secrets(&self) -> [[u8; 32]; 2] {
+        let mut m = [0u8; 32];
+        mask_into(&self.prekey, &mut m);
+        let key = core::array::from_fn(|i| m[i] ^ self.shielded[i]);
+        [m, key]
+    }
+
     /// Whether the operating system locked both allocations.
     pub fn locked(&self) -> bool {
         self.prekey.locked() && self.shielded.locked()

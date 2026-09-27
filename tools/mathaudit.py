@@ -12,7 +12,9 @@ nothing with the code that produced them, and compares:
    #219), a proven Chernoff upper bound that must lie above each exact
    decryption-failure figure and close to it, and every key and ciphertext
    size recomputed from the parameters (and from the code's own constants).
-3. Arithmetic stated in docs/14 and docs/15.
+3. Arithmetic stated in docs/14 and docs/15, and docs/16's count and list
+   of Turing-1026's cSHAKE labels against the labels in the code (the review
+   of 2026-09-28 found "nine" where the code had ten, R13).
 4. A lint for checks that cannot fail: `check(..., True, ...)` and
    `assert True` in Python helpers, and Rust tests with no assertion.
 
@@ -244,6 +246,25 @@ def docs_arithmetic(rep, negative):
                 f"2^{lookups} / 2^{encryptions} = 2^{gap:.2f}, 7 x 16 = 2^{per_encryption:.2f}")
 
 
+NUMBER_WORDS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen".split())}
+
+
+def docs16_labels(rep, negative):
+    print("5b. docs/16's cSHAKE labels against the code")
+    code = read("crates/turing/src/turing1026.rs") + read("crates/turing/src/lwe.rs")
+    labels = sorted(set(re.findall(r'const \w+_LABEL: &str = "Turing-1026 v1 ([^"]+)";', code)))
+    d16 = read("docs/16-turing-1026.md")
+    claims = re.findall(r'under (\w+) "Turing-1026 v1 \.\.\." labels', d16) + re.findall(r'All (\w+) labels begin "Turing-1026 v1 "', d16)
+    if not claims:
+        rep.add("MOVED", "docs/16 label count", "not found")
+        return
+    for word in claims:
+        stated = NUMBER_WORDS.get(word.lower(), -1) + (1 if negative else 0)
+        rep.add("PASS" if stated == len(labels) else "FAIL", "docs/16 label count vs the code", f"docs/16 says {word}, the code defines {len(labels)}: {', '.join(labels)}")
+    missing = [l for l in labels + (["planted label"] if negative else []) if l not in d16]
+    rep.add("PASS" if not missing else "FAIL", "docs/16 names every label the code uses", f"missing: {', '.join(missing)}" if missing else f"all {len(labels)} named")
+
+
 # ---------------------------------------------------------------------------
 # Lint: checks that cannot fail.
 
@@ -340,6 +361,7 @@ def main():
         docs16_comparison_table(rep, args.negative_control)
         code_constants(rep, args.negative_control)
         docs_arithmetic(rep, args.negative_control)
+        docs16_labels(rep, args.negative_control)
         if not args.negative_control:
             lint(rep)
             lint_self_test(rep)

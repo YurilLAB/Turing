@@ -25,6 +25,9 @@ pub mod turing1026;
 pub mod turing256;
 pub mod xof;
 
+#[cfg(test)]
+mod residue_sweep;
+
 pub use cipher::{Block, FaultDetected, Turing};
 pub use masked::MaskedTuring;
 pub use random::RandomnessError;
