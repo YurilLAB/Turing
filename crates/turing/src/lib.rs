@@ -1,5 +1,7 @@
-//! Turing: an experimental 128-bit block cipher with a 256-bit key, and
-//! Turing-256, the same design on a 256-bit block (docs/15).
+//! Turing: an experimental 128-bit block cipher with a 256-bit key;
+//! Turing-256, the same design on a 256-bit block (docs/15); and
+//! Turing-1026, a post-quantum key-encapsulation mechanism on plain LWE in
+//! dimension 1026 whose shared keys are Turing keys (docs/16).
 //!
 //! EXPERIMENTAL. A new cipher is only trusted after years of public
 //! cryptanalysis. Do not use this to protect real data.
@@ -10,6 +12,7 @@ pub mod keyschedule;
 pub mod keyschedule256;
 pub mod linear;
 pub mod linear256;
+pub mod lwe;
 pub mod masked;
 pub mod memory;
 pub mod random;
@@ -17,6 +20,7 @@ pub mod sbox;
 pub mod selftest;
 pub mod shield;
 pub mod structure;
+pub mod turing1026;
 pub mod turing256;
 pub mod xof;
 
@@ -36,4 +40,6 @@ const _: () = {
     send_sync::<Turing256>();
     send_sync::<MaskedTuring>();
     send_sync::<ShieldedKey>();
+    send_sync::<turing1026::DecapsulationKey>();
+    send_sync::<turing1026::EncapsulationKey>();
 };

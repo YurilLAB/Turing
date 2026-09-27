@@ -63,6 +63,16 @@ itself is encrypted with the Turing cipher. The planned hybrid KEM, X-Wing
 (draft-connolly-cfrg-xwing-kem, version 10, March 2026). It is not an RFC,
 so the implementation must track the draft version it follows.
 
+Update (step 12): the owner decided that Turing's post-quantum part should
+be Turing's own rather than X-Wing. Turing-1026 (docs/16) keeps the lesson
+above by inventing no new structure: its hard problem is plain LWE (the one
+FrodoKEM rests on, with no ring or module), its encryption is the textbook
+Lindner-Peikert scheme and its chosen-ciphertext security comes from a
+published transform. What is Turing's own is the parameters, chosen with
+reproduced attack-cost and exact failure computations, the hashing, the
+combination of transform ingredients, and the implementation, each checked
+by Bombe. The risks that remain are listed in docs/16.
+
 Correction (review during step 7): an earlier version of this document said
 SIKE fell "in about an hour" and called both schemes finalists. The paper's
 own figure is about 10 minutes, and SIKE was a round-4 candidate, not a

@@ -7,6 +7,11 @@ build is read directly. Every conditional jump is printed with the
 instructions before it, so each one can be traced to a public loop counter,
 length or bounds check, or flagged as depending on data.
 
+With --divs, every division instruction is listed instead: x86 `div` and
+`idiv` take a time that depends on their operands, which is how KyberSlash
+(Bernstein et al., 2024) read Kyber's secret key out of its
+`(x * 2^d + q/2) / q`; lattice code must divide only public values.
+
 With --loads, every memory operand whose address has an index register,
 disp(base,index,scale), is listed instead: a table lookup indexed by secret
 data leaks its index through the cache (Bernstein's AES cache-timing attack,
@@ -18,6 +23,7 @@ script only lists; a person judges.
         encrypt_block decrypt_block Turing3new feistel_round inv8 sub8 \\
         apply16 apply_columns cshake256_secret
     python tools/asm_branches.py --loads target/release/deps/turing-<hash>.s ...
+    python tools/asm_branches.py --divs target/release/deps/turing-<hash>.s lwe turing1026
 
 Negative controls: an analysis build of the reference
 `linear::mix_columns_with` shows 21 jumps that test single bits of state
@@ -36,6 +42,9 @@ def main():
     loads = "--loads" in args
     if loads:
         args.remove("--loads")
+    divs = "--divs" in args
+    if divs:
+        args.remove("--divs")
     path, *wanted = args
     lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
     # Function labels are mangled Rust symbols at column 0 ending with ':'.
@@ -47,7 +56,10 @@ def main():
             continue
         body = lines[a + 1 : b]
         code = [l.strip() for l in body if l.strip() and not l.strip().startswith((".", "#"))]
-        if loads:
+        if divs:
+            hits = [i for i, l in enumerate(code) if re.match(r"^i?div[bwlq]?\s", l)]
+            print(f"=== {name}: {len(code)} instructions, {len(hits)} divisions")
+        elif loads:
             hits = [i for i, l in enumerate(code) if INDEXED.search(l) and not l.startswith("lea")]
             print(f"=== {name}: {len(code)} instructions, {len(hits)} indexed memory accesses")
         else:

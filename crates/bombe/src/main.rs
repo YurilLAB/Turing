@@ -11,7 +11,7 @@ Usage:
   bombe gen-linear [--turing-256] [--rust <OUT.rs>]
   bombe key-schedule
   bombe rounds [ROUNDS]
-  bombe vectors [--turing-256] [--out PATH]
+  bombe vectors [--turing-256 | --turing-1026] [--out PATH]
   bombe attack [--quick] [--deep] [--report PATH | --no-report]
   bombe trace [--key HEX] [--plaintext HEX] [--rounds N]
               [--flip-plaintext-bit N | --flip-key-bit N | --key2 HEX | --plaintext2 HEX]
@@ -351,6 +351,7 @@ fn run_attack(args: &[String]) -> Result<bool, String> {
 fn run_vectors(args: &[String]) -> Result<bool, String> {
     let (text, args) = match args.first().map(String::as_str) {
         Some("--turing-256") => (bombe::refcipher256::render_vectors(), &args[1..]),
+        Some("--turing-1026") => (bombe::refkem1026::render_vectors(), &args[1..]),
         _ => (bombe::refcipher::render_vectors(), args),
     };
     match args {
@@ -359,7 +360,7 @@ fn run_vectors(args: &[String]) -> Result<bool, String> {
             println!("Known-answer vectors written to {path}");
         }
         [] => print!("{text}"),
-        _ => return Err("usage: bombe vectors [--turing-256] [--out PATH]".into()),
+        _ => return Err("usage: bombe vectors [--turing-256 | --turing-1026] [--out PATH]".into()),
     }
     Ok(true)
 }

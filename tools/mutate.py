@@ -5,7 +5,7 @@ tests caught it and always restores the original file (and verifies it). A
 test run that exceeds the time limit has not passed either: it counts as
 caught, and the whole process tree is killed.
 
-    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6] [--check] [NAME ...]
+    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7] [--check] [NAME ...]
 
 --check only verifies that every pattern still matches the current code
 exactly once, without running any tests. NAME filters mutations by name.
@@ -407,6 +407,73 @@ MUTATIONS_ROUND6 = [
 ]
 
 
+MUTATIONS_ROUND7 = [
+    # Turing-1026, the KEM (docs/16)
+    ("turing-1026: rejection returns the decrypted key", "crates/turing/src/turing1026.rs",
+     "            *out ^= (*out ^ k) & accept;", "            *out = k;",
+     TURING),
+    ("turing-1026: re-encryption check skipped", "crates/turing/src/turing1026.rs",
+     "        let accept = eq_mask(&w.packed, body);", "        let accept = 0xffu8;",
+     TURING),
+    ("turing-1026: re-encryption compares B' only", "crates/turing/src/turing1026.rs",
+     "        let accept = eq_mask(&w.packed, body);", "        let accept = eq_mask(&w.packed[..B_PRIME_BYTES], &body[..B_PRIME_BYTES]);",
+     TURING),
+    ("turing-1026: rejection key without z", "crates/turing/src/turing1026.rs",
+     "        h.absorb(&self.secret.z);\n        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);",
+     "        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);",
+     ["-p", "bombe", "--release", "--test", "turing1026"]),
+    ("turing-1026: rejection key without H(pk)", "crates/turing/src/turing1026.rs",
+     "        h.absorb(&self.secret.z);\n        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);",
+     "        h.absorb(&self.secret.z);\n        h.absorb(ciphertext);",
+     ["-p", "bombe", "--release", "--test", "turing1026"]),
+    ("turing-1026: salt left out of the coins", "crates/turing/src/turing1026.rs",
+     "        g.absorb(&w.mu);\n        g.absorb(salt);", "        g.absorb(&w.mu);",
+     TURING),
+    ("turing-1026: H(pk) left out of the coins", "crates/turing/src/turing1026.rs",
+     "        g.absorb(&self.hash);\n        g.absorb(&w.mu);", "        g.absorb(&w.mu);",
+     TURING),
+    ("turing-1026: shared key ignores the ciphertext", "crates/turing/src/turing1026.rs",
+     "    h.absorb(ciphertext);\n    h.absorb(k);", "    h.absorb(k);",
+     TURING),
+    ("turing-1026: pair-wise check always passes", "crates/turing/src/turing1026.rs",
+     "        eq_mask(&key[..], &back[..]) == 0xff", "        eq_mask(&key[..], &back[..]) | 0xff == 0xff",
+     ["-p", "bombe", "--release", "--test", "turing1026", "faults"]),
+    ("turing-1026: workspace message not wiped", "crates/turing/src/turing1026.rs",
+     "        self.mu.zeroize();\n        self.coins.zeroize();", "        self.coins.zeroize();",
+     TURING),
+    ("lwe: noise skips a bit per sample", "crates/turing/src/lwe.rs",
+     "    let need = 2 * eta;", "    let need = 2 * eta + 1;",
+     TURING),
+    ("lwe: decoding rounds down", "crates/turing/src/lwe.rs",
+     "            let bit = ((x.wrapping_add(quarter) & mask) >> shift) as u8;", "            let bit = ((x & mask) >> shift) as u8;",
+     TURING),
+    ("lwe: packing drops each coefficient's top bit", "crates/turing/src/lwe.rs",
+     "        acc |= (u32::from(c) & mask) << bits;", "        acc |= (u32::from(c) & (mask >> 1)) << bits;",
+     TURING),
+    ("lwe: matrix rows ignore their index", "crates/turing/src/lwe.rs",
+     "    input[SEED_A_BYTES..].copy_from_slice(&(i as u16).to_le_bytes());", "    let _ = i;",
+     TURING),
+    ("xof: SecretXof pads like SHAKE", "crates/turing/src/xof.rs",
+     "            self.lanes[self.pos / 8] ^= 0x04 << (8 * (self.pos % 8));", "            self.lanes[self.pos / 8] ^= 0x1f << (8 * (self.pos % 8));",
+     TURING),
+    # The analysis behind it
+    ("dfr: n products instead of 2n", "crates/bombe/src/dfr.rs",
+     "    chi.product(chi).power(2 * n).conv(chi)", "    chi.product(chi).power(n).conv(chi)",
+     BOMBE_LIB + ["dfr"]),
+    ("coresvp: Chen's delta with the wrong exponent", "crates/bombe/src/coresvp.rs",
+     ".powf(1.0 / (2.0 * b - 2.0))", ".powf(1.0 / (2.0 * b - 1.0))",
+     BOMBE_LIB + ["coresvp"]),
+    ("lattice: LLL skips size reduction", "crates/bombe/src/lattice.rs",
+     "            let r = mu[k][j].round();", "            let r = 0.0 * mu[k][j].round();",
+     BOMBE_LIB + ["lattice"]),
+    ("lattice: enumeration tries one sign everywhere", "crates/bombe/src/lattice.rs",
+     "                if top && xi < 0 {", "                if xi < 0 {",
+     BOMBE_LIB + ["lattice"]),
+    ("reference 1026: decoding window shifted", "crates/bombe/src/refkem1026.rs",
+     "            if (q / 4..3 * q / 4).contains(&x) {", "            if (q / 4 + 64..3 * q / 4 + 64).contains(&x) {",
+     ["-p", "bombe", "--release", "--test", "turing1026"]),
+]
+
 def kill_tree(p):
     """Kills cargo and the test binary it started."""
     if os.name == "nt":
@@ -437,7 +504,7 @@ def run(args):
 
 
 def main():
-    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6}
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7}
     check_only = "--check" in sys.argv
     only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
     mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)

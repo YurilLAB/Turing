@@ -12,6 +12,11 @@ this folder holds the sources behind them.
 - `notes/derivations.md`: the short proofs behind Bombe's predictions (exact
   boomerang and differential-linear rates, the symmetry argument, the
   provable-bound windows, and others).
+- `notes/pq/` and `scripts/pq/`: the post-quantum research (lattices,
+  attack costs, decryption failures, transforms, side channels), with the
+  scripts that reproduce its numbers; `scripts/pq/t1026_*.py` compute
+  Turing-1026's parameter search, per-key failure rates and
+  lattice-estimator runs (docs/16).
 - `scripts/`: research helpers:
   - `pdfgrep.py`: keyword windows in a PDF;
   - `decode_glyph_pdf.py`: old TeX Type-3 PDFs whose text extracts as
@@ -19,8 +24,9 @@ this folder holds the sources behind them.
   - `boomerang_exact.py`, `boomerang_predict.py`: the 2-round boomerang rate,
     exact and naive.
 - Tools whose results the docs cite are in `tools/`:
-  - `asm_branches.py`: conditional jumps in the release assembly, and with
-    `--loads` indexed memory accesses (table lookups);
+  - `asm_branches.py`: conditional jumps in the release assembly, with
+    `--loads` indexed memory accesses (table lookups), and with `--divs`
+    division instructions;
   - `mutate.py`: planted-bug checks, `--step8`, `--step9`, `--round3`,
     `--round4` and the default set;
   - `wsl_linux.py`: builds for Linux on Windows and runs the tests in WSL.

@@ -303,7 +303,12 @@ pub fn round_keys_found_in_their_page() -> (usize, usize) {
 pub fn stack_depths() -> Vec<(&'static str, usize)> {
     let key = [7u8; 32];
     let prekey = vec![9u8; turing::shield::PREKEY_BYTES];
+    let dk = turing::turing1026::DecapsulationKey::from_seed(&key).expect("consistent");
+    let (ct, _) = dk.encapsulation_key().encapsulate_with_no_burn(&[1; 32], &[2; 64]);
     vec![
+        ("Turing-1026 key generation", memscan::stack_depth(|| drop(turing::turing1026::DecapsulationKey::from_seed_without_stack_burn(&key)))),
+        ("Turing-1026 encapsulation", memscan::stack_depth(|| drop(dk.encapsulation_key().encapsulate_with_no_burn(&[1; 32], &[2; 64])))),
+        ("Turing-1026 decapsulation", memscan::stack_depth(|| drop(dk.decapsulate_no_burn(&ct)))),
         ("key schedule (keyschedule::expand)", memscan::stack_depth(|| drop(turing::keyschedule::expand::<ROUND_KEYS>(&key)))),
         (
             "Turing-256 key schedule (keyschedule256::expand)",
@@ -391,4 +396,85 @@ fn secrets256() -> Secrets {
     }
     let round_keys = first..needles.secrets();
     Secrets { key, needles, round_keys }
+}
+
+/// Turing-1026 (docs/16): the seed (from `random::new_key`), everything its
+/// key generation derives that is never meant to be stored (the noise seed),
+/// the stored rejection secret z, and for one encapsulation with a known
+/// message: the message, the coins' seed, k and the shared key; and the
+/// rejection key of a tampered ciphertext. S itself is left out: its 8-byte
+/// fragments hold about 14 bits each, too few to tell a copy from chance.
+/// Allowed: the caller's seed and message buffers, the decapsulation key's
+/// own locked memory while it lives, and the keys the caller holds.
+pub fn kem1026(burn: bool) -> Vec<Snapshot> {
+    use turing::turing1026::DecapsulationKey;
+    let seed = random::new_key().expect("OS randomness");
+    let mu = random::new_key().expect("OS randomness");
+    let salt = [0x33u8; 64];
+    let mut needles = Needles::new();
+    needles.add("seed", &seed[..]);
+    let mut derived: SecretBox<[u8; 96]> = SecretBox::zeroed();
+    xof::cshake256_secret("Turing-1026 v1 key generation", &seed[..], &mut derived[..]);
+    needles.add("noise seed", &derived[32..64]);
+    needles.add("rejection secret z", &derived[64..]);
+    needles.add("message", &mu[..]);
+    let check = DecapsulationKey::from_seed(&seed).expect("consistent");
+    let mut pk_hash = [0u8; 32];
+    sha3::digest::XofReader::read(&mut xof::cshake256("Turing-1026 v1 public key", check.encapsulation_key().as_bytes()), &mut pk_hash);
+    let mut coins: SecretBox<[u8; 96]> = SecretBox::zeroed();
+    let mut input: SecretBox<[u8; 128]> = SecretBox::zeroed();
+    input[..32].copy_from_slice(&pk_hash);
+    input[32..64].copy_from_slice(&mu[..]);
+    input[64..].copy_from_slice(&salt);
+    xof::cshake256_secret("Turing-1026 v1 coins", &input[..], &mut coins[..]);
+    drop(input);
+    needles.add("coin seed", &coins[..64]);
+    needles.add("k", &coins[64..]);
+    let (ct, key) = check.encapsulation_key().encapsulate_with(&mu, &salt);
+    needles.add("shared key", &key[..]);
+    let mut bad = ct.clone();
+    bad[100] ^= 1;
+    let rejected = check.decapsulate(&bad).expect("length");
+    needles.add("rejection key", &rejected[..]);
+    drop((check, key, rejected, derived, coins));
+    burn_stack();
+    let s = Secrets { key: seed, needles, round_keys: 0..0 };
+    let (secret_at, held_at) = (AtomicUsize::new(0), [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let names = if burn {
+        ["Turing-1026 key from its seed, scanned at once", "then an encapsulation and two decapsulations", "after everything is dropped"]
+    } else {
+        ["Turing-1026 key without the stack burn, scanned at once", "then encapsulation and decapsulations", "after drop"]
+    };
+    let mu_range = (mu.as_ptr() as usize, 32);
+    memscan::run_parked(
+        |p: &Parker| {
+            let dk = if burn { DecapsulationKey::from_seed(&s.key).expect("consistent") } else { DecapsulationKey::from_seed_without_stack_burn(&s.key) };
+            secret_at.store(dk.secret_memory().0, Ordering::Release);
+            p.park(1);
+            let (ct, key) = dk.encapsulation_key().encapsulate_with(&mu, &salt);
+            let back = dk.decapsulate(&ct).expect("length");
+            let mut bad = ct.clone();
+            bad[100] ^= 1;
+            let rejected = dk.decapsulate(&bad).expect("length");
+            for (slot, k) in held_at.iter().zip([&key, &back, &rejected]) {
+                slot.store(k.as_ptr() as usize, Ordering::Release);
+            }
+            p.park(2);
+            drop((dk, key, back, rejected));
+            p.park(3);
+        },
+        3,
+        |step, stack| {
+            let scan = memscan::scan(&s.needles);
+            let mut allowed = vec![key_range(&s), mu_range];
+            if step < 3 {
+                let at = secret_at.load(Ordering::Acquire);
+                allowed.push((at, core::mem::size_of::<[u16; 1026 * 32]>() + 64));
+            }
+            if step == 2 {
+                allowed.extend(held_at.iter().map(|a| page_of(a.load(Ordering::Acquire))));
+            }
+            snapshot(names[step - 1], &s, &scan, &allowed, stack)
+        },
+    )
 }

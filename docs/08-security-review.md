@@ -150,6 +150,18 @@ Beierle et al. citations, the biclique complexity (2^254.4).
 | 6 | Doc 10 | "The best attack breaks 3 rounds" and "division property not covered" | Accuracy | The division property predicts, and a 2^32-plaintext run confirms, a 4-round key recovery; doc 10 now points to doc 11 |
 | 7 | New structured square attack | With two fixed sets, a correct attack is reported as failed about 6% of the time (a wrong key byte guess survives both sets with probability 2^-16) | Tooling | Adds sets until every byte is unique |
 
+## Review 9 (step 12, Turing-1026): problems found while building it
+
+| # | Where | Problem | Severity | Fix |
+|---|---|---|---|---|
+| 1 | Campaign timing test of the re-encryption check | The first harness compared the fixed class's buffer with itself (|t| 113); the second always changed byte 0, the first byte the comparison reads, just before it (|t| 91). Both measured the harness, not the check | Tooling (a false alarm, but a harness that can raise false alarms can also hide leaks) | Both classes now copy the buffer and change a byte at a position from their own generator; the check measures |t| about 2, and an early-exit comparison put through the same harness is caught (|t| above 400) |
+| 2 | `lwe` loops | `chunks_exact` with run-time sizes compiled to `div` instructions on public slice lengths: harmless, but they made the new division scan unreadable | Latent | Rows sliced by multiplying indices; the scan reads zero divisions in the lattice code |
+| 3 | research `acs_sage_shim` | Under mpmath 1.4.1 the estimator's dual, BKW and hybrid attacks die with RecursionError, and its validation reproduces 8 of 10 published outputs | Tooling (research) | Run with mpmath 1.3.0 (10 of 10); recorded in `t1026_estimator.py` |
+| 4 | `lattice::enumerate` test | A planted bug that tries one sign of every coefficient passed: on small LLL-reduced bases the shortest vector happened to have coefficients of one sign | Test gap | A basis whose shortest vector needs both signs |
+| 5 | Campaign, quick run | The Monte-Carlo failure check at the small CBD(3) set expected only 40 failures, below the 100 it requires | Tooling | Enough trials for about 170 expected failures even in a quick run |
+| 6 | Campaign, success condition at small n | The check required BKZ-10 to fail at n = 90, one run's outcome; n = 90 is at BKZ-10's predicted limit (89-91), and the next key fell to it | Tooling | Every observed break is checked against the condition within 5 dimensions |
+| 7 | Campaign timing, Turing-256 | A full run with a clippy build running alongside measured Turing-256 encryption at |t| 5.86; the assembly was unchanged (one loop jump), three idle reruns gave 1.1-2.1 and the next idle campaign 1.4 | Method | Timing results count only from runs on an otherwise idle machine |
+
 ## Review 8 (step 11, Turing-256): problems found while building it
 
 | # | Where | Problem | Severity | Fix |

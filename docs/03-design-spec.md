@@ -8,13 +8,15 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 - Symmetric cipher designed from scratch, written in Rust.
 - 256-bit key (quantum margin: ~128-bit security against Grover).
 - Substitution-permutation network (SPN).
-- Hybrid public-key encryption from the start, built on vetted post-quantum
-  primitives. Only the data cipher is ours.
-- Hybrid KEM: **X-Wing** (X25519 + ML-KEM-768 with its SHA3-256 combiner,
-  specified in the IETF CFRG Internet-Draft draft-connolly-cfrg-xwing-kem;
-  version 10, March 2026, not yet an RFC). ML-KEM-768 is NIST category 3;
-  X25519 guards against a future break of ML-KEM. We do not hand-build the
-  combiner.
+- Post-quantum public-key encryption from the start. **Changed in step 12
+  (owner's decision): the KEM is Turing's own, Turing-1026 (docs/16)**, on
+  the standard plain-LWE problem with our parameters, hashing, transform and
+  implementation; the data cipher is Turing or Turing-256. The earlier plan
+  kept only the data cipher ours and used X-Wing (X25519 + ML-KEM-768 with
+  its SHA3-256 combiner, draft-connolly-cfrg-xwing-kem, not yet an RFC),
+  where X25519 guards against a future break of the lattice part.
+  Turing-1026 has no such second, non-lattice partner yet (docs/16, "What is
+  not done").
 - Sender signatures (ML-DSA): **later**, after file encryption works end to
   end. The file format reserves space for them (versioned header).
 - Constants and key-derived values: **cSHAKE256** (NIST SP 800-185) with the
@@ -87,15 +89,16 @@ constants that turned out to enable a backdoor.
 
 The header carries one or more **stanzas**, each able to unlock the file key:
 
-- **Recipient stanza**: post-quantum hybrid KEM (X25519 + ML-KEM). An attacker
-  must break *both* to recover the key. The two shared secrets are combined
-  by a vetted combiner that also binds the ciphertexts and public keys.
+- **Recipient stanza**: Turing-1026 (docs/16), whose shared key is derived
+  from the whole ciphertext and, through its coins, the recipient's public
+  key. (The earlier plan was a hybrid KEM, X25519 + ML-KEM, under a vetted
+  combiner, so that an attacker had to break both; a second, non-lattice
+  KEM beside Turing-1026 would restore that property.)
 - **Password stanza**: Argon2id (memory-hard; slows GPU guessing) with a random
   salt and stored parameters.
 
 The file key is wrapped under the stanza's key-encryption key with the Turing
 AEAD.
 
-Crates (versions verified in step 9): an X-Wing implementation (or `ml-kem`
-+ `x25519-dalek` combined exactly per the X-Wing spec), `argon2`, `sha3`,
-`getrandom`.
+Crates (versions verified in step 9): `argon2`, `sha3`, `getrandom`; the
+KEM is Turing-1026, in the turing crate.

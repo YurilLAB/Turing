@@ -33,6 +33,7 @@ use zeroize::Zeroize;
 /// Implement only for such types.
 pub unsafe trait Zeroable: Zeroize {}
 unsafe impl Zeroable for u8 {}
+unsafe impl Zeroable for u16 {}
 unsafe impl Zeroable for u64 {}
 unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] where [T; N]: Zeroize {}
 

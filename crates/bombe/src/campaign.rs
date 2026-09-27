@@ -18,6 +18,7 @@ use crate::{
 use std::fmt::Write;
 use std::time::Instant;
 use turing::structure::{Layer, ROUNDS};
+use turing::turing1026::{DecapsulationKey, EncapsulationKey};
 use turing::{MaskedTuring, ShieldedKey, Turing, Turing256};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1343,6 +1344,255 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         format!(
             "usable trails 3 rounds, impossible differentials 4, integral 5 (2^248 texts); the docs/09 rule gives 5 + 4 = 9. On paper the integral with partial sums reaches 7 rounds for about 2^251; a whole round key is 256 bits, so guessing one costs as much as the key. {} rounds in the cipher",
             turing::turing256::ROUNDS
+        ),
+        Verdict::Info,
+    );
+
+    // --- Turing-1026 --------------------------------------------------------------------
+    let s = "25. Turing-1026: post-quantum key encapsulation on plain LWE (docs/16)";
+    let mut rng = Rng::new("campaign turing-1026");
+    let seeds = scale(3, 1);
+    let mut mismatches = 0;
+    for _ in 0..seeds {
+        let seed: [u8; 32] = rng.bytes();
+        let dk = DecapsulationKey::from_seed(&seed).expect("consistent");
+        let r = crate::refkem1026::ReferenceKem::from_seed(&seed);
+        let (mu, salt): ([u8; 32], [u8; 64]) = (rng.bytes(), rng.bytes());
+        let (ct, key) = dk.encapsulation_key().encapsulate_with(&mu, &salt);
+        let (rct, rkey) = r.encapsulate(&mu, &salt);
+        let mut bad = ct.clone();
+        bad[rng.below(ct.len() as u64) as usize] ^= 1 << rng.below(8);
+        let same = dk.encapsulation_key().as_bytes() == &r.public_key[..]
+            && ct == rct
+            && key[..] == rkey
+            && dk.decapsulate(&ct).expect("length")[..] == rkey
+            && Some(<[u8; 32]>::try_from(&dk.decapsulate(&bad).expect("length")[..]).expect("32")) == r.decapsulate(&bad);
+        mismatches += usize::from(!same);
+    }
+    log.add(
+        s,
+        "matches its independent reference",
+        format!("{seeds} random seeds: public key, ciphertext, shared key, decapsulation and a tampered ciphertext's rejection key; {mismatches} mismatches"),
+        pass_if(mismatches == 0),
+    );
+    let vectors = crate::refkem1026::known_answer_vectors();
+    let kat_ok = vectors.iter().all(|v| {
+        let dk = DecapsulationKey::from_seed(&v.seed).expect("consistent");
+        let (ct, key) = dk.encapsulation_key().encapsulate_with(&v.message, &v.salt);
+        crate::refkem1026::sha3_256(dk.encapsulation_key().as_bytes()) == v.public_key_sha3 && crate::refkem1026::sha3_256(&ct) == v.ciphertext_sha3 && key[..] == v.shared_key
+    });
+    log.add(s, "known-answer vectors (vectors/turing-1026-v1.txt)", format!("{} of {} reproduced; turing::self_test checks vector 2: {:?}", if kat_ok { vectors.len() } else { 0 }, vectors.len(), turing::self_test()), pass_if(kat_ok && turing::self_test().is_ok()));
+    let timer = Instant::now();
+    let dk = DecapsulationKey::from_seed(&[0x5a; 32]).expect("consistent");
+    let keygen = timer.elapsed().as_secs_f64();
+    let reps = scale(20, 5);
+    let timer = Instant::now();
+    let cts: Vec<_> = (0..reps).map(|_| dk.encapsulation_key().encapsulate().expect("OS randomness")).collect();
+    let encaps = timer.elapsed().as_secs_f64() / reps as f64;
+    let timer = Instant::now();
+    let all_back = cts.iter().all(|(ct, k)| dk.decapsulate(ct).expect("length")[..] == k[..]);
+    let decaps = timer.elapsed().as_secs_f64() / reps as f64;
+    log.add(
+        s,
+        "sizes and speed",
+        format!(
+            "public key {} bytes, ciphertext {} bytes, secret key a 32-byte seed; key generation {:.0} ms (with its pair-wise check), encapsulation {:.1} ms, decapsulation {:.1} ms",
+            turing::turing1026::PUBLIC_KEY_BYTES,
+            turing::turing1026::CIPHERTEXT_BYTES,
+            keygen * 1e3,
+            encaps * 1e3,
+            decaps * 1e3
+        ),
+        pass_if(all_back),
+    );
+    let rows = crate::coresvp::published();
+    let reproduced = rows.iter().filter(|r| crate::coresvp::estimate(&r.lwe, r.conv).is_some_and(|e| crate::coresvp::reproduces(r, &e))).count();
+    log.add(
+        s,
+        "core-SVP model against published tables",
+        format!("{reproduced} of {} rows reproduced (FrodoKEM round 3 Table 10, NewHope round 2 Table 12, ADPS16 Table 1), block sizes included", rows.len()),
+        pass_if(reproduced == rows.len()),
+    );
+    let mut weakest = f64::INFINITY;
+    for (name, lwe) in crate::coresvp::turing_1026() {
+        let e = crate::coresvp::estimate(&lwe, crate::coresvp::Convention::NewHope).expect("an attack");
+        let f = crate::coresvp::estimate(&lwe, crate::coresvp::Convention::Frodo).expect("an attack");
+        weakest = weakest.min(e.classical());
+        log.add(
+            s,
+            format!("lattice attacks, {name}"),
+            format!(
+                "primal BKZ-{}: 2^{:.1} classical, 2^{:.1} quantum; dual 2^{:.1} / 2^{:.1} (core-SVP; FrodoKEM's convention adds log2 b: 2^{:.1})",
+                e.primal.b,
+                e.primal_cost[0],
+                e.primal_cost[1],
+                e.dual_cost[0],
+                e.dual_cost[1],
+                f.classical()
+            ),
+            pass_if(e.classical() >= 250.0 && e.quantum() >= 225.0),
+        );
+    }
+    let frodo_ok = crate::dfr::FRODO.iter().all(|&(_, n, lq, b, table, published)| (crate::dfr::frodo_rate(n, lq, b, table).message_symmetric - published).abs() < 0.05);
+    log.add(s, "exact failure computation against FrodoKEM", format!("round-3 Table 2 rates (2^-138.7, 2^-199.6, 2^-252.5) {}", if frodo_ok { "reproduced to 0.05 bit" } else { "NOT reproduced" }), pass_if(frodo_ok));
+    let rate = crate::dfr::turing_1026_rate();
+    log.add(
+        s,
+        "decryption-failure probability",
+        format!(
+            "2^{:.2} per ciphertext (union bound over 256 coefficients of 2^{:.2}; error standard deviation {:.1}, window q/4 = 8192), below 2^-{:.1}, the weakest attack",
+            rate.message, rate.per_coefficient, rate.sd, weakest
+        ),
+        pass_if(rate.message <= -weakest),
+    );
+    for (i, p) in crate::dfr::TRIAL_SETS.iter().enumerate() {
+        // At least about 170 failures expected even in a quick run.
+        let mc = crate::dfr::monte_carlo(*p, scale(400, 250), 50, &format!("campaign dfr {i}"));
+        log.add(
+            s,
+            format!("failures of the real code at n = {}, q = 2^{}, CBD({})", p.n, p.log_q, p.eta),
+            format!("{} wrong bits in {} decrypted, {:.3e} each against the exact law's {:.3e} (z = {:.2})", mc.failures, mc.trials, mc.failures as f64 / mc.trials as f64, mc.expected, mc.z),
+            pass_if(mc.agrees()),
+        );
+    }
+    let mut attacks = vec![(40, vec![10]), (70, vec![10])];
+    if !quick {
+        attacks.extend([(80, vec![10]), (90, vec![10, 16])]);
+    }
+    let mut observed = Vec::new();
+    for (n, betas) in attacks {
+        let a = crate::lattice::attack_turing_key(n, 15, 18, &betas, &format!("campaign lattice {n}"));
+        observed.push((n, a.broken_by, betas.clone()));
+        let by = match a.broken_by {
+            0 => format!("not broken by BKZ-{}", betas.last().copied().unwrap_or(2)),
+            2 => "LLL".to_string(),
+            b => format!("BKZ-{b}"),
+        };
+        log.add(s, format!("primal attack on a real key cut to n = {n}"), format!("q = 2^15, CBD(18) as in Turing-1026: secret column recovered by {by} ({:.1} s)", a.seconds), if a.broken_by != 0 { Verdict::Broken } else { Verdict::Fail });
+    }
+    if !quick {
+        // The model's largest n for each block size, from the root Hermite
+        // factor this BKZ reaches on random lattices of the attack's shape.
+        // Keys differ, so observations near a limit go either way: each is
+        // checked against the model within 5 dimensions.
+        let delta = [(10, crate::lattice::measured_delta(80, 15, 10, 1, "campaign delta 10")), (16, crate::lattice::measured_delta(80, 15, 16, 1, "campaign delta 16"))];
+        let limit = |beta: usize| {
+            let d = delta.iter().find(|&&(b, _)| b == beta).map(|&(_, d)| d);
+            d.map(|d| (10..200).filter(|&n| crate::lattice::predicts_success(n, 15, 3.0, beta, d)).max().unwrap_or(0))
+        };
+        let consistent = observed.iter().all(|(n, by, betas)| {
+            let broke_ok = *by < 10 || limit(*by).is_none_or(|l| l + 5 >= *n);
+            let failed_ok = betas.iter().filter(|&&b| b < *by || *by == 0).all(|&b| limit(b).is_none_or(|l| l <= *n + 5));
+            broke_ok && failed_ok
+        });
+        let seen: Vec<String> = observed.iter().filter(|o| o.1 >= 10).map(|(n, by, _)| format!("n = {n} by BKZ-{by}")).collect();
+        log.add(
+            s,
+            "the estimate's success condition at small n",
+            format!(
+                "with the root Hermite factors this BKZ reaches (BKZ-10 {:.4}, BKZ-16 {:.4}) it puts their limits at n = {} and {}; observed {}, consistent within 5; at n = 1026 it asks for BKZ-868",
+                delta[0].1,
+                delta[1].1,
+                limit(10).unwrap_or(0),
+                limit(16).unwrap_or(0),
+                seen.join(", ")
+            ),
+            pass_if(consistent),
+        );
+    }
+    let tampered = scale(24, 6);
+    let mut rejected = 0;
+    let (ct, key) = dk.encapsulation_key().encapsulate().expect("OS randomness");
+    for _ in 0..tampered {
+        let mut bad = ct.clone();
+        bad[rng.below(ct.len() as u64) as usize] ^= 1 << rng.below(8);
+        rejected += usize::from(dk.decapsulate(&bad).expect("length")[..] != key[..]);
+    }
+    let other = DecapsulationKey::from_seed(&[0xa5; 32]).expect("consistent");
+    let wrong_key = other.decapsulate(&ct).expect("length")[..] != key[..];
+    let lengths = dk.decapsulate(&ct[1..]).is_err() && EncapsulationKey::from_bytes(&dk.encapsulation_key().as_bytes()[1..]).is_err();
+    log.add(
+        s,
+        "chosen-ciphertext checks",
+        format!("{rejected} of {tampered} single-bit changes anywhere in the ciphertext (salt included) give the rejection key; the right ciphertext under another key: {}; wrong lengths refused: {lengths}", if wrong_key { "rejection key" } else { "THE SHARED KEY" }),
+        pass_if(rejected == tampered && wrong_key && lengths),
+    );
+    let faults = scale(24, 6);
+    let mut caught = 0;
+    for _ in 0..faults {
+        let entry = rng.below((1026 * 32) as u64) as usize;
+        let bit = rng.below(14) as u32;
+        caught += usize::from(DecapsulationKey::from_seed_with_fault(&[0x5a; 32], entry, bit).is_err());
+    }
+    let harmless = DecapsulationKey::from_seed_with_fault(&[0x5a; 32], 77, 15).is_ok();
+    log.add(
+        s,
+        "faults in S during key generation",
+        format!("{caught} of {faults} single-bit flips in bits 0-13 of S caught by the pair-wise check; bit 15 changes S by 2^15 = 0 mod q, so it changes nothing and is not caught ({})", if harmless { "as expected" } else { "unexpectedly caught" }),
+        pass_if(caught == faults && harmless),
+    );
+    let n = scale(200_000, 50_000);
+    let packed = vec![0x3cu8; 15_870];
+    // Both classes do the same work: copy the packed ciphertext, change one
+    // byte at a position from a generator of their own (independent of the
+    // class) by 0 (fixed class: equal) or not (random class: differing),
+    // compare. Harness mistakes show up here as leaks: comparing the fixed
+    // class's buffer with itself gave |t| 113, and a position that was 0 for
+    // the fixed class (the byte the comparison reads first, just written)
+    // gave |t| 91.
+    let equal_or_not = |compare: fn(&[u8], &[u8]) -> bool, name: &str| {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        timing::dudect(name, n, 2, |input| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let mut other = packed.clone();
+            let at = (state % other.len() as u64) as usize;
+            other[at] ^= (input[0] | 1) * u8::from(input != [0, 0]);
+            std::hint::black_box(compare(&packed, &other));
+        })
+    };
+    let r = equal_or_not(|a, b| turing::turing1026::eq_mask_for_timing(a, b) == 0xff, "Turing-1026 re-encryption check");
+    log.add(s, "timing: re-encryption check, equal vs differing", format!("max |t| {:.2} over {} runs", r.max_t, n), pass_if(!r.leaks()));
+    let r = equal_or_not(|a, b| a == b, "early-exit comparison");
+    log.add(s, "control: the same test on an early-exit comparison (slice ==)", format!("max |t| {:.2}", r.max_t), caught_if(r.leaks()));
+    let (ct, _) = dk.encapsulation_key().encapsulate().expect("OS randomness");
+    let r = timing::dudect("Turing-1026 decapsulation", scale(3000, 400), 1, |input| {
+        let mut c = ct.clone();
+        if input[0] != 0 {
+            c[usize::from(input[0]) * 61] ^= 1;
+        }
+        std::hint::black_box(dk.decapsulate(&c).expect("length"));
+    });
+    log.add(s, "timing: decapsulation, valid vs tampered ciphertext", format!("max |t| {:.2} over {} runs", r.max_t, r.measurements), pass_if(!r.leaks()));
+    if !quick {
+        let r = timing::dudect("Turing-1026 key generation", 600, 32, |input| {
+            std::hint::black_box(DecapsulationKey::from_seed(input.try_into().expect("32")).expect("consistent"));
+        });
+        log.add(s, "timing: key generation, fixed vs random seed", format!("max |t| {:.2} over {} runs", r.max_t, r.measurements), pass_if(!r.leaks()));
+    }
+    log.add(
+        s,
+        "secret key in locked memory",
+        format!("locked: {}", dk.keys_locked()),
+        if dk.keys_locked() { Verdict::Pass } else { Verdict::Info },
+    );
+    for snap in residue::kem1026(true) {
+        log.add(s, format!("memory scan: {}", snap.scenario), describe(&snap), pass_if(snap.clean()));
+    }
+    let unburned = residue::kem1026(false);
+    log.add(
+        s,
+        "control: key generation without the stack burn",
+        format!("{}; after drop: {} stray", describe(&unburned[0]), unburned[2].stray.len()),
+        if unburned[0].clean() { Verdict::Info } else { Verdict::Caught },
+    );
+    log.add(
+        s,
+        "security summary",
+        format!(
+            "weakest lattice attack 2^{weakest:.1} classical core-SVP (the ciphertext's dual attack); the lattice-estimator's default model gives 2^269.7 against ML-KEM-1024's 2^262.3 and FrodoKEM-1344's 2^281.7 (docs/16); failure probability 2^{:.1}; attacks break the real code up to the dimensions above, the scheme needs BKZ-868",
+            rate.message
         ),
         Verdict::Info,
     );

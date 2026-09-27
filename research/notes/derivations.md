@@ -309,3 +309,43 @@ totals 18 and 3 per column after the next S-box layer, 24 in all. A total
 of 24 after MixState fits in four 1s, which one column can hold, so a
 single 1 can come out of S-box layer 5: balanced to layer 5 only. The
 difference between 30 and 31 bytes is whether that total is at most 28.
+
+## Turing-1026 (docs/16)
+
+### The decryption error, exactly
+
+With B = A S + E and a ciphertext B' = S' A + E', C = S' B + E'' + Encode(m),
+
+    C - B' S = S' A S + S' E + E'' + Encode(m) - S' A S - E' S
+             = Encode(m) + (S' E - E' S + E'').
+
+Coefficient (i, j) of the error is sum_k S'[i][k] E[k][j] - sum_k E'[i][k]
+S[k][j] + E''[i][j]: 2n products whose 4n factors are all distinct noise
+samples, plus one more sample, all independent. Each product of two
+symmetric laws is symmetric, so the minus sign changes nothing, and the law
+of the coefficient is (chi * chi)^(2n) convolved with chi, exactly. With one
+bit per coefficient at b q/2, decoding (x + q/4 mod q) >> (log q - 1) is
+right exactly when the error lies in [-q/4, q/4). The union bound over the
+256 coefficients, P(any fails) <= sum P(one fails), holds whatever their
+dependence (they share rows of S' and columns of S and E), so no
+independence heuristic enters: 256 * 2^-274.06 = 2^-266.06.
+
+### Why sigma^2 / q decides both numbers at n ~ 1000
+
+The error's standard deviation is sqrt(2n) sigma^2, and decryption fails when
+it reaches q/4, so the failure rate depends on q / (sqrt(2n) sigma^2). The
+primal attack's success condition sigma sqrt(b) <= delta^(2b-d-1) q^(m/d)
+with m close to n (d = 2n) has q^(m/d) close to sqrt(q), so it depends on
+sigma / sqrt(q). Both are functions of sigma^2 / q, which is why the sweep's
+rows with equal sigma^2 / q agree across q (2^15 with CBD(18) and 2^16 with
+CBD(36): 2^-266.1 and 2^-265.5; 253.9 and 253.3).
+
+### The small-n attack's success condition
+
+For the embedding of m = n samples (dimension d = 2n + 1, volume q^n), the
+ADPS16 condition reads sigma sqrt(beta) <= delta^(2 beta - d - 1) q^(n/d).
+With the measured delta of BKZ-10, 16 and 20 on random lattices of that
+shape (1.0179-1.0182, 1.0167, 1.0158 at d = 161) the largest n it allows
+is 89-91, 96 and 100-101 (`lattice::predicts_success`); BKZ-10 broke
+n = 80, and at n = 90, its limit, one key fell to it and another needed
+BKZ-16; BKZ-16 failed at 100, where BKZ-20 succeeded.

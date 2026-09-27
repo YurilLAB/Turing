@@ -158,6 +158,27 @@ docs/14
   scan for 32-byte blocks (campaign section 24).
 - `tools/mutate.py --round6`: 13 planted bugs.
 
+**Turing-1026 (step 12)**, see docs/16
+- `coresvp`: the core-SVP cost of the primal and dual lattice attacks (the
+  ADPS16 model FrodoKEM and NewHope used), a port of the research's
+  `coresvp.py`; reproduces 7 published rows with their block sizes before
+  pricing Turing-1026.
+- `dfr`: exact decryption-failure laws by convolution; reproduces
+  FrodoKEM's published rates, then Turing-1026's 2^-266.06, and measures the
+  real code's failure rate at small parameter sets against the law.
+- `lattice`: LLL, BKZ with Schnorr-Euchner enumeration, and the primal
+  attack on keys made by the real key generation at small n; the
+  estimate's success condition, fed the root Hermite factors this BKZ
+  reaches, predicts which block size breaks which n.
+- `refkem1026` and `vectors --turing-1026`: an independent reference and
+  its known-answer vectors; section 25 of the campaign adds chosen-
+  ciphertext checks, dudect on decapsulation and on the re-encryption
+  comparison (with an early-exit control), key-generation faults, the
+  memory scan and stack depths for the KEM.
+- `tools/asm_branches.py --divs`: division instructions in the release
+  build (the KyberSlash class of leaks).
+- `tools/mutate.py --round7`: 20 planted bugs.
+
 ## Planned
 
 - Keliher and Sui's upper-bound search, to pin Turing's exact 2-round MEDP

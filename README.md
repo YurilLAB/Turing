@@ -1,10 +1,11 @@
 # Turing
 
 An experimental 128-bit block cipher with a 256-bit key, designed from scratch in
-Rust and named after Alan Turing, and Turing-256, the same design on a
-256-bit block (docs/15). A file-encryption tool on top of it, with
-post-quantum key wrapping and password unlock (Argon2id), is planned
-(docs/03).
+Rust and named after Alan Turing; Turing-256, the same design on a 256-bit
+block (docs/15); and Turing-1026, a post-quantum key-encapsulation mechanism
+on plain LWE in dimension 1026 whose shared keys are Turing keys (docs/16).
+A file-encryption tool on top of them, with password unlock (Argon2id), is
+planned (docs/03).
 
 **Experimental. Do not use it to protect real data.** A new cipher is only
 trusted after years of public cryptanalysis.
@@ -34,9 +35,20 @@ bytes together and adding a round key.
 - **Constant time**: no branch or memory access depends on secret data, and
   the release build's assembly is checked for it.
 
+**Turing-1026** is the post-quantum part: a sender makes a random 256-bit key
+and a ciphertext only the recipient's secret key opens. Its hard problem is
+learning with errors in its plainest form (no ring structure, as FrodoKEM
+uses), the textbook Lindner-Peikert encryption on top, and a
+Fujisaki-Okamoto transform against chosen ciphertexts. Its parameters
+(dimension 1026, modulus 2^15, noise of standard deviation 3), hashing,
+transform details and code are Turing's own. The best known lattice attack
+costs 2^252.4 in the standard core-SVP count (ML-KEM-1024: 2^253.9 in the
+same count) and 2^269.7 in the lattice-estimator's model, and a ciphertext
+fails to decrypt with probability 2^-266, computed exactly.
+
 ## What has been tested
 
-- `bombe attack` runs 24 sections of attacks against the real cipher:
+- `bombe attack` runs 25 sections of attacks against the real cipher:
   differential, linear, square and division-property, boomerang, cube,
   related-key, differential-linear, interpolation, invariant, symmetry,
   yoyo and meet-in-the-middle attacks, plus the implementation attacks
@@ -48,10 +60,18 @@ bytes together and adding a round key.
   differential probability at most 2^-102.0 and linear hulls at most
   2^-99.6, and from 3 rounds on the output passes the NIST SP 800-22
   statistical battery.
+- Turing-1026 (section 25): its attack cost and failure rate come from
+  tools that first reproduce FrodoKEM's and NewHope's published tables; the
+  real code fails exactly as often as the computed law says; Bombe's own
+  LLL and BKZ recover the secret from real keys with the dimension cut to
+  100, needing the block sizes the cost model predicts; tampered
+  ciphertexts, timing, faults and memory are checked as for the cipher.
 - Each analysis tool is first checked against published results (AES,
-  Midori-64, NIST's test data) before it is trusted on Turing.
-- The cipher matches an independent reference implementation and the
-  known-answer vectors in `vectors/turing-v2.txt`, and ships a self-test.
+  Midori-64, NIST's test data, FrodoKEM, NewHope) before it is trusted on
+  Turing.
+- The cipher, Turing-256 and Turing-1026 each match an independent
+  reference implementation and the known-answer vectors in `vectors/`, and
+  the library ships a self-test covering all three.
 - Implementation attacks: timing (dudect on eight code paths, no leak),
   simulated power analysis (the masked variant shows no first-order
   leakage), injected faults (every one- and two-bit fault in the stored key
@@ -78,35 +98,40 @@ All of this is our own analysis, which is why Turing stays experimental.
   MixColumns, the same kind of key schedule and the same locked,
   fault-checked round keys, 24 rounds. The wider block moves the birthday
   bound of any mode from 2^64 to 2^128 blocks (docs/15).
+- `crates/turing` also holds **Turing-1026** (`turing1026`): the
+  post-quantum KEM. Public key 61,592 bytes, ciphertext 15,934 bytes, secret
+  key a 32-byte seed kept expanded in locked memory; about 13 ms to
+  encapsulate or decapsulate (docs/16).
 - `crates/bombe`: the cryptanalysis workbench, named after Turing's
   code-breaking machine. It exists to break Turing.
 
 ## Bombe commands
 
 ```
-cargo run --release -p bombe -- attack             # attack the real cipher: 24 sections, 0 failures expected
+cargo run --release -p bombe -- attack             # attack the real cipher and KEM: 25 sections, 0 failures expected
 cargo run --release -p bombe -- attack --deep      # adds the long runs (2^33-encryption square attack, 2^32 structures through 7 rounds, NIST at scale), about an hour on 4 threads
 cargo run --release -p bombe -- trace --flip-plaintext-bit 0
 cargo run --release -p bombe -- sbox turing --html sbox.html
 cargo run --release -p bombe -- rounds             # compare round structures
 cargo run --release -p bombe -- key-schedule
-cargo run --release -p bombe -- vectors            # known-answer vectors (--turing-256 for Turing-256)
+cargo run --release -p bombe -- vectors            # known-answer vectors (--turing-256, --turing-1026)
 ```
 
-`cargo test` runs the whole suite: the cipher against an independent
-reference implementation and the vectors in `vectors/turing-v2.txt`, every
-analysis tool against published results (AES, Midori-64, NIST), each
-attack against the rounds it must break, and the library's defences against
-a memory-dump attacker, simulated power analysis and injected faults.
+`cargo test` runs the whole suite: the cipher, Turing-256 and Turing-1026
+against their independent reference implementations and the vectors in
+`vectors/`, every analysis tool against published results (AES, Midori-64,
+NIST, FrodoKEM, NewHope), each attack against the rounds it must break, and
+the library's defences against a memory-dump attacker, simulated power
+analysis and injected faults.
 `python tools/wsl_linux.py test -p turing --lib` runs the Linux code paths
 (mlock, MADV_DONTDUMP, MADV_WIPEONFORK, fork) from Windows, in WSL.
 
 `cargo test --release -- --include-ignored` also runs the slow tests
 (Turing's exact best 2-round differential, about a minute, and the 6- and
 7-round square attack steps on 2^32-text structures, about 20 minutes on 4
-threads). `python tools/mutate.py --round5` plants bugs in the latest code
-and checks the tests catch each one (`--step8`, `--step9`, `--round3`,
-`--round4` and the default set cover the earlier rounds).
+threads). `python tools/mutate.py --round7` plants bugs in the latest code
+(Turing-1026) and checks the tests catch each one (`--step8`, `--step9`,
+`--round3` to `--round6` and the default set cover the earlier rounds).
 
 The library runs a known-answer self-test (`turing::self_test()`, call it
 at start-up) and offers fault-checked calls (`encrypt_block_checked`,
@@ -114,8 +139,9 @@ at start-up) and offers fault-checked calls (`encrypt_block_checked`,
 and after computing. Round keys and reduced-round encryption are only
 reachable through the `turing` crate's `analysis` feature, which only Bombe
 turns on. For the constant-time review, `tools/asm_branches.py` lists every
-conditional jump, or with `--loads` every indexed memory access, in the
-release build's assembly (docs/11, 13).
+conditional jump, with `--loads` every indexed memory access, and with
+`--divs` every division instruction, in the release build's assembly
+(docs/11, 13, 16).
 
 `research/` holds the papers, verified facts and derivations behind the
 docs (papers stay local; the index links to each one).

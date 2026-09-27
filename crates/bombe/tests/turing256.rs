@@ -42,6 +42,10 @@ fn reproduces_the_known_answer_vectors() {
         assert_eq!(b, v.plaintext);
     }
     assert_eq!(refcipher256::render_vectors(), text.replace("\r\n", "\n"), "the committed file is what the reference generates");
+    // The self-test's embedded vectors are the reference's outputs.
+    for (key, plain, cipher) in turing::selftest::VECTORS_256 {
+        assert_eq!(bombe::refcipher256::Reference256::new(&key).encrypt(&plain, turing::turing256::ROUNDS), cipher);
+    }
 }
 
 #[test]
