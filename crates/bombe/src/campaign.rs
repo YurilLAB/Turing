@@ -7,6 +7,7 @@
 use crate::aes::{Aes, Shape as AesShape};
 use crate::invariant::LinearMap;
 use crate::refcipher::Reference;
+use crate::refcipher256::Reference256;
 use crate::rng::Rng;
 use crate::leakage::{self, View};
 use crate::residue::{self, Snapshot};
@@ -17,7 +18,7 @@ use crate::{
 use std::fmt::Write;
 use std::time::Instant;
 use turing::structure::{Layer, ROUNDS};
-use turing::{MaskedTuring, ShieldedKey, Turing};
+use turing::{MaskedTuring, ShieldedKey, Turing, Turing256};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
@@ -1164,6 +1165,185 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         s,
         "best attack from it",
         "the 3-round property (8 parameters) starts after round 2's S-boxes, so building a δ-set needs round key 0 (2^128 guesses) and reading its output a byte of round key 5: 5 rounds at about 2^144 S-box lookups with the full codebook, weaker than the square attack's 5 rounds with a 2^120 structure",
+        Verdict::Info,
+    );
+
+    // --- Turing-256 ---------------------------------------------------------------------
+    let s = "24. Turing-256: the same design on a 256-bit block (docs/15)";
+    let mut rng = Rng::new("campaign turing-256");
+    let trials = scale(300, 60);
+    let mut mismatches = 0;
+    for _ in 0..trials {
+        let key: [u8; 32] = rng.bytes();
+        let (t, r) = (Turing256::new(&key), Reference256::new(&key));
+        let p: [u8; 32] = rng.bytes();
+        let rounds = 1 + rng.below(turing::turing256::ROUNDS as u64) as usize;
+        let mut c = p;
+        t.encrypt_rounds(&mut c, rounds);
+        let mut d = c;
+        t.decrypt_rounds(&mut d, rounds);
+        mismatches += usize::from(c != r.encrypt(&p, rounds) || d != p);
+    }
+    log.add(s, "matches its independent reference", format!("{trials} random keys/blocks/round counts, {mismatches} mismatches"), pass_if(mismatches == 0));
+    let vectors = crate::refcipher256::known_answer_vectors();
+    let kat_ok = vectors.iter().all(|(k, p, c)| {
+        let mut b = *p;
+        Turing256::new(k).encrypt_block(&mut b);
+        b == *c
+    });
+    log.add(s, "known-answer vectors (vectors/turing-256-v1.txt)", format!("{} of {} reproduced", if kat_ok { vectors.len() } else { 0 }, vectors.len()), pass_if(kat_ok));
+    let t = Turing256::new(&[7; 32]);
+    let blocks = scale(100_000, 20_000);
+    let mut b = [0u8; 32];
+    let timer = Instant::now();
+    for _ in 0..blocks {
+        t.encrypt_block(&mut b);
+    }
+    let secs = timer.elapsed().as_secs_f64();
+    std::hint::black_box(b);
+    log.add(s, "speed", format!("{:.2} us per 32-byte block, {:.1} MB/s", secs * 1e6 / blocks as f64, blocks as f64 * 32.0 / secs / 1e6), Verdict::Info);
+    let mix = crate::gen::linear256();
+    let cauchy = crate::matrix::is_cauchy(&mix.m, &mix.xs, &mix.ys);
+    let measured = mix.report.branch.iter().map(|&(_, b, _, _)| b).min().unwrap_or(0);
+    log.add(
+        s,
+        "MixState256 (32 x 32) is MDS",
+        format!("Cauchy over 64 distinct points from cSHAKE256: {}; submatrices of every size checked (sampled for 2-30); smallest measured branch {measured} (need 33)", if cauchy { "yes" } else { "NO" }),
+        pass_if(cauchy && mix.report.passed()),
+    );
+    let bounds = crate::wide::min_active_alternating(32, 8);
+    log.add(
+        s,
+        "trail bound (active S-boxes by window, exact for alternating layers)",
+        format!(
+            "1-8 rounds: {bounds:?}; any 4 rounds >= {} active (<= 2^-{}), beyond the 2^256 codebook, so usable trails cover at most 3 rounds",
+            bounds[3],
+            6 * bounds[3]
+        ),
+        pass_if(6 * bounds[3] > 256),
+    );
+    let windows_5: [Vec<Layer>; 2] = [crate::wide::alternating(Layer::MixState, 4), crate::wide::alternating(Layer::ShiftMixColumns, 4)];
+    let four = crate::wide::one_byte_impossible(&[Layer::ShiftMixColumns, Layer::MixState, Layer::ShiftMixColumns], 32);
+    let five = windows_5.iter().any(|w| crate::wide::one_byte_impossible(w, 32));
+    log.add(
+        s,
+        "impossible differentials (one byte in, one out; active-byte counts)",
+        format!("4 rounds (ShiftMix, MixState, ShiftMix): {}; 5 rounds: {}", if four { "yes" } else { "no" }, if five { "yes" } else { "none" }),
+        pass_if(four && !five),
+    );
+    let from_round_1 = crate::wide::alternating(Layer::MixState, 30);
+    let reach256 = |k: usize| crate::wide::balanced_until(&crate::wide::active(32, &(0..k).collect::<Vec<_>>()), &from_round_1, &turing::linear256::SHIFTS).unwrap_or(0);
+    log.add(
+        s,
+        "division property: plaintext sets, S-box layer they stay balanced to",
+        format!(
+            "2^8-2^24: {}; 2^32-2^192: {}; 2^200-2^240: {}; 2^248: {} (a 5-round distinguisher, one round more than Turing's 2^120 set)",
+            reach256(1),
+            reach256(4),
+            reach256(25),
+            reach256(31)
+        ),
+        Verdict::Info,
+    );
+    let ks = crate::keyschedule::feistel_min_active_general(32, 33, turing::keyschedule256::round_key_depth(turing::turing256::ROUND_KEYS - 1));
+    let weakest = (0..turing::turing256::ROUND_KEYS).map(|i| ks[turing::keyschedule256::round_key_depth(i) - 1]).min().unwrap_or(0);
+    log.add(
+        s,
+        "key schedule: active S-boxes in front of every round key",
+        format!("at least {weakest} (2^-{}), target 43; 9 warm-up rounds of 32-byte halves", 6 * weakest),
+        pass_if(weakest >= crate::keyschedule::ROUND_KEY_TARGET),
+    );
+    let three = crate::attack256::balanced_bytes(3, &[0], "campaign 256 balance 3");
+    let four_bal = crate::attack256::balanced_bytes(4, &[0], "campaign 256 balance 4");
+    log.add(
+        s,
+        "square distinguisher, 2^8 texts, known key",
+        format!("S-box layer 3 input: {three} of 32 bytes balanced; layer 4: {four_bal} (division property: 3)"),
+        pass_if(three == 32 && four_bal < 32),
+    );
+    let a = crate::attack256::square_attack(3, &[0], 6, "campaign 256 square 3");
+    log.add(
+        s,
+        "square attack, 3 rounds, 2^8 texts per structure",
+        if a.correct { format!("RECOVERED round key 3 with {} structures", a.structures) } else { format!("not recovered: {:?}", a.candidates) },
+        if a.correct { Verdict::Broken } else { Verdict::Fail },
+    );
+    let a = crate::attack256::square_attack(4, &[0, 1], 2, "campaign 256 square 4");
+    log.add(
+        s,
+        "square attack, 4 rounds, 2^16 texts per structure",
+        if a.correct { "RECOVERED round key 4 (the division property says it should fail)".to_string() } else { "fails, as the division property predicts".to_string() },
+        pass_if(!a.correct),
+    );
+    let av = crate::avalanche::plaintext256(ROUNDS, scale(40, 12), "campaign 256 avalanche");
+    log.add(
+        s,
+        "plaintext avalanche, full cipher (256 x 256 cells)",
+        format!("mean {:.4} of output bits flip, worst |z| {:.2} (limit {:.2})", av.mean, av.worst_z, av.threshold),
+        pass_if(av.passed()),
+    );
+    let av = crate::avalanche::key256(ROUNDS, scale(12, 4), "campaign 256 key avalanche");
+    log.add(
+        s,
+        "key avalanche, full cipher",
+        format!("mean {:.4}, worst |z| {:.2} (limit {:.2})", av.mean, av.worst_z, av.threshold),
+        pass_if(av.passed()),
+    );
+    for rounds in [1, 2, ROUNDS] {
+        let r = battery::run(battery::Source::Turing256 { rounds }, scale(64, 16), "campaign battery 256");
+        let failing = r.failing_tests();
+        let detail = if failing.is_empty() { format!("all 11 statistics pass ({} sequences)", r.sequences) } else { format!("fails: {}", failing.join(", ")) };
+        let verdict = match (r.passed(), rounds < ROUNDS) {
+            (false, true) => Verdict::Broken,
+            (ok, _) => pass_if(ok),
+        };
+        log.add(s, r.source, detail, verdict);
+    }
+    let n = scale(300_000, 80_000);
+    let t = Turing256::new(&[0x42; 32]);
+    let r = timing::dudect("Turing-256 encryption", n, 32, |input| {
+        let mut b: [u8; 32] = input.try_into().expect("32");
+        t.encrypt_block(&mut b);
+        std::hint::black_box(b);
+    });
+    log.add(s, "timing: encryption, fixed vs random plaintext", format!("max |t| {:.2} over {} runs", r.max_t, n), pass_if(!r.leaks()));
+    let r = timing::dudect("Turing-256 decryption", n, 32, |input| {
+        let mut b: [u8; 32] = input.try_into().expect("32");
+        t.decrypt_block(&mut b);
+        std::hint::black_box(b);
+    });
+    log.add(s, "timing: decryption, fixed vs random ciphertext", format!("max |t| {:.2} over {} runs", r.max_t, n), pass_if(!r.leaks()));
+    let r = timing::dudect("Turing-256 key setup", scale(20_000, 6_000), 32, |input| {
+        std::hint::black_box(Turing256::new(input.try_into().expect("32")));
+    });
+    log.add(s, "timing: key setup, fixed vs random key", format!("max |t| {:.2}", r.max_t), pass_if(!r.leaks()));
+    let mut caught = 0;
+    let faults = scale(400, 100);
+    let bits = (2 * turing::turing256::ROUND_KEYS + 2) * 128;
+    for _ in 0..faults {
+        let mut t = Turing256::new(&[0x42; 32]);
+        t.flip_stored_bit(rng.below(bits as u64) as usize);
+        let mut b = [1u8; 32];
+        caught += usize::from(t.encrypt_block_checked(&mut b).is_err() && b == [0; 32]);
+    }
+    log.add(s, "persistent key faults through the checked call", format!("{caught} of {faults} random stored-bit flips caught, block wiped"), pass_if(caught == faults));
+    let t = Turing256::new(&[0x42; 32]);
+    log.add(
+        s,
+        "round keys in locked, dump-excluded pages",
+        format!("locked: {}, excluded from core dumps: {}", t.keys_locked(), t.keys_dump_excluded()),
+        if t.keys_locked() { Verdict::Pass } else { Verdict::Info },
+    );
+    for snap in residue::plain256(true) {
+        log.add(s, format!("memory scan: {}", snap.scenario), describe(&snap), pass_if(snap.clean()));
+    }
+    log.add(
+        s,
+        "security margin",
+        format!(
+            "usable trails 3 rounds, impossible differentials 4, integral 5 (2^248 texts); the docs/09 rule gives 5 + 4 = 9. On paper the integral with partial sums reaches 7 rounds for about 2^251; a whole round key is 256 bits, so guessing one costs as much as the key. {} rounds in the cipher",
+            turing::turing256::ROUNDS
+        ),
         Verdict::Info,
     );
 

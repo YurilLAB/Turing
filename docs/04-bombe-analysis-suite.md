@@ -144,6 +144,20 @@ docs/14
   reproducing Derbez-Fouque's 25/24 and Derbez-Fouque-Jean's 10 for AES.
 - `tools/mutate.py --round5`: 14 planted bugs in the new tools.
 
+**Turing-256 (step 11)**, see docs/15
+- `gen-linear --turing-256`: the 32x32 Cauchy MixState from cSHAKE256,
+  checked for MDS with sampled submatrices of every size and the branch
+  number measured.
+- `wide`: trail bounds, the division property and one-byte impossible
+  differentials counted in active bytes, exact for alternating layers on
+  any number of columns; they reproduce Turing's 16-byte pattern-level
+  results before giving Turing-256's.
+- `refcipher256` and `vectors --turing-256`: an independent reference and
+  its known-answer vectors; `attack256`: the square attack on reduced
+  Turing-256; avalanche, the NIST battery, dudect, faults and the memory
+  scan for 32-byte blocks (campaign section 24).
+- `tools/mutate.py --round6`: 13 planted bugs.
+
 ## Planned
 
 - Keliher and Sui's upper-bound search, to pin Turing's exact 2-round MEDP

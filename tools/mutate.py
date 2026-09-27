@@ -5,7 +5,7 @@ tests caught it and always restores the original file (and verifies it). A
 test run that exceeds the time limit has not passed either: it counts as
 caught, and the whole process tree is killed.
 
-    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5] [--check] [NAME ...]
+    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6] [--check] [NAME ...]
 
 --check only verifies that every pattern still matches the current code
 exactly once, without running any tests. NAME filters mutations by name.
@@ -359,6 +359,53 @@ MUTATIONS_ROUND5 = [
      BOMBE_LIB + ["mitm"]),
 ]
 
+MUTATIONS_ROUND6 = [
+    # Turing-256, the cipher (docs/15)
+    ("turing-256: ShiftRows offsets 0, 1, 2, 3", "crates/turing/src/linear256.rs",
+     "pub const SHIFTS: [usize; 4] = [0, 1, 3, 4];", "pub const SHIFTS: [usize; 4] = [0, 1, 2, 3];",
+     ["-p", "bombe", "--release", "--test", "turing256"]),
+    ("turing-256: MixState applies the inverse matrix", "crates/turing/src/linear256.rs",
+     "const MIX_STATE_PREPARED: [[[u64; 4]; 8]; 32] = prepare32(&MIX_STATE_256);", "const MIX_STATE_PREPARED: [[[u64; 4]; 8]; 32] = prepare32(&MIX_STATE_256_INV);",
+     TURING),
+    ("turing-256: one warm-up round fewer", "crates/turing/src/keyschedule256.rs",
+     "pub const WARMUP_ROUNDS: usize = 9;", "pub const WARMUP_ROUNDS: usize = 8;",
+     TURING),
+    ("turing-256: no feed-forward", "crates/turing/src/keyschedule256.rs",
+     "                        let mut rk = xor(value, base);", "                        let mut rk = *value; let _ = base;",
+     ["-p", "bombe", "--release", "--test", "turing256"]),
+    ("turing-256: key-schedule F without S-boxes", "crates/turing/src/keyschedule256.rs",
+     "    let mut t = xor(x, c);\n    sub32(&mut t);", "    let mut t = xor(x, c);",
+     ["-p", "bombe", "--release", "--test", "turing256"]),
+    ("turing-256: last round keeps its linear layer", "crates/turing/src/turing256.rs",
+     "            sub32(block);\n            if round < rounds {", "            sub32(block);\n            if round <= rounds && round < ROUNDS {",
+     ["-p", "bombe", "--release", "--test", "turing256"]),
+    ("turing-256: decryption applies the forward layer", "crates/turing/src/turing256.rs",
+     "*block = linear256::invert_layer(layer, block);", "*block = linear256::apply_layer(layer, block);",
+     TURING),
+    # Turing-128's layers, hardened in the same round
+    ("linear: bit masks read the wrong bit", "crates/turing/src/linear.rs",
+     "core::array::from_fn(|k| opaque(((x as u64 >> k) & 1).wrapping_neg()))",
+     "core::array::from_fn(|k| opaque(((x as u64 >> (k + 1)) & 1).wrapping_neg()))",
+     TURING),
+    # The analysis behind it
+    ("wide: ShiftMix output allowed one byte short", "crates/bombe/src/wide.rs",
+     "5 * m >= p && 5 * m - p <= q && q <= 4 * m", "5 * m >= p + 1 && 5 * m - p - 1 <= q && q <= 4 * m",
+     BOMBE_LIB + ["wide"]),
+    ("wide: a unit allowed from five bytes in one column", "crates/bombe/src/wide.rs",
+     "unit |= eights == 0 && (1..=4).contains(&ones);", "unit |= eights == 0 && (1..=5).contains(&ones);",
+     BOMBE_LIB + ["wide"]),
+    ("matrix: Gosper's step skips subsets", "crates/bombe/src/matrix.rs",
+     "m = ripple | (((m ^ ripple) >> 2) / low);", "m = ripple | (((m ^ ripple) >> 3) / low);",
+     BOMBE_LIB + ["matrix"]),
+    ("reference 256: ShiftRows rotates right", "crates/bombe/src/refcipher256.rs",
+     "            row.rotate_left(shift);", "            row.rotate_right(shift);",
+     ["-p", "bombe", "--release", "--test", "turing256"]),
+    ("attack 256: key guesses judged on the last structure only", "crates/bombe/src/attack256.rs",
+     "        for (j, keep) in candidates.iter_mut().enumerate() {\n            keep.retain(",
+     "        for (j, keep) in candidates.iter_mut().enumerate() {\n            *keep = (0..=255u8).collect();\n            keep.retain(",
+     ["-p", "bombe", "--release", "--test", "turing256", "square"]),
+]
+
 
 def kill_tree(p):
     """Kills cargo and the test binary it started."""
@@ -390,7 +437,7 @@ def run(args):
 
 
 def main():
-    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5}
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6}
     check_only = "--check" in sys.argv
     only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
     mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)

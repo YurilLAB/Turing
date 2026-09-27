@@ -109,7 +109,7 @@ const fn prepare16(m: &[[u8; 16]; 16]) -> [[[u64; 2]; 8]; 16] {
     out
 }
 
-const fn prepare4(m: &[[u8; 4]; 4]) -> [[u32; 8]; 4] {
+pub(crate) const fn prepare4(m: &[[u8; 4]; 4]) -> [[u32; 8]; 4] {
     let mut out = [[0u32; 8]; 4];
     let mut j = 0;
     while j < 4 {
@@ -129,14 +129,43 @@ const fn prepare4(m: &[[u8; 4]; 4]) -> [[u32; 8]; 4] {
 
 const MIX_STATE_PREPARED: [[[u64; 2]; 8]; 16] = prepare16(&MIX_STATE);
 const MIX_STATE_INV_PREPARED: [[[u64; 2]; 8]; 16] = prepare16(&MIX_STATE_INV);
-const MIX_COLUMNS_PREPARED: [[u32; 8]; 4] = prepare4(&MIX_COLUMNS);
-const MIX_COLUMNS_INV_PREPARED: [[u32; 8]; 4] = prepare4(&MIX_COLUMNS_INV);
+pub(crate) const MIX_COLUMNS_PREPARED: [[u32; 8]; 4] = prepare4(&MIX_COLUMNS);
+pub(crate) const MIX_COLUMNS_INV_PREPARED: [[u32; 8]; 4] = prepare4(&MIX_COLUMNS_INV);
+
+/// A value barrier: returns x unchanged, but the optimiser cannot see through
+/// it, so it cannot know that a mask is all zeros or all ones. On 64-bit
+/// targets it is an empty inline-assembly block that keeps x in a register
+/// and emits no instruction; elsewhere `black_box`, which may go through
+/// memory.
+#[inline(always)]
+pub(crate) fn opaque(mut x: u64) -> u64 {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: the assembly is empty: it reads and writes only this register,
+    // touches no memory, stack or flags.
+    unsafe {
+        core::arch::asm!("/* {0} */", inout(reg) x, options(pure, nomem, nostack, preserves_flags));
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        x = core::hint::black_box(x);
+    }
+    x
+}
+
+/// Masks for the 8 bits of a byte, each through a value barrier: without one
+/// the optimiser may turn "XOR the column AND the mask" into "if the bit is
+/// set, XOR the column", a branch on a secret bit. It did exactly that for
+/// Turing-256's 32-byte layer (docs/15); this layer compiled branch-free
+/// without the barrier, but only by the optimiser's cost model.
+#[inline(always)]
+pub(crate) fn bit_masks(x: u8) -> [u64; 8] {
+    core::array::from_fn(|k| opaque(((x as u64 >> k) & 1).wrapping_neg()))
+}
 
 fn apply16(prepared: &[[[u64; 2]; 8]; 16], x: &State) -> State {
     let mut y = [0u64; 2];
     for (&xj, per_bit) in x.iter().zip(prepared) {
-        for (k, column) in per_bit.iter().enumerate() {
-            let mask = ((xj as u64 >> k) & 1).wrapping_neg();
+        for (mask, column) in bit_masks(xj).iter().zip(per_bit) {
             y[0] ^= mask & column[0];
             y[1] ^= mask & column[1];
         }
@@ -152,9 +181,8 @@ fn apply_columns(prepared: &[[u32; 8]; 4], s: &State) -> State {
     for c in 0..4 {
         let mut y = 0u32;
         for (j, per_bit) in prepared.iter().enumerate() {
-            let xj = s[4 * c + j] as u32;
-            for (k, &column) in per_bit.iter().enumerate() {
-                y ^= ((xj >> k) & 1).wrapping_neg() & column;
+            for (mask, &column) in bit_masks(s[4 * c + j]).iter().zip(per_bit) {
+                y ^= *mask as u32 & column;
             }
         }
         out[4 * c..4 * c + 4].copy_from_slice(&y.to_le_bytes());

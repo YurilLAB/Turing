@@ -78,12 +78,27 @@ fn submatrix(m: &Matrix, rows: &[usize], cols: &[usize]) -> Matrix {
     rows.iter().map(|&r| cols.iter().map(|&c| m[r][c]).collect()).collect()
 }
 
-/// All k-element subsets of 0..n (n <= 16), in increasing order.
+/// Number of k-element subsets of n elements.
+fn binomial(n: usize, k: usize) -> u128 {
+    (0..k).fold(1u128, |acc, i| acc * (n - i) as u128 / (i + 1) as u128)
+}
+
+/// All k-element subsets of 0..n (n < 64), in increasing order of their
+/// bit masks (Gosper's hack steps from one mask to the next).
 fn subsets(n: usize, k: usize) -> Vec<Vec<usize>> {
-    (0u32..1 << n)
-        .filter(|m| m.count_ones() as usize == k)
-        .map(|m| (0..n).filter(|&i| m >> i & 1 == 1).collect())
-        .collect()
+    assert!(n < 64 && k <= n);
+    if k == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    let mut m: u64 = (1 << k) - 1;
+    while m < 1 << n {
+        out.push((0..n).filter(|&i| m >> i & 1 == 1).collect());
+        let low = m & m.wrapping_neg();
+        let ripple = m + low;
+        m = ripple | (((m ^ ripple) >> 2) / low);
+    }
+    out
 }
 
 struct Rng(u64);
@@ -121,9 +136,9 @@ pub struct SubmatrixCheck {
 /// row-subset x column-subset pairs, otherwise `limit` random ones.
 pub fn check_submatrices(m: &Matrix, k: usize, limit: u64, seed: u64) -> SubmatrixCheck {
     let n = m.len();
-    let sets = subsets(n, k);
-    let total = (sets.len() as u64).pow(2);
-    let mut result = SubmatrixCheck { size: k, checked: 0, exhaustive: total <= limit, singular: None };
+    let exhaustive = binomial(n, k).pow(2) <= limit as u128;
+    let sets = if exhaustive { subsets(n, k) } else { Vec::new() };
+    let mut result = SubmatrixCheck { size: k, checked: 0, exhaustive, singular: None };
     let test = |rows: &[usize], cols: &[usize], result: &mut SubmatrixCheck| {
         result.checked += 1;
         if result.singular.is_none() && !nonsingular(submatrix(m, rows, cols)) {
@@ -249,7 +264,7 @@ pub fn rounds_to_full_diffusion(round: impl Fn(u16) -> u16) -> usize {
         .unwrap()
 }
 
-/// Full MDS verdict for an n x n matrix (n = 4 or 16).
+/// Full MDS verdict for an n x n matrix (n = 4, 16 or 32).
 pub struct MdsReport {
     pub n: usize,
     pub submatrices: Vec<SubmatrixCheck>,
@@ -262,11 +277,17 @@ impl MdsReport {
     /// Budget: exhaustive where the count of submatrices / inputs is at most
     /// the limits below, sampled elsewhere.
     pub fn new(m: &Matrix, m_inv: &Matrix) -> MdsReport {
+        MdsReport::with_budget(m, m_inv, 400_000, 2_000_000)
+    }
+
+    /// The same with other budgets: `submatrices` per size, `inputs` per
+    /// input weight.
+    pub fn with_budget(m: &Matrix, m_inv: &Matrix, submatrices: u64, inputs: u64) -> MdsReport {
         let n = m.len();
-        let submatrices = (1..=n).map(|k| check_submatrices(m, k, 400_000, 0x5eed + k as u64)).collect();
+        let submatrices = (1..=n).map(|k| check_submatrices(m, k, submatrices, 0x5eed + k as u64)).collect();
         let branch = (1..=n.min(3))
             .map(|w| {
-                let (b, tested, ex) = min_branch_at_weight(m, w, 2_000_000, 0xb7a + w as u64);
+                let (b, tested, ex) = min_branch_at_weight(m, w, inputs, 0xb7a + w as u64);
                 (w, b, tested, ex)
             })
             .collect();
@@ -299,5 +320,29 @@ impl MdsReport {
         }
         out += &format!("    M x M^-1 = I                         {}\n", if self.inverse_ok { "yes" } else { "NO" });
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Gosper's enumeration gives exactly the subsets, in the order, of the
+    // plain filter over every mask it replaced (n <= 16), and the right
+    // count beyond.
+    #[test]
+    fn subsets_match_the_plain_enumeration() {
+        for n in [4usize, 7, 16] {
+            for k in 0..=n {
+                let plain: Vec<Vec<usize>> = (0u32..1 << n)
+                    .filter(|m| m.count_ones() as usize == k)
+                    .map(|m| (0..n).filter(|&i| m >> i & 1 == 1).collect())
+                    .collect();
+                assert_eq!(subsets(n, k), plain, "n {n} k {k}");
+                assert_eq!(binomial(n, k), plain.len() as u128);
+            }
+        }
+        assert_eq!(subsets(32, 3).len() as u128, binomial(32, 3));
+        assert_eq!(binomial(32, 16), 601_080_390);
     }
 }

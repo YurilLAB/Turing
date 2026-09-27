@@ -19,6 +19,9 @@ pub enum Source {
     Turing { rounds: usize },
     /// Full Turing, all-zero key, counter starting at zero: low-entropy input.
     TuringZeroKey,
+    /// Turing-256 with `rounds` rounds in counter mode (256-bit blocks), random
+    /// key and counter (docs/15).
+    Turing256 { rounds: usize },
     /// cSHAKE256 output: a known-good baseline.
     Cshake,
     /// The counter itself, unencrypted: a known-bad control.
@@ -30,6 +33,7 @@ impl Source {
         match self {
             Source::Turing { rounds } => format!("Turing, {rounds} round(s), random keys"),
             Source::TuringZeroKey => "Turing, all-zero key, counter from 0".into(),
+            Source::Turing256 { rounds } => format!("Turing-256, {rounds} round(s), random keys"),
             Source::Cshake => "cSHAKE256 (known good)".into(),
             Source::Counter => "plain counter (known bad)".into(),
         }
@@ -57,6 +61,18 @@ pub fn sequence(source: Source, index: usize, label: &str) -> Bits {
             for i in 0..blocks as u128 {
                 let mut b = (start + i).to_le_bytes();
                 t.encrypt_block(&mut b);
+                bytes.extend_from_slice(&b);
+            }
+        }
+        Source::Turing256 { rounds } => {
+            let t = turing::Turing256::new(&rng.bytes());
+            let start = u128::from_le_bytes(rng.bytes());
+            let high: [u8; 16] = rng.bytes();
+            for i in 0..(SEQUENCE_BITS / 256) as u128 {
+                let mut b = [0u8; 32];
+                b[..16].copy_from_slice(&start.wrapping_add(i).to_le_bytes());
+                b[16..].copy_from_slice(&high);
+                t.encrypt_rounds(&mut b, rounds);
                 bytes.extend_from_slice(&b);
             }
         }

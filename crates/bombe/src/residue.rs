@@ -305,6 +305,10 @@ pub fn stack_depths() -> Vec<(&'static str, usize)> {
     let prekey = vec![9u8; turing::shield::PREKEY_BYTES];
     vec![
         ("key schedule (keyschedule::expand)", memscan::stack_depth(|| drop(turing::keyschedule::expand::<ROUND_KEYS>(&key)))),
+        (
+            "Turing-256 key schedule (keyschedule256::expand)",
+            memscan::stack_depth(|| drop(turing::keyschedule256::expand::<{ 2 * turing::turing256::ROUND_KEYS }>(&key))),
+        ),
         ("masked key setup (MaskedTuring::with_mask_seed)", memscan::stack_depth(|| drop(MaskedTuring::with_mask_seed(&key, &[1; 64])))),
         (
             "shield mask (cSHAKE256 of the 16 KB prekey)",
@@ -314,4 +318,77 @@ pub fn stack_depths() -> Vec<(&'static str, usize)> {
             }),
         ),
     ]
+}
+
+/// Turing-256 (docs/15): the key, K' (64 bytes), the Feistel halves at each
+/// round-key pair and the 25 round keys of 32 bytes, searched for after
+/// `Turing256::new` (or the control without the stack burn), after
+/// encryptions and checked calls, and after drop. Hits are expected only in
+/// the caller's key buffer and the round keys' locked page.
+pub fn plain256(burn: bool) -> Vec<Snapshot> {
+    use turing::{Block256, Turing256};
+    let s = secrets256();
+    burn_stack();
+    let keys_at = AtomicUsize::new(0);
+    let names = if burn {
+        ["Turing256::new, scanned at once", "then encryptions and checked calls", "after the Turing256 is dropped"]
+    } else {
+        ["Turing256::new without the stack burn, scanned at once", "then encryptions and checked calls", "after drop"]
+    };
+    memscan::run_parked(
+        |p: &Parker| {
+            let t = if burn { Turing256::new(&s.key) } else { Turing256::new_without_stack_burn(&s.key) };
+            keys_at.store(t.stored_block(0).as_ptr() as usize, Ordering::Release);
+            p.park(1);
+            let mut b: Block256 = [0x5a; 32];
+            for _ in 0..3 {
+                t.encrypt_block(&mut b);
+            }
+            let _ = t.encrypt_block_checked(&mut b);
+            let _ = t.decrypt_block_checked(&mut b);
+            t.decrypt_block(&mut b);
+            p.park(2);
+            drop(t);
+            p.park(3);
+        },
+        3,
+        |step, stack| {
+            let scan = memscan::scan(&s.needles);
+            let mut allowed = vec![key_range(&s)];
+            if step < 3 {
+                allowed.push(page_of(keys_at.load(Ordering::Acquire)));
+            }
+            snapshot(names[step - 1], &s, &scan, &allowed, stack)
+        },
+    )
+}
+
+#[inline(never)]
+fn secrets256() -> Secrets {
+    use turing::turing256::ROUND_KEYS as KEYS256;
+    let key = random::new_key().expect("OS randomness");
+    let mut needles = Needles::new();
+    needles.add("key", &key[..]);
+    let mut whitened: SecretBox<[u8; 64]> = SecretBox::zeroed();
+    xof::cshake256_secret(turing::keyschedule256::KEY_LABEL, &key[..], &mut whitened[..]);
+    needles.add("whitened key K'", &whitened[..]);
+    let t = turing::Turing256::new(&key);
+    for i in 0..KEYS256 {
+        let mut rk: SecretBox<[u8; 32]> = SecretBox::zeroed();
+        rk.copy_from_slice(&t.round_key(i));
+        let half = if i % 2 == 0 { &whitened[..32] } else { &whitened[32..] };
+        let mut state: SecretBox<[u8; 32]> = SecretBox::zeroed();
+        for (o, (a, b)) in state.iter_mut().zip(rk.iter().zip(half)) {
+            *o = a ^ b;
+        }
+        needles.add(&format!("Feistel {} at pair {}", if i % 2 == 0 { "L" } else { "R" }, i / 2), &state[..]);
+    }
+    let first = needles.secrets();
+    for i in 0..KEYS256 {
+        let mut rk: SecretBox<[u8; 32]> = SecretBox::zeroed();
+        rk.copy_from_slice(&t.round_key(i));
+        needles.add(&format!("round key {i}"), &rk[..]);
+    }
+    let round_keys = first..needles.secrets();
+    Secrets { key, needles, round_keys }
 }

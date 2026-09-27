@@ -8,10 +8,10 @@ Bombe: cryptanalysis workbench for the Turing cipher
 Usage:
   bombe sbox <SOURCE> [--html <OUT.html>]
   bombe gen-sbox [--rust <OUT.rs>] [--html <OUT.html>]
-  bombe gen-linear [--rust <OUT.rs>]
+  bombe gen-linear [--turing-256] [--rust <OUT.rs>]
   bombe key-schedule
   bombe rounds [ROUNDS]
-  bombe vectors [--out PATH]
+  bombe vectors [--turing-256] [--out PATH]
   bombe attack [--quick] [--deep] [--report PATH | --no-report]
   bombe trace [--key HEX] [--plaintext HEX] [--rounds N]
               [--flip-plaintext-bit N | --flip-key-bit N | --key2 HEX | --plaintext2 HEX]
@@ -115,6 +115,9 @@ fn print_matrix(m: &matrix::Matrix) {
 }
 
 fn run_gen_linear(args: &[String]) -> Result<bool, String> {
+    if args.first().map(String::as_str) == Some("--turing-256") {
+        return run_gen_linear256(&args[1..]);
+    }
     let (rust, html_out) = parse_outputs(args)?;
     if html_out.is_some() {
         return Err("gen-linear has no HTML output".into());
@@ -148,6 +151,27 @@ fn run_gen_linear(args: &[String]) -> Result<bool, String> {
         println!("\nRust constants written to {path}");
     }
     Ok(aes_report.passed() && l.columns.report.passed() && l.state.report.passed())
+}
+
+/// Turing-256's 32x32 MixState (docs/15).
+fn run_gen_linear256(args: &[String]) -> Result<bool, String> {
+    let (rust, html_out) = parse_outputs(args)?;
+    if html_out.is_some() {
+        return Err("gen-linear has no HTML output".into());
+    }
+    let c = gen::linear256();
+    let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    println!("Turing-256 MixState (32x32): cSHAKE256(X = {}, S = \"{}\")", c.counter, c.label);
+    println!("  x = {}", hex(&c.xs));
+    println!("  y = {}", hex(&c.ys));
+    println!("  Cauchy structure (proves MDS)       {}", if matrix::is_cauchy(&c.m, &c.xs, &c.ys) { "yes" } else { "NO" });
+    print!("{}", c.report.to_text());
+    println!("  verdict: {}", if c.report.passed() { "MDS" } else { "NOT MDS" });
+    if let Some(path) = rust {
+        std::fs::write(&path, gen::render_linear256_rust(&c)).map_err(|e| format!("cannot write {path}: {e}"))?;
+        println!("\nRust constants written to {path}");
+    }
+    Ok(c.report.passed())
 }
 
 fn run_key_schedule() -> Result<bool, String> {
@@ -325,14 +349,17 @@ fn run_attack(args: &[String]) -> Result<bool, String> {
 }
 
 fn run_vectors(args: &[String]) -> Result<bool, String> {
-    let text = bombe::refcipher::render_vectors();
+    let (text, args) = match args.first().map(String::as_str) {
+        Some("--turing-256") => (bombe::refcipher256::render_vectors(), &args[1..]),
+        _ => (bombe::refcipher::render_vectors(), args),
+    };
     match args {
         [flag, path] if flag == "--out" => {
             std::fs::write(path, &text).map_err(|e| format!("cannot write {path}: {e}"))?;
             println!("Known-answer vectors written to {path}");
         }
         [] => print!("{text}"),
-        _ => return Err("usage: bombe vectors [--out PATH]".into()),
+        _ => return Err("usage: bombe vectors [--turing-256] [--out PATH]".into()),
     }
     Ok(true)
 }

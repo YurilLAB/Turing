@@ -40,13 +40,14 @@ pub fn two_sided_critical(alpha: f64) -> f64 {
     (lo + hi) / 2.0
 }
 
-fn summarise(rounds: usize, samples: usize, counts: &[u32], inputs: usize) -> Avalanche {
+fn summarise(rounds: usize, samples: usize, counts: &[u32]) -> Avalanche {
     let n = samples as f64;
     let total: u64 = counts.iter().map(|&c| c as u64).sum();
     let mean = total as f64 / (n * counts.len() as f64);
     let sd = (n / 4.0).sqrt();
     let worst_z = counts.iter().map(|&c| (c as f64 - n / 2.0).abs() / sd).fold(0.0, f64::max);
-    Avalanche { rounds, samples, mean, worst_z, threshold: two_sided_critical(0.01 / (inputs * 128) as f64) }
+    // One Bonferroni share per cell (input bit, output bit).
+    Avalanche { rounds, samples, mean, worst_z, threshold: two_sided_critical(0.01 / counts.len() as f64) }
 }
 
 fn accumulate(counts: &mut [u32], row: usize, diff: &[u8; 16]) {
@@ -75,7 +76,7 @@ pub fn plaintext(rounds: usize, samples: usize, label: &str) -> Avalanche {
             accumulate(&mut counts, bit, &diff);
         }
     }
-    summarise(rounds, samples, &counts, 128)
+    summarise(rounds, samples, &counts)
 }
 
 /// Key avalanche: flip each of the 256 key bits and watch the ciphertext.
@@ -96,5 +97,54 @@ pub fn key(rounds: usize, samples: usize, label: &str) -> Avalanche {
             accumulate(&mut counts, bit, &diff);
         }
     }
-    summarise(rounds, samples, &counts, 256)
+    summarise(rounds, samples, &counts)
+}
+
+/// Plaintext avalanche of Turing-256 (docs/15): 256 x 256 cells.
+pub fn plaintext256(rounds: usize, samples: usize, label: &str) -> Avalanche {
+    let mut rng = Rng::new(label);
+    let mut counts = vec![0u32; 256 * 256];
+    for _ in 0..samples {
+        let t = turing::Turing256::new(&rng.bytes());
+        let p: [u8; 32] = rng.bytes();
+        let mut base = p;
+        t.encrypt_rounds(&mut base, rounds);
+        for bit in 0..256 {
+            let mut q = p;
+            q[bit / 8] ^= 1 << (bit % 8);
+            t.encrypt_rounds(&mut q, rounds);
+            for (byte, (a, b)) in q.iter().zip(&base).enumerate() {
+                let d = a ^ b;
+                for k in 0..8 {
+                    counts[bit * 256 + byte * 8 + k] += ((d >> k) & 1) as u32;
+                }
+            }
+        }
+    }
+    summarise(rounds, samples, &counts)
+}
+
+/// Key avalanche of Turing-256: flip each of the 256 key bits.
+pub fn key256(rounds: usize, samples: usize, label: &str) -> Avalanche {
+    let mut rng = Rng::new(label);
+    let mut counts = vec![0u32; 256 * 256];
+    for _ in 0..samples {
+        let k: [u8; 32] = rng.bytes();
+        let p: [u8; 32] = rng.bytes();
+        let mut base = p;
+        turing::Turing256::new(&k).encrypt_rounds(&mut base, rounds);
+        for bit in 0..256 {
+            let mut k2 = k;
+            k2[bit / 8] ^= 1 << (bit % 8);
+            let mut c = p;
+            turing::Turing256::new(&k2).encrypt_rounds(&mut c, rounds);
+            for (byte, (a, b)) in c.iter().zip(&base).enumerate() {
+                let d = a ^ b;
+                for k in 0..8 {
+                    counts[bit * 256 + byte * 8 + k] += ((d >> k) & 1) as u32;
+                }
+            }
+        }
+    }
+    summarise(rounds, samples, &counts)
 }

@@ -165,6 +165,19 @@ impl<const N: usize> RoundKeys<N> {
         self.material.dump_excluded()
     }
 
+    /// Round keys written by `fill` straight into their own locked pages,
+    /// sealed with the keyed checksum at the point cSHAKE256(`whitened`,
+    /// S = `check_label`), made odd. For Turing-256's schedule
+    /// (keyschedule256.rs), which stores each 32-byte round key as two blocks.
+    pub(crate) fn sealed(fill: impl FnOnce(&mut [Block; N]), check_label: &str, whitened: &[u8]) -> RoundKeys<N> {
+        let mut material: SecretBox<KeyMaterial<N>> = SecretBox::zeroed();
+        fill(&mut material.keys);
+        xof::cshake256_secret(check_label, whitened, &mut material.point);
+        material.point[0] |= 1;
+        material.check = checksum(&material.keys, &material.point);
+        RoundKeys { material }
+    }
+
     /// Round key `round`. Analysis builds only (feature `analysis`).
     #[cfg(feature = "analysis")]
     pub fn get(&self, round: usize) -> &Block {

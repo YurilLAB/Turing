@@ -1,9 +1,10 @@
 # Turing
 
 An experimental 128-bit block cipher with a 256-bit key, designed from scratch in
-Rust and named after Alan Turing. A file-encryption tool on top of it, with
-post-quantum hybrid key wrapping (X-Wing) and password unlock (Argon2id), is
-planned (docs/03).
+Rust and named after Alan Turing, and Turing-256, the same design on a
+256-bit block (docs/15). A file-encryption tool on top of it, with
+post-quantum key wrapping and password unlock (Argon2id), is planned
+(docs/03).
 
 **Experimental. Do not use it to protect real data.** A new cipher is only
 trusted after years of public cryptanalysis.
@@ -35,7 +36,7 @@ bytes together and adding a round key.
 
 ## What has been tested
 
-- `bombe attack` runs 23 sections of attacks against the real cipher:
+- `bombe attack` runs 24 sections of attacks against the real cipher:
   differential, linear, square and division-property, boomerang, cube,
   related-key, differential-linear, interpolation, invariant, symmetry,
   yoyo and meet-in-the-middle attacks, plus the implementation attacks
@@ -72,19 +73,24 @@ All of this is our own analysis, which is why Turing stays experimental.
   (`random::new_key`). Keys live in locked pages, kept out of core dumps
   on Linux; `keys_locked()` and `keys_dump_excluded()` report what the
   operating system granted.
+- `crates/turing` also holds **Turing-256** (`Turing256`): a 256-bit block
+  with the same S-box, alternating 32x32 MixState and ShiftRows +
+  MixColumns, the same kind of key schedule and the same locked,
+  fault-checked round keys, 24 rounds. The wider block moves the birthday
+  bound of any mode from 2^64 to 2^128 blocks (docs/15).
 - `crates/bombe`: the cryptanalysis workbench, named after Turing's
   code-breaking machine. It exists to break Turing.
 
 ## Bombe commands
 
 ```
-cargo run --release -p bombe -- attack             # attack the real cipher: 23 sections, 0 failures expected
+cargo run --release -p bombe -- attack             # attack the real cipher: 24 sections, 0 failures expected
 cargo run --release -p bombe -- attack --deep      # adds the long runs (2^33-encryption square attack, 2^32 structures through 7 rounds, NIST at scale), about an hour on 4 threads
 cargo run --release -p bombe -- trace --flip-plaintext-bit 0
 cargo run --release -p bombe -- sbox turing --html sbox.html
 cargo run --release -p bombe -- rounds             # compare round structures
 cargo run --release -p bombe -- key-schedule
-cargo run --release -p bombe -- vectors            # known-answer vectors
+cargo run --release -p bombe -- vectors            # known-answer vectors (--turing-256 for Turing-256)
 ```
 
 `cargo test` runs the whole suite: the cipher against an independent

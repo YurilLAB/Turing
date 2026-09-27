@@ -5,6 +5,7 @@
 //! on anything of ours.
 
 pub mod aes;
+pub mod attack256;
 pub mod analysis;
 pub mod avalanche;
 pub mod battery;
@@ -35,6 +36,7 @@ pub mod nist;
 pub mod power;
 pub mod provable;
 pub mod refcipher;
+pub mod refcipher256;
 pub mod relatedkey;
 pub mod report;
 pub mod residue;
@@ -46,4 +48,5 @@ pub mod timing;
 pub mod toctou;
 pub mod trace;
 pub mod trail;
+pub mod wide;
 pub mod yoyo;

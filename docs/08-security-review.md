@@ -150,6 +150,15 @@ Beierle et al. citations, the biclique complexity (2^254.4).
 | 6 | Doc 10 | "The best attack breaks 3 rounds" and "division property not covered" | Accuracy | The division property predicts, and a 2^32-plaintext run confirms, a 4-round key recovery; doc 10 now points to doc 11 |
 | 7 | New structured square attack | With two fixed sets, a correct attack is reported as failed about 6% of the time (a wrong key byte guess survives both sets with probability 2^-16) | Tooling | Adds sets until every byte is unique |
 
+## Review 8 (step 11, Turing-256): problems found while building it
+
+| # | Where | Problem | Severity | Fix |
+|---|---|---|---|---|
+| 1 | `linear256::apply32` | Branch-free source, but the release build turned "XOR the column AND the bit mask" into a branch on each bit of every state byte (16 conditional jumps): dudect measured |t| = 2,524 on encryption, 4,108 on decryption, 109 on key setup | Timing leak (Turing-256) | Masks pass through a register-only value barrier (`linear::opaque`, `bit_masks`); one jump left per function, the loop counter; |t| now below 1.9 |
+| 2 | `linear::apply16`, `apply_columns` (Turing) | The same source pattern compiled branch-free only by the optimiser's cost model | Latent (no leak measured) | The same barrier; output unchanged, known-answer vectors pass; about 15% slower (a first, memory-based barrier cost 45%) |
+| 3 | `matrix::subsets` | Enumerated subsets by looping over all 2^n masks, only possible up to 16 bytes (and a 32-bit shift) | Tooling | Gosper's step over u64 masks, same order; a test compares it with the old enumeration |
+| 4 | Doc 15 draft | Quoted Turing's 4-round bound as 22 active S-boxes: docs/09's "at least 22" is a threshold, the exact minimum is 25 | Accuracy | Corrected to 25 (2^-150) |
+
 ## Review 7 (step 10, fifth campaign): earlier claims against the new attacks
 
 | # | Where | Problem | Severity | Fix |

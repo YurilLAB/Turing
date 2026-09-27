@@ -267,3 +267,45 @@ MixState) = 36. Differential enumeration counted as for AES's 10 bytes
 output 1): AES 1 + 4 + 4 + 1 = 10; Turing 1 + 4 + 16 + 1 = 22, because
 MixState^-1 of a one-byte difference has all 16 bytes active. The pair must
 end 16 -> 1 through MixState: 15 bytes forced to zero, 2^-120.
+
+## Turing-256 (docs/15)
+
+### Why counting active bytes is exact for alternating layers
+
+For an n x n MDS matrix M, the transitions x -> Mx on activity patterns are
+exactly the pairs of supports with |X| + |Y| >= n + 1 (or both empty): every
+support of that size carries a codeword of the MDS code {(x, Mx)} (the
+remark in `trail.rs`). So after MixState any pattern with at least
+n + 1 - a active bytes is reachable from any pattern with a, and the next
+layer sees only a count. ShiftRows + MixColumns is only ever entered from
+such a free pattern (after MixState, or at the start of a window), and
+ShiftRows is a permutation, so p active bytes can sit in any m columns with
+ceil(p/4) <= m <= min(p, n/4); each active column, with a_c bytes in, puts
+out between 5 - a_c and 4 (branch number 5). The output count q is
+reachable exactly when 5m - p <= q <= 4m for some such m. The minimum over
+a window is then a dynamic programme over n + 1 counts. For n = 16 it gives
+the exact pattern-level minima for every window (1, 5, 18, 25, 35, 36, 52,
+53, ...) from both starting layers; for n = 32: 1, 5, 34, 45, 67, 68, 100,
+101.
+
+The same reduction holds for the word-level division property: MixState
+keeps only the smallest total, and ShiftRows + MixColumns from a total only
+needs how the ones and eights can be spread over columns (a small dynamic
+programme over columns). It reproduces `division::balanced_until` on 46
+structures from both starting layers.
+
+### Turing-256's integral reach, by hand for the largest set
+
+31 active bytes: total 248. After MixState and an S-box layer the smallest
+vectors hold 8 ones and 24 eights (total 200; 7 eights fewer would need
+more than 32 bytes). Spread over 8 columns of 4 bytes, every byte nonzero,
+three eights per column gives column totals 25 and after MixColumns and the
+S-box layer 4 per column, 32 in all; MixState and the S-box layer then give
+five 1s at least; the next ShiftMix spreads them over two or more columns
+(total 2); MixState keeps 2 at the input of S-box layer 6: balanced there.
+With 30 active bytes (total 240) the smallest vectors after the first
+S-box layer hold 16 ones and 16 eights; two eights per column give column
+totals 18 and 3 per column after the next S-box layer, 24 in all. A total
+of 24 after MixState fits in four 1s, which one column can hold, so a
+single 1 can come out of S-box layer 5: balanced to layer 5 only. The
+difference between 30 and 31 bytes is whether that total is at most 28.
