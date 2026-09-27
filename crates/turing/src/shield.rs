@@ -23,16 +23,27 @@ use crate::memory::{self, SecretBox};
 use crate::random::{os_random, RandomnessError};
 use crate::{xof, Turing};
 use core::hint::black_box;
-use zeroize::Zeroize;
+
 
 /// The prekey size OpenSSH uses (16 KB).
 pub const PREKEY_BYTES: usize = 16 * 1024;
 const SHIELD_LABEL: &str = "Turing v2 key shield";
 
-fn mask(prekey: &[u8; PREKEY_BYTES]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    xof::cshake256_secret(SHIELD_LABEL, prekey, &mut out);
-    out
+/// The mask, written straight into the caller's buffer. It must never be
+/// returned by value: a returned array is moved through the caller's own
+/// frame, above the part of the stack that `burn_stack` reaches, and mask
+/// XOR shielded key is the key. Until the review of 2026-09-27 it was, and
+/// `new` and `refresh` each left a whole mask in dead stack
+/// (bombe tests/memory.rs, shield_mask_is_nowhere_in_memory).
+fn mask_into(prekey: &[u8; PREKEY_BYTES], out: &mut [u8; 32]) {
+    xof::cshake256_secret(SHIELD_LABEL, prekey, out);
+}
+
+/// A fresh locked, wiped-on-drop buffer holding the mask.
+fn mask(prekey: &[u8; PREKEY_BYTES]) -> SecretBox<[u8; 32]> {
+    let mut m: SecretBox<[u8; 32]> = SecretBox::zeroed();
+    mask_into(prekey, &mut m);
+    m
 }
 
 pub struct ShieldedKey {
@@ -46,23 +57,27 @@ impl ShieldedKey {
     pub fn new(key: &[u8; 32]) -> Result<ShieldedKey, RandomnessError> {
         let mut prekey: SecretBox<[u8; PREKEY_BYTES]> = SecretBox::zeroed();
         os_random(&mut prekey[..])?;
-        let mut m = mask(&prekey);
+        let m = mask(&prekey);
         let mut shielded: SecretBox<[u8; 32]> = SecretBox::zeroed();
-        for (s, (k, mk)) in shielded.iter_mut().zip(key.iter().zip(&m)) {
+        for (s, (k, mk)) in shielded.iter_mut().zip(key.iter().zip(m.iter())) {
             *s = k ^ mk;
         }
-        m.zeroize();
+        drop(m);
         memory::burn_stack();
         Ok(ShieldedKey { prekey, shielded })
     }
 
-    /// Runs `f` on the unshielded key, then wipes it.
+    /// Runs `f` on the unshielded key, then wipes it. The mask and the key
+    /// live only in locked memory that is wiped when dropped.
     fn with_key<R>(&self, f: impl FnOnce(&[u8; 32]) -> R) -> R {
-        let mut m = mask(&self.prekey);
-        let mut key: [u8; 32] = core::array::from_fn(|i| self.shielded[i] ^ m[i]);
-        m.zeroize();
+        let m = mask(&self.prekey);
+        let mut key: SecretBox<[u8; 32]> = SecretBox::zeroed();
+        for (k, (s, mk)) in key.iter_mut().zip(self.shielded.iter().zip(m.iter())) {
+            *k = s ^ mk;
+        }
+        drop(m);
         let out = f(&key);
-        key.zeroize();
+        drop(key);
         memory::burn_stack();
         out
     }
@@ -83,17 +98,28 @@ impl ShieldedKey {
     pub fn refresh(&mut self) -> Result<(), RandomnessError> {
         let mut fresh: SecretBox<[u8; PREKEY_BYTES]> = SecretBox::zeroed();
         os_random(&mut fresh[..])?;
-        let (mut old, mut new) = (mask(&self.prekey), mask(&fresh));
-        let mut delta: [u8; 32] = black_box(core::array::from_fn(|i| old[i] ^ new[i]));
-        for (s, d) in self.shielded.iter_mut().zip(&delta) {
+        let (old, new) = (mask(&self.prekey), mask(&fresh));
+        let mut delta: SecretBox<[u8; 32]> = SecretBox::zeroed();
+        for (d, (o, n)) in delta.iter_mut().zip(old.iter().zip(new.iter())) {
+            *d = black_box(o ^ n);
+        }
+        drop((old, new));
+        for (s, d) in self.shielded.iter_mut().zip(delta.iter()) {
             *s ^= d;
         }
-        old.zeroize();
-        new.zeroize();
-        delta.zeroize();
+        drop(delta);
         self.prekey = fresh;
         memory::burn_stack();
         Ok(())
+    }
+
+    /// Writes the current mask into `out`, for Bombe's memory scan: the mask
+    /// is a secret the key scans cannot recognise (it is neither the key nor
+    /// a key-schedule value), yet mask XOR shielded key is the key. Analysis
+    /// builds only.
+    #[cfg(feature = "analysis")]
+    pub fn mask_for_analysis(&self, out: &mut [u8; 32]) {
+        mask_into(&self.prekey, out);
     }
 
     /// Whether the operating system locked both allocations.

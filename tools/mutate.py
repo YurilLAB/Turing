@@ -5,7 +5,7 @@ tests caught it and always restores the original file (and verifies it). A
 test run that exceeds the time limit has not passed either: it counts as
 caught, and the whole process tree is killed.
 
-    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7] [--check] [NAME ...]
+    python tools/mutate.py [--step8 | --step9 | --round3 | --round4 | --round5 | --round6 | --round7 | --review1] [--check] [NAME ...]
 
 --check only verifies that every pattern still matches the current code
 exactly once, without running any tests. NAME filters mutations by name.
@@ -260,7 +260,7 @@ MUTATIONS_ROUND4 = [
      ["-p", "bombe", "--release", "--test", "leakage"]),
     # Shielding
     ("shield: refresh does not re-mask", "crates/turing/src/shield.rs",
-     "        for (s, d) in self.shielded.iter_mut().zip(&delta) {\n            *s ^= d;\n        }\n", "",
+     "        for (s, d) in self.shielded.iter_mut().zip(delta.iter()) {\n            *s ^= d;\n        }\n", "",
      TURING),
     ("shield: key stored in the clear", "crates/turing/src/shield.rs",
      "            *s = k ^ mk;", "            *s = *k;",
@@ -410,29 +410,22 @@ MUTATIONS_ROUND6 = [
 MUTATIONS_ROUND7 = [
     # Turing-1026, the KEM (docs/16)
     ("turing-1026: rejection returns the decrypted key", "crates/turing/src/turing1026.rs",
-     "                let tmp = *out ^ ((*out ^ k) & accept_bytes);\n                *out ^= (*out ^ tmp) & accept_coeffs;",
-     "                let _ = (accept_bytes, accept_coeffs);\n                *out = k;",
+     "            *out ^= (*out ^ k) & accept;", "            *out = k;",
      TURING),
-    ("turing-1026: re-encryption byte check always accepts", "crates/turing/src/turing1026.rs",
-     "        let accept_bytes = fault.accept_packed(eq_mask(&w.packed, body));",
-     "        let accept_bytes = fault.accept_packed(0xffu8);",
-     ["-p", "bombe", "--release", "--lib", "fault1026"]),
-    ("turing-1026: re-encryption coefficient check always accepts", "crates/turing/src/turing1026.rs",
-     "        let accept_coeffs = fault.accept_coeffs(eq_mask_u16(&w.bp, &received_bp) & eq_mask_u16(&w.c, &received_c));",
-     "        let accept_coeffs = fault.accept_coeffs(0xffu8);",
-     ["-p", "bombe", "--release", "--lib", "fault1026"]),
-    ("turing-1026: selection collapses to one check", "crates/turing/src/turing1026.rs",
-     "                *out ^= (*out ^ tmp) & accept_coeffs;",
-     "                *out ^= (*out ^ tmp) & 0xffu8;",
-     ["-p", "bombe", "--release", "--lib", "fault1026"]),
+    ("turing-1026: re-encryption check skipped", "crates/turing/src/turing1026.rs",
+     "        let accept = eq_mask(&w.packed, body);", "        let accept = 0xffu8;",
+     TURING),
+    ("turing-1026: re-encryption compares B' only", "crates/turing/src/turing1026.rs",
+     "        let accept = eq_mask(&w.packed, body);", "        let accept = eq_mask(&w.packed[..B_PRIME_BYTES], &body[..B_PRIME_BYTES]);",
+     TURING),
     ("turing-1026: rejection key without z", "crates/turing/src/turing1026.rs",
-     "        if !fault.skip_rejection_z() {\n            h.absorb(&self.secret.z);\n        }\n        h.absorb(&self.public.hash);",
-     "        h.absorb(&self.public.hash);",
-     TURING),
+     "        h.absorb(&self.secret.z);\n        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);",
+     "        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);",
+     ["-p", "bombe", "--release", "--test", "turing1026"]),
     ("turing-1026: rejection key without H(pk)", "crates/turing/src/turing1026.rs",
-     "        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);\n        h.squeeze(&mut key[..]);",
-     "        h.absorb(ciphertext);\n        h.squeeze(&mut key[..]);",
-     TURING),
+     "        h.absorb(&self.secret.z);\n        h.absorb(&self.public.hash);\n        h.absorb(ciphertext);",
+     "        h.absorb(&self.secret.z);\n        h.absorb(ciphertext);",
+     ["-p", "bombe", "--release", "--test", "turing1026"]),
     ("turing-1026: salt left out of the coins", "crates/turing/src/turing1026.rs",
      "        g.absorb(&w.mu);\n        g.absorb(salt);", "        g.absorb(&w.mu);",
      TURING),
@@ -481,6 +474,47 @@ MUTATIONS_ROUND7 = [
      ["-p", "bombe", "--release", "--test", "turing1026"]),
 ]
 
+# The fixes of the 2026-09-27 review (research/reviews/2026-09-27/): each
+# planted bug undoes one defence, and a test added with the fix must catch it.
+MEMORY_RELEASE = ["-p", "bombe", "--release", "--test", "memory", "shield_mask"]
+MUTATIONS_REVIEW1 = [
+    ("checksum: intact ignores whether the point is odd", "crates/turing/src/keyschedule.rs",
+     "        (diff | even) == 0", "        diff == 0",
+     TURING + ["reset_faults"]),
+    ("checksum: stored check without its constant term", "crates/turing/src/keyschedule.rs",
+     "    core::array::from_fn(|i| c[i] ^ CHECK_CONSTANT[i])", "    c",
+     TURING + ["reset_faults"]),
+    ("masked: intact ignores whether the point is odd", "crates/turing/src/masked.rs",
+     "        (diff | even) == 0", "        diff == 0",
+     TURING + ["reset_faults"]),
+    ("shield: new moves the mask through its own frame", "crates/turing/src/shield.rs",
+     "        let m = mask(&prekey);", "        let m = { let mut v = [0u8; 32]; mask_into(&prekey, &mut v); v };",
+     MEMORY_RELEASE),
+    ("shield: refresh computes the new mask in its own frame", "crates/turing/src/shield.rs",
+     "        let (old, new) = (mask(&self.prekey), mask(&fresh));",
+     "        let (old, new) = (mask(&self.prekey), { let mut v = [0u8; 32]; mask_into(&fresh, &mut v); v });",
+     MEMORY_RELEASE),
+    ("checksum: intact compares only 8 of 16 bytes", "crates/turing/src/keyschedule.rs",
+     "        let diff = now.iter().zip(&self.material.check).fold(0u8, |acc, (a, b)| acc | (a ^ b));",
+     "        let diff = now.iter().take(8).zip(&self.material.check).fold(0u8, |acc, (a, b)| acc | (a ^ b));",
+     TURING + ["every_bit_of_the_check"]),
+    ("masked: intact compares only 8 of 16 bytes", "crates/turing/src/masked.rs",
+     "        let diff = a.iter().zip(&b).fold(0u8, |acc, (x, y)| acc | (x ^ y));",
+     "        let diff = a.iter().take(8).zip(&b).fold(0u8, |acc, (x, y)| acc | (x ^ y));",
+     TURING + ["every_bit_of_the_check_shares"]),
+    ("checked: decrypt-and-compare ignores the last byte", "crates/turing/src/cipher.rs",
+     "    let diff = core::hint::black_box(input.iter().zip(&check).fold(0u8, |acc, (a, b)| acc | (a ^ b)));",
+     "    let diff = core::hint::black_box(input.iter().zip(&check).take(15).fold(0u8, |acc, (a, b)| acc | (a ^ b)));",
+     TURING + ["decrypt_and_compare_covers_every_byte"]),
+    ("turing-256: decrypt-and-compare ignores the last byte", "crates/turing/src/turing256.rs",
+     "    let diff = core::hint::black_box(input.iter().zip(&check).fold(0u8, |acc, (a, b)| acc | (a ^ b)));",
+     "    let diff = core::hint::black_box(input.iter().zip(&check).take(31).fold(0u8, |acc, (a, b)| acc | (a ^ b)));",
+     TURING + ["decrypt_and_compare_covers_every_byte"]),
+    ("turing-256: second key check removed", "crates/turing/src/turing256.rs",
+     "        if result.is_err() || !self.keys.intact() {", "        if result.is_err() {",
+     TURING + ["a_key_flip_between_check_and_use_is_caught"]),
+]
+
 def kill_tree(p):
     """Kills cargo and the test binary it started."""
     if os.name == "nt":
@@ -511,7 +545,7 @@ def run(args):
 
 
 def main():
-    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7}
+    sets = {"--step8": MUTATIONS_STEP8, "--step9": MUTATIONS_STEP9, "--round3": MUTATIONS_ROUND3, "--round4": MUTATIONS_ROUND4, "--round5": MUTATIONS_ROUND5, "--round6": MUTATIONS_ROUND6, "--round7": MUTATIONS_ROUND7, "--review1": MUTATIONS_REVIEW1}
     check_only = "--check" in sys.argv
     only = [a for a in sys.argv[1:] if a not in sets and a != "--check"]
     mutations = next((m for flag, m in sets.items() if flag in sys.argv), MUTATIONS)

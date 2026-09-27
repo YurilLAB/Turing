@@ -104,18 +104,23 @@ impl Turing256 {
     /// result and compares, then checks the keys again; on any fault the
     /// block is wiped (Turing's `encrypt_block_checked`).
     pub fn encrypt_block_checked(&self, block: &mut Block256) -> Result<(), FaultDetected> {
-        self.guarded(block, true)
+        self.guarded(block, true, || {})
     }
 
     pub fn decrypt_block_checked(&self, block: &mut Block256) -> Result<(), FaultDetected> {
-        self.guarded(block, false)
+        self.guarded(block, false, || {})
     }
 
-    fn guarded(&self, block: &mut Block256, encrypt: bool) -> Result<(), FaultDetected> {
+    /// As Turing's: `between` runs right after the first key check, where the
+    /// tests inject a fault to reach the second check (until the review of
+    /// 2026-09-27 no test reached it, nor decrypt-and-compare: removing both
+    /// passed every test).
+    fn guarded(&self, block: &mut Block256, encrypt: bool, between: impl FnOnce()) -> Result<(), FaultDetected> {
         if !self.keys.intact() {
             block.zeroize();
             return Err(FaultDetected);
         }
+        between();
         let result = if encrypt {
             checked(block, |b| self.encrypt_block(b), |b| self.decrypt_block(b))
         } else {
@@ -249,6 +254,39 @@ mod tests {
         let mut b = [5u8; 32];
         assert_eq!(t.encrypt_block_checked(&mut b), Err(FaultDetected));
         assert_eq!(b, [0u8; 32]);
+    }
+
+    // A round key that flips after the first check, before the computation
+    // reads it, corrupts both directions alike and passes decrypt-and-compare;
+    // only the second key check sees it.
+    #[test]
+    fn a_key_flip_between_check_and_use_is_caught() {
+        for (stored, bit) in [(0, 5), (25, 64), (2 * ROUNDS + 1, 127)] {
+            let t = Turing256::new(&[4; 32]);
+            let mut block = [0x21u8; 32];
+            let result = t.guarded(&mut block, true, || unsafe { t.keys.flip_bit_raw(stored, bit) });
+            assert_eq!(result, Err(FaultDetected), "stored block {stored}, bit {bit}");
+            assert_eq!(block, [0u8; 32], "wiped, not released");
+        }
+    }
+
+    // Decrypt-and-compare sees a fault in the computation at every byte of
+    // the block, the last one included.
+    #[test]
+    fn decrypt_and_compare_covers_every_byte() {
+        let t = Turing256::new(&[6; 32]);
+        for byte in 0..32 {
+            let mut block = [0x3cu8; 32];
+            // The fault hits the recomputed block, so it differs from the
+            // input in this one byte only: a fault in the ciphertext would
+            // change every byte after decryption and hide a partial compare.
+            let result = checked(&mut block, |b| t.encrypt_block(b), |b| {
+                t.decrypt_block(b);
+                b[byte] ^= 0x80;
+            });
+            assert_eq!(result, Err(FaultDetected), "fault in byte {byte}");
+            assert_eq!(block, [0u8; 32]);
+        }
     }
 
     // One flipped plaintext bit changes about half the ciphertext bits.

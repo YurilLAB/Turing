@@ -21,6 +21,19 @@ fn report(snaps: &[Snapshot]) {
     }
 }
 
+// The shielding mask (mask XOR shielded key = key) is found only in the
+// scanner's own copy. The review of 2026-09-27 found all of it in the dead
+// stack frame of ShieldedKey::new, which burn_stack does not reach; the
+// shielded-key scan could not see it because it never searched for the mask.
+#[test]
+fn shield_mask_is_nowhere_in_memory() {
+    let _turn = turn();
+    let snaps = residue::shield_mask();
+    report(&snaps);
+    assert!(snaps.iter().all(|s| s.expected > 0), "control: the scanner's own copy of the mask must be found");
+    assert!(snaps.iter().all(Snapshot::clean), "a copy of the shielding mask was left behind");
+}
+
 #[test]
 fn control_a_planted_secret_is_found_where_it_was_put() {
     let _turn = turn();

@@ -157,7 +157,17 @@ is looking at.
 | `Turing::new`, straight after; after encryptions and checked calls; after drop | nothing |
 | Control: the same key setup without the burn | two pieces of K' (caught) |
 | `MaskedTuring::new`, then masked encryptions, then drop | nothing, and no round key anywhere |
-| `ShieldedKey::new` with the caller's copy wiped; a cipher made from it; after refresh | nothing |
+| `ShieldedKey::new` with the caller's copy wiped; a cipher made from it; after refresh | nothing of the key, the round keys or K' |
+| The shielding mask itself (mask XOR shielded key = key), after `new`, after a cipher, after `refresh` | nothing since the fix of 2026-09-27; before it, the whole mask after `new` and a mask after `refresh`, in dead stack (4 of 4 fragments each) |
+
+The scan above never searched for the shielding mask, which is neither
+the key nor a key-schedule value, so it could not see that `new` and
+`refresh` each left one in their own stack frame, above the part
+`burn_stack` reaches: `mask` returned the 32 bytes by value. The review of
+2026-09-27 found it (research/reviews/2026-09-27/v2-hardening.md, F6). The
+mask, the mask difference and the unshielded key now exist only in
+`SecretBox`es, and `tests/memory.rs` (`shield_mask_is_nowhere_in_memory`)
+searches for every mask, with a control that finds the scanner's own copy.
 
 ### The OS generator keeps a copy
 
@@ -322,7 +332,18 @@ every round key could match a moved point with a recomputed checksum, but
 would have nothing left to attack; a unit test shows both. Either way, a
 fault arranged without knowing the key escapes with probability at most
 25/2^127 ≈ 2^-122.4, however many bits it flips and wherever they are, H
-included. An earlier version of this page only asserted the case of a
+included, provided the pattern of flipped bits does not depend on the
+stored data. A reset (stuck-at) fault breaks that proviso: it is also
+arranged without the key, but its pattern is the stored value itself, and
+at H = 0 the checksum is 0 for every key set. Until the review of
+2026-09-27 (research/reviews/2026-09-27/v2-hardening.md, F1), zeroing the
+stored check and H made every later fault pass, and zeroing round key 24
+with them (one 64-byte cache line) released C' with C XOR C' = RK_24, the
+whole last round key. The check now carries a public non-zero constant
+term (keyschedule.rs, CHECK_CONSTANT) and `intact` also requires H to be
+odd, so neither those resets, nor all material zeroed, nor all of it stuck
+at one, verifies (`reset_faults_are_caught`, plain and masked, and
+`tools/mutate.py --review1`). An earlier version of this page only asserted the case of a
 fault in H. The weights start at H^1: with H^0, bit j of RK_0 and bit j of
 the stored checksum would cancel whatever H is. Both cases were also
 checked exhaustively in GF(2^8) with four round keys, where every point and

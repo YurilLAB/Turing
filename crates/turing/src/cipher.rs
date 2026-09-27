@@ -302,6 +302,26 @@ mod tests {
         }
     }
 
+    // Decrypt-and-compare sees a fault in the computation at every byte of
+    // the block. Until the review of 2026-09-27 a comparison that ignored
+    // byte 15 passed every test here (and Bombe's classic_attacks and toctou).
+    #[test]
+    fn decrypt_and_compare_covers_every_byte() {
+        let t = Turing::new(&key(10));
+        for byte in 0..16 {
+            let mut block = [0x3cu8; 16];
+            // The fault hits the recomputed block, so it differs from the
+            // input in this one byte only: a fault in the ciphertext would
+            // change every byte after decryption and hide a partial compare.
+            let result = checked(&mut block, |b| t.encrypt_block(b), |b| {
+                t.decrypt_block(b);
+                b[byte] ^= 0x80;
+            });
+            assert_eq!(result, Err(FaultDetected), "fault in byte {byte}");
+            assert_eq!(block, [0u8; 16]);
+        }
+    }
+
     // A round key that flips after the first check, inside `between`, passes
     // decrypt-and-compare because both directions read the flipped key; the
     // second check catches it.

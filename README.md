@@ -43,10 +43,8 @@ Fujisaki-Okamoto transform against chosen ciphertexts. Its parameters
 (dimension 1026, modulus 2^15, noise of standard deviation 3), hashing,
 transform details and code are Turing's own. The best known lattice attack
 costs 2^252.4 in the standard core-SVP count (ML-KEM-1024: 2^253.9 in the
-same count) and about 2^269.5 in the lattice-estimator's model — run under
-real SageMath and with its greedy dual-hybrid search corrected — and a
-ciphertext fails to decrypt with probability 2^-266, computed exactly and
-proven not to concentrate on unlucky keys.
+same count) and 2^269.7 in the lattice-estimator's model, and a ciphertext
+fails to decrypt with probability 2^-266, computed exactly.
 
 ## What has been tested
 
@@ -64,13 +62,10 @@ proven not to concentrate on unlucky keys.
   statistical battery.
 - Turing-1026 (section 25): its attack cost and failure rate come from
   tools that first reproduce FrodoKEM's and NewHope's published tables; the
-  lattice-estimator is also run under real SageMath and audited for its two
-  known optimiser flaws; the real code fails exactly as often as the computed
-  law says, and the per-key failure spread is bounded and measured over
-  100,000 keys; Bombe's own LLL and BKZ recover the secret from real keys
-  with the dimension cut to 100, needing the block sizes the cost model
-  predicts; chosen and adversarial ciphertexts, a decapsulation fault map,
-  timing, faults and memory are checked as for the cipher.
+  real code fails exactly as often as the computed law says; Bombe's own
+  LLL and BKZ recover the secret from real keys with the dimension cut to
+  100, needing the block sizes the cost model predicts; tampered
+  ciphertexts, timing, faults and memory are checked as for the cipher.
 - Each analysis tool is first checked against published results (AES,
   Midori-64, NIST's test data, FrodoKEM, NewHope) before it is trusted on
   Turing.

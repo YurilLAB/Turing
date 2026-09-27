@@ -171,32 +171,6 @@ impl ReferenceKem {
         (ct, key.try_into().expect("32"))
     }
 
-    /// The shared key this ciphertext would give if the re-encryption check
-    /// accepted it: cSHAKE256("shared key", c || k'), k' from G(h, Dec(s, c),
-    /// salt). This is what a decapsulation fault that defeats the check leaks;
-    /// the fault map (`fault1026`) compares the faulted output against it.
-    pub fn accepted_key(&self, ct: &[u8]) -> [u8; 32] {
-        let p = TURING_1026;
-        let body = p.ciphertext_bytes();
-        let bp = unpack(&p, &ct[..p.packed_bytes(p.mbar * p.n)], p.mbar * p.n);
-        let c = unpack(&p, &ct[p.packed_bytes(p.mbar * p.n)..body], p.mbar * p.nbar);
-        let mu = pke_decrypt(&p, &self.s, &bp, &c);
-        let (_again, k) = self.encrypt(&mu, &ct[body..]);
-        cshake("Turing-1026 v1 shared key", &[ct, &k], 32).try_into().expect("32")
-    }
-
-    /// The rejection key cSHAKE256("rejection key", z || h || c).
-    pub fn rejection_key(&self, ct: &[u8]) -> [u8; 32] {
-        cshake("Turing-1026 v1 rejection key", &[&self.z, &self.pk_hash, ct], 32).try_into().expect("32")
-    }
-
-    /// The rejection key with z left out, cSHAKE256("rejection key", h || c):
-    /// what a fault that skips absorbing z would produce, computable by
-    /// anyone who knows the public key, hence a validity oracle.
-    pub fn rejection_key_without_z(&self, ct: &[u8]) -> [u8; 32] {
-        cshake("Turing-1026 v1 rejection key", &[&self.pk_hash, ct], 32).try_into().expect("32")
-    }
-
     /// The shared key, or the rejection key; None for a wrong length.
     pub fn decapsulate(&self, ct: &[u8]) -> Option<[u8; 32]> {
         let p = TURING_1026;

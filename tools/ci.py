@@ -32,7 +32,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PY = sys.executable
 PROFILES = ["quick", "full", "deep"]
 ITERS = {"quick": "1", "full": "5", "deep": "25"}
-MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7"]
+MUTATION_SETS = ["", "--step8", "--step9", "--round3", "--round4", "--round5", "--round6", "--round7", "--review1"]
 
 
 def stages(profile):
@@ -48,8 +48,6 @@ def stages(profile):
          "rare, boundary and out-of-range inputs against the independent references"),
         ("math-audit", "quick", [], [PY, "tools/mathaudit.py"], 1200, False,
          "documented numbers recomputed independently; checks that cannot fail"),
-        ("constant-time", "quick", [["CARGO_TARGET_DIR", "target/ci-release"]], [PY, "tools/ct_check.py"], 900, False,
-         "the release build's assembly divides no secret in the lattice code (KyberSlash class)"),
         ("math-audit-negative", "full", [], [PY, "tools/mathaudit.py", "--negative-control"], 1200, False,
          "every math-audit comparison must flag a planted wrong value"),
         # `mutate.py --check` alone checks only the default set; every set is

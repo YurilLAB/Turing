@@ -192,10 +192,13 @@ key recovery with 2^32 plaintexts was run and works: max(3, 4, 4) + 4 = 8,
 so the rule above is unchanged. Cube testers stop at 2 rounds, and the
 interpolation attack finds no sparse polynomial to start from. The fifth
 campaign (docs/14) measured meet-in-the-middle: Demirci-Selçuk sequences
-over 4 rounds need 36 parameters (AES 24), so that family stops at 5
-rounds, as does the yoyo game; and the square attack with round key 0
-guessed reaches 7 rounds on paper (the full codebook, about 2^174
-encryptions), within the rule's 8. Hulls and bit-level models remain, and
+over 4 rounds need 36 parameters (AES 24), but differential enumeration
+brings the table to 22 bytes (2^176), below the 2^256 keys, so that family
+reaches 6 rounds, and 7 with round key 0 guessed, on paper (corrected
+after the review of 2026-09-27; docs/14, section 3). The yoyo game stops
+at 5 rounds, and the square attack with round key 0 guessed reaches 7
+rounds on paper (the full codebook, about 2^174 encryptions): both 7-round
+attacks are within the rule's 8. Hulls and bit-level models remain, and
 the factor-of-two margin is there for them.
 
 ## Cost

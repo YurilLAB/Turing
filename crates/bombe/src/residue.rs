@@ -248,6 +248,58 @@ pub fn masked() -> Vec<Snapshot> {
 
 /// A shielded key: the caller shields its key and wipes its own copy; then
 /// a cipher is made from the shielded key and later dropped.
+/// The shielding mask of a `ShieldedKey`, which `shielded` cannot see: it is
+/// neither the key nor a key-schedule value, yet mask XOR shielded key is the
+/// key. The scanner's own copy of each mask (a locked page) is where it is
+/// allowed; anywhere else is residue. Scenarios: after `ShieldedKey::new`
+/// with the caller's key wiped, after a cipher is made and dropped, and after
+/// `refresh()` (the old mask and the new one). The review of 2026-09-27 found
+/// all four fragments of the mask in the dead stack frame of `new`, above the
+/// part `burn_stack` reaches.
+pub fn shield_mask() -> Vec<Snapshot> {
+    let mut key = random::new_key().expect("OS randomness");
+    burn_stack();
+    let masks: [std::sync::Mutex<SecretBox<[u8; 32]>>; 2] = [std::sync::Mutex::new(SecretBox::zeroed()), std::sync::Mutex::new(SecretBox::zeroed())];
+    let key = std::sync::Mutex::new(std::mem::replace(&mut key, SecretBox::zeroed()));
+    // The worker only runs the code under test. The mask is read on the
+    // scanning thread, whose stack is burned before each scan, so reading it
+    // leaves nothing in the worker's stack that could be mistaken for (or
+    // wipe away) the code's own residue.
+    let slot: std::sync::Mutex<Option<ShieldedKey>> = std::sync::Mutex::new(None);
+    memscan::run_parked(
+        |p: &Parker| {
+            {
+                let mut k = key.lock().expect("key");
+                let shielded = ShieldedKey::new(&k).expect("OS randomness");
+                zeroize::Zeroize::zeroize(&mut k[..]);
+                *slot.lock().expect("slot") = Some(shielded);
+            }
+            p.park(1);
+            drop(slot.lock().expect("slot").as_ref().expect("key").cipher());
+            p.park(2);
+            slot.lock().expect("slot").as_mut().expect("key").refresh().expect("OS randomness");
+            p.park(3);
+        },
+        3,
+        |step, stack| {
+            if step != 2 {
+                let which = if step == 1 { 0 } else { 1 };
+                slot.lock().expect("slot").as_ref().expect("key").mask_for_analysis(&mut masks[which].lock().expect("mask"));
+                burn_stack();
+            }
+            let mut needles = Needles::new();
+            needles.add("shield mask", &masks[0].lock().expect("mask")[..]);
+            if step == 3 {
+                needles.add("shield mask after refresh", &masks[1].lock().expect("mask")[..]);
+            }
+            let allowed: Vec<(usize, usize)> = masks.iter().map(|m| page_of(m.lock().expect("mask").as_ptr() as usize)).collect();
+            let s = Secrets { key: SecretBox::zeroed(), needles, round_keys: 0..0 };
+            let name = ["ShieldedKey::new, then the caller wipes its key", "a cipher made from the shielded key, then dropped", "after refresh()"][step - 1];
+            snapshot(name, &s, &memscan::scan(&s.needles), &allowed, stack)
+        },
+    )
+}
+
 pub fn shielded() -> Vec<Snapshot> {
     let mut s = secrets();
     burn_stack();

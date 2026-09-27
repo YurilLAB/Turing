@@ -15,10 +15,8 @@ this folder holds the sources behind them.
 - `notes/pq/` and `scripts/pq/`: the post-quantum research (lattices,
   attack costs, decryption failures, transforms, side channels), with the
   scripts that reproduce its numbers; `scripts/pq/t1026_*.py` compute
-  Turing-1026's parameter search, per-key failure rates and lattice-estimator
-  runs, including `t1026_real_sage.py` (the estimator under real SageMath) and
-  `t1026_optimizer_audit.py` (its greedy MATZOV search and primal beta range,
-  issues #219 and #149), docs/16.
+  Turing-1026's parameter search, per-key failure rates and
+  lattice-estimator runs (docs/16).
 - `scripts/`: research helpers:
   - `pdfgrep.py`: keyword windows in a PDF;
   - `decode_glyph_pdf.py`: old TeX Type-3 PDFs whose text extracts as

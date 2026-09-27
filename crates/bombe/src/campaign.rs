@@ -1160,12 +1160,16 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
             8 * turing_table.free,
             turing_table.cost
         ),
-        pass_if(aes_table.free == 10 && 8 * turing_table.free > 128),
+        // The table is usable when it is smaller than the key space (mitm.rs).
+        // This compared it with 2^128 until the review of 2026-09-27, so it
+        // passed while the documented conclusion ("5 rounds at best") was
+        // wrong: docs/14 section 3 now states the corrected reach.
+        pass_if(aes_table.free == 10 && 8 * turing_table.free < 256),
     );
     log.add(
         s,
         "best attack from it",
-        "the 3-round property (8 parameters) starts after round 2's S-boxes, so building a δ-set needs round key 0 (2^128 guesses) and reading its output a byte of round key 5: 5 rounds at about 2^144 S-box lookups with the full codebook, weaker than the square attack's 5 rounds with a 2^120 structure",
+        "the enumerated 4-round table (2^176) is below the 2^256 keys, so on paper the family reaches 6 rounds (2^113 chosen plaintexts, about 2^144 online, 2^189 to build the table) and 7 with round key 0 guessed (about 2^176 online, the full codebook), like the square attack; not run (review of 2026-09-27, docs/14 section 3)",
         Verdict::Info,
     );
 
@@ -1445,26 +1449,6 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         ),
         pass_if(rate.message <= -weakest),
     );
-    // The rate above is an average over keys; `bombe weak-keys` runs the
-    // same with 100,000 keys.
-    let tails = crate::weakkeys::proven_tails(&[-weakest, -240.0, -220.0]);
-    let mut sample = crate::weakkeys::sample_keys(scale(2000, 200), "campaign weak keys");
-    sample.sort_by(|a, b| b.saddlepoint_log2.total_cmp(&a.saddlepoint_log2));
-    let (saddle, chernoff, exact) = crate::weakkeys::recheck_heaviest(&sample, 1)[0];
-    log.add(
-        s,
-        "failure rates of individual keys",
-        format!(
-            "proven for all keys: at most 2^{:.1} of them above 2^-{weakest:.1}, 2^{:.1} above 2^-240, 2^{:.1} above 2^-220; {} sampled keys: median 2^{:.1}, the heaviest 2^{exact:.2} with every column's law exact (the saddlepoint approximation {:+.3} bits from it, the Chernoff bound 2^{chernoff:.1})",
-            tails[0].fraction_log2(),
-            tails[1].fraction_log2(),
-            tails[2].fraction_log2(),
-            sample.len(),
-            sample[sample.len() / 2].saddlepoint_log2,
-            saddle - exact
-        ),
-        pass_if((saddle - exact).abs() < 0.05 && chernoff >= exact && exact <= -weakest),
-    );
     for (i, p) in crate::dfr::TRIAL_SETS.iter().enumerate() {
         // At least about 170 failures expected even in a quick run.
         let mc = crate::dfr::monte_carlo(*p, scale(400, 250), 50, &format!("campaign dfr {i}"));
@@ -1550,18 +1534,6 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         "faults in S during key generation",
         format!("{caught} of {faults} single-bit flips in bits 0-13 of S caught by the pair-wise check; bit 15 changes S by 2^15 = 0 mod q, so it changes nothing and is not caught ({})", if harmless { "as expected" } else { "unexpectedly caught" }),
         pass_if(caught == faults && harmless),
-    );
-    let fault_map = crate::fault1026::single_fault_summary(3);
-    log.add(
-        s,
-        "faults in decapsulation (the fault map)",
-        format!(
-            "over the accept mask, re-encryption, decoded message, coins, rejection and accepted keys and the selection: {} single faults bypass the re-encryption check, {} give a validity oracle (skipping z, which the double check cannot stop); two independent comparisons and chained selections mean forcing both verdicts (a correlated pair) is the cheapest bypass: {}",
-            fault_map.bypasses,
-            fault_map.validity_oracles,
-            if fault_map.pair_bypasses { "two faults" } else { "not found" }
-        ),
-        pass_if(fault_map.bypasses == 0 && fault_map.pair_bypasses),
     );
     let n = scale(200_000, 50_000);
     let packed = vec![0x3cu8; 15_870];

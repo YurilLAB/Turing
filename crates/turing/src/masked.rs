@@ -268,7 +268,7 @@ impl MaskedTuring {
         }
         shares.point = stream.draw_block();
         shares.point[0] |= 1;
-        let mut sum = checksum(plain.keys(), &shares.point);
+        let mut sum = keyschedule::sealed_check(plain.keys(), &shares.point);
         let mask = stream.draw_block();
         shares.check = [mask, xor(&sum, &mask)];
         sum.zeroize();
@@ -293,10 +293,15 @@ impl MaskedTuring {
     /// Checksum(share 0) ^ check 0 equals checksum(share 1) ^ check 1
     /// exactly when the shared keys match the shared checksum; each side is
     /// masked, so the comparison never handles an unmasked key value.
+    /// The shared check carries keyschedule's CHECK_CONSTANT (in share 1),
+    /// and the point must still be odd, so a reset fault on the point and
+    /// both check shares no longer verifies (review of 2026-09-27).
     fn intact(&self) -> bool {
         let a = xor(&checksum(&self.shares.keys[0], &self.shares.point), &self.shares.check[0]);
-        let b = xor(&checksum(&self.shares.keys[1], &self.shares.point), &self.shares.check[1]);
-        a.iter().zip(&b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+        let b = xor(&xor(&checksum(&self.shares.keys[1], &self.shares.point), &self.shares.check[1]), &keyschedule::CHECK_CONSTANT);
+        let diff = a.iter().zip(&b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+        let even = !self.shares.point[0] & 1;
+        (diff | even) == 0
     }
 
     fn encrypt_inner(&mut self, block: &mut Block, mut probe: Probe) {
@@ -433,6 +438,69 @@ mod tests {
 
     fn key(seed: u8) -> [u8; 32] {
         core::array::from_fn(|i| (i as u8).wrapping_mul(37) ^ seed)
+    }
+
+    // The masked counterpart of keyschedule's reset_faults_are_caught: zeroing
+    // the point and both check shares (with or without a round key's shares)
+    // used to verify for any keys, since at H = 0 both checksums are 0.
+    #[test]
+    fn reset_faults_are_caught() {
+        let fresh = || MaskedTuring::new(&key(9)).expect("OS randomness");
+        let mut m = fresh();
+        m.shares.point = [0; 16];
+        assert!(!m.intact(), "point zeroed");
+        let mut m = fresh();
+        m.shares.point = [0; 16];
+        m.shares.check = [[0; 16]; 2];
+        assert!(!m.intact(), "point and both check shares zeroed");
+        let mut m = fresh();
+        m.shares.keys[0][24] = [0; 16];
+        m.shares.keys[1][24] = [0; 16];
+        m.shares.point = [0; 16];
+        m.shares.check = [[0; 16]; 2];
+        assert!(!m.intact(), "round key 24's shares, point and check zeroed");
+        let mut m = fresh();
+        m.shares.keys = [[[0; 16]; ROUND_KEYS]; 2];
+        m.shares.point = [0; 16];
+        m.shares.check = [[0; 16]; 2];
+        assert!(!m.intact(), "all shares zeroed");
+        let mut m = fresh();
+        m.shares.keys = [[[0xff; 16]; ROUND_KEYS]; 2];
+        m.shares.point = [0xff; 16];
+        m.shares.check = [[0xff; 16]; 2];
+        assert!(!m.intact(), "all shares stuck at one");
+        let mut m = fresh();
+        m.shares.point = [0; 16];
+        m.shares.check = [[0; 16], keyschedule::CHECK_CONSTANT];
+        assert!(!m.intact(), "point zeroed, check shares set to the public constant (needs the odd point)");
+        assert!(fresh().intact(), "control: untouched shares verify");
+    }
+
+    // Every bit of both check shares and of the point is covered (a
+    // comparison of 8 of 16 bytes passed every test until the review of
+    // 2026-09-27).
+    #[test]
+    fn every_bit_of_the_check_shares_and_the_point_is_covered() {
+        let mut m = MaskedTuring::new(&key(11)).expect("OS randomness");
+        for bit in 0..128 {
+            for target in 0..3 {
+                let place = match target {
+                    0 => &mut m.shares.check[0],
+                    1 => &mut m.shares.check[1],
+                    _ => &mut m.shares.point,
+                };
+                place[bit / 8] ^= 1 << (bit % 8);
+                let caught = !m.intact();
+                let place = match target {
+                    0 => &mut m.shares.check[0],
+                    1 => &mut m.shares.check[1],
+                    _ => &mut m.shares.point,
+                };
+                place[bit / 8] ^= 1 << (bit % 8);
+                assert!(caught, "bit {bit} of {}", ["check share 0", "check share 1", "the point"][target]);
+            }
+        }
+        assert!(m.intact());
     }
 
     #[test]

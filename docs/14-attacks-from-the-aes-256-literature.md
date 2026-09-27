@@ -26,7 +26,7 @@ python tools/mutate.py --round5                 # the planted bugs of this round
 |---|---|---|---|
 | Square attack, round key 0 guessed | division property reproduces AES's integral distinguishers (docs/11); partial sums equal the plain sum on every guess tested | **7 rounds** (6 with a simpler last step) | 7 rounds: 2^180.6 S-box lookups (2^173.8 encryptions), the full codebook |
 | Yoyo game | 3 and 4 rounds always return the pattern, 5 never, as published | 3 rounds from the plaintext; 5 with round key 0 guessed | 5 rounds: about 2^130, the full codebook |
-| Demirci-Selçuk | 4 rounds: 25 parameters (24 for differences); enumeration: 10 bytes | 4-round sequences need 36 parameters (2^288); 5 rounds at best | about 2^144 |
+| Demirci-Selçuk | 4 rounds: 25 parameters (24 for differences); enumeration: 10 bytes | 4-round sequences need 36 parameters (2^288), but enumeration brings the table to 22 bytes (2^176), below the key space: **6 rounds**, and **7** with round key 0 guessed (on paper; corrected 2026-09-27, section 3) | 6 rounds: about 2^144 online and 2^189 to build the table, 2^113 chosen plaintexts; 7 rounds: about 2^176 online and 2^189 offline, the full codebook |
 
 The longest attack on Turing is now 7 of its 24 rounds, on paper: it needs
 every one of the 2^128 plaintext-ciphertext pairs and about 2^174
@@ -177,8 +177,31 @@ brings it to 22 bytes (2^176), with a pair that must go from 16 active
 bytes to 1 through MixState, probability 2^-120. The 3-round property after
 round 2's S-boxes has 8 parameters, but its δ-set sits behind round 1 and
 needs round key 0: with a byte of RK5 for the output, 5 rounds at about
-2^144 S-box lookups. The family that reaches 9 of AES-256's 14 rounds
-reaches 5 of Turing's 24, two fewer than the square attack.
+2^144 S-box lookups.
+
+**Correction (review of 2026-09-27).** An earlier version of this section
+ended "the family ... reaches 5 of Turing's 24, two fewer than the square
+attack". That does not follow from its own numbers: the enumerated table,
+2^176, is smaller than the 2^256 key space, which is the usability rule
+`mitm.rs` states, and the 2^-120 pair probability is paid with data. The
+review (research/reviews/2026-09-27/attacks-docs14.md, F1) builds two
+attacks from the ingredients above, on paper, under the usual
+Dunkelman-Keller-Shamir and Derbez-Fouque-Jean assumptions (about one
+S-box solution per difference pair, multisets as table keys):
+
+- 6 rounds with nothing guessed at the front: 2^105 structures of 2^8
+  plaintexts (2^113 chosen plaintexts, not the full codebook) for a right
+  pair, about 2^144 S-box lookups online, and about 2^189 to build the
+  table (2^176 entries of 256 states, 36 S-boxes each);
+- 7 rounds with round key 0 guessed, the square attack's model: about
+  2^176 online and the same 2^189 offline, the full codebook.
+
+So Demirci-Selçuk reaches 7 rounds on paper, like the square attack, not
+two fewer. Neither attack was run. The round-count rule (8) and the
+24-round margin are unaffected: at 8 rounds the key material behind the
+property grows to all of round key 8 and more. Campaign section 23 now
+checks the table against the key space; it compared it with 2^128
+before, which is why it did not flag this.
 
 ## 4. Considered, not built
 
@@ -189,7 +212,12 @@ reaches 5 of Turing's 24, two fewer than the square attack.
   earliest runs from round 2 to round 5, and with round key 0 guessed they
   reach 5 rounds. A wrong guess only shows when a pair's ciphertexts
   differ in the one byte the impossible differential names and nowhere
-  else, 2^-120 per pair: at least 2^188 work, more than every attack above.
+  else, 2^-120 per pair. An earlier version priced this by looping over the
+  2^128 guesses ("at least 2^188 work, more than every attack above"). The
+  review of 2026-09-27 (F3) prices it pair by pair instead: each right-shaped
+  pair rules out about 2^12 guesses, for about 2^134.5 work with 2^115.4
+  chosen ciphertexts, cheaper than the Demirci-Selçuk attacks but still
+  5 rounds (on paper, not run).
 - Biclique attacks cover the full cipher only as a small speed-up of
   trying every key; they do not reduce the rounds a cipher keeps.
 - Related-key attacks: blocked by the cSHAKE256 key schedule (docs/07, 11).

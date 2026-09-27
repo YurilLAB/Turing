@@ -85,7 +85,9 @@ fn feistel_round(l: &mut Block, r: &mut Block, constants: &mut impl XofReader) {
 /// the equation holds for one value of k_0 only, whatever H and the other
 /// keys: probability 2^-128 while k_0 is unknown. A fault arranged without
 /// knowing the key therefore escapes with probability at most N / 2^127,
-/// however many bits it flips and wherever they are, H included
+/// however many bits it flips and wherever they are, H included, as long as
+/// the flipped pattern does not depend on the stored data (reset faults do;
+/// CHECK_CONSTANT below covers them)
 /// (research/notes/derivations.md). The point must stay secret: at a public
 /// point the attacker can solve for faults that cancel,
 /// as flipping bit b of RK_i and bit b - 1 of RK_i+1 did in version 2's
@@ -95,6 +97,21 @@ fn feistel_round(l: &mut Block, r: &mut Block, constants: &mut impl XofReader) {
 pub(crate) fn checksum(keys: &[Block], point: &Block) -> Block {
     let h = u128::from_le_bytes(*point);
     keys.iter().rev().fold(0u128, |acc, k| gf::mul128(acc ^ u128::from_le_bytes(*k), h)).to_le_bytes()
+}
+
+/// A public, non-zero constant term added to the stored check. The bound
+/// above covers faults that flip bits in a pattern independent of the stored
+/// data; a reset (stuck-at-0) fault is also arranged without the key, but
+/// its pattern is the stored value itself, and at H = 0 the checksum is 0 for
+/// every key set. Until the review of 2026-09-27, zeroing the check and the
+/// point therefore made every later fault pass. With this constant, all-zero
+/// material never verifies, and `intact` also requires the point to be odd.
+pub(crate) const CHECK_CONSTANT: Block = *b"Turing check v2\x01";
+
+/// The stored check for `keys` at `point`: the checksum plus CHECK_CONSTANT.
+pub(crate) fn sealed_check(keys: &[Block], point: &Block) -> Block {
+    let c = checksum(keys, point);
+    core::array::from_fn(|i| c[i] ^ CHECK_CONSTANT[i])
 }
 
 /// The checksum's point for a key: cSHAKE256 of K' under its own label, made
@@ -147,11 +164,14 @@ impl<const N: usize> RoundKeys<N> {
         &self.material.keys
     }
 
-    /// Whether the round keys still match their checksum. Compares without
-    /// branching on the data.
+    /// Whether the round keys still match their checksum, at a point that is
+    /// still odd (CHECK_CONSTANT explains why both are needed). Compares
+    /// without branching on the data.
     pub(crate) fn intact(&self) -> bool {
-        let now = checksum(&self.material.keys, &self.material.point);
-        now.iter().zip(&self.material.check).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+        let now = sealed_check(&self.material.keys, &self.material.point);
+        let diff = now.iter().zip(&self.material.check).fold(0u8, |acc, (a, b)| acc | (a ^ b));
+        let even = !self.material.point[0] & 1;
+        (diff | even) == 0
     }
 
     /// Whether the operating system locked the round keys' memory.
@@ -174,7 +194,7 @@ impl<const N: usize> RoundKeys<N> {
         fill(&mut material.keys);
         xof::cshake256_secret(check_label, whitened, &mut material.point);
         material.point[0] |= 1;
-        material.check = checksum(&material.keys, &material.point);
+        material.check = sealed_check(&material.keys, &material.point);
         RoundKeys { material }
     }
 
@@ -280,7 +300,7 @@ fn from_whitened<const N: usize>(k_left: &Block, k_right: &Block) -> RoundKeys<N
     l.zeroize();
     r.zeroize();
     check_point(k_left, k_right, &mut material.point);
-    material.check = checksum(&material.keys, &material.point);
+    material.check = sealed_check(&material.keys, &material.point);
     RoundKeys { material }
 }
 
@@ -466,12 +486,12 @@ mod tests {
         let (point, check) = (k.material.point, k.material.check);
         let moved: Block = core::array::from_fn(|i| point[i] ^ 0x5a ^ i as u8);
         k.material.point = moved;
-        k.material.check = checksum(&k.material.keys, &moved);
+        k.material.check = sealed_check(&k.material.keys, &moved);
         assert!(k.intact(), "control: matched with every key known");
         for bit in 0..128 {
             let mut guess = k.material.keys;
             guess[0][bit / 8] ^= 1 << (bit % 8);
-            k.material.check = checksum(&guess, &moved);
+            k.material.check = sealed_check(&guess, &moved);
             assert!(!k.intact(), "round key 0 wrong in bit {bit}");
         }
         k.material.point = point;
@@ -480,6 +500,20 @@ mod tests {
     }
 
     // Faults of 2 to 16 bits anywhere in the keys, the checksum and the point.
+    // Every single bit of the stored check and of its point is covered: a
+    // comparison that read only part of the check (8 of 16 bytes passed every
+    // test until the review of 2026-09-27) fails here.
+    #[test]
+    fn every_bit_of_the_check_and_the_point_is_covered() {
+        let mut k = expand::<25>(&key(14));
+        for bit in 25 * 128..RoundKeys::<25>::STORED_BITS {
+            k.flip_stored_bit(bit);
+            assert!(!k.intact(), "stored bit {bit}");
+            k.flip_stored_bit(bit);
+        }
+        assert!(k.intact());
+    }
+
     #[test]
     fn random_multi_bit_faults_are_caught() {
         let mut k = expand::<25>(&key(6));
@@ -499,6 +533,50 @@ mod tests {
             bits.iter().for_each(|&b| k.flip_stored_bit(b));
         }
         assert!(k.intact());
+    }
+
+    // A reset (stuck-at) fault is arranged without knowing the key too, but
+    // its XOR pattern is the stored value itself, so the additive bound above
+    // does not cover it. At H = 0 the checksum is 0 for every key set: until
+    // the review of 2026-09-27, zeroing the check and the point made every
+    // later fault pass, and zeroing round key 24 with them (one 64-byte cache
+    // line) released C' with C XOR C' = RK_24. The point must stay odd and
+    // the stored check carries a non-zero constant, so none of these verify.
+    #[test]
+    fn reset_faults_are_caught() {
+        let fresh = || expand::<25>(&key(13));
+        let mut k = fresh();
+        k.material.point = [0; 16];
+        assert!(!k.intact(), "point zeroed");
+        let mut k = fresh();
+        k.material.check = [0; 16];
+        k.material.point = [0; 16];
+        assert!(!k.intact(), "check and point zeroed");
+        let mut k = fresh();
+        k.material.keys[24] = [0; 16];
+        k.material.check = [0; 16];
+        k.material.point = [0; 16];
+        assert!(!k.intact(), "round key 24, check and point zeroed (one cache line)");
+        let mut k = fresh();
+        k.material.keys = [[0; 16]; 25];
+        k.material.check = [0; 16];
+        k.material.point = [0; 16];
+        assert!(!k.intact(), "all material zeroed");
+        let mut k = fresh();
+        k.material.keys = [[0xff; 16]; 25];
+        k.material.check = [0xff; 16];
+        k.material.point = [0xff; 16];
+        assert!(!k.intact(), "all material stuck at one");
+        let mut k = fresh();
+        k.material.keys = [[0; 16]; 25];
+        k.material.check = [0; 16];
+        k.material.point[0] |= 1;
+        assert!(!k.intact(), "keys and check zeroed, point left odd (needs the constant)");
+        let mut k = fresh();
+        k.material.point = [0; 16];
+        k.material.check = CHECK_CONSTANT;
+        assert!(!k.intact(), "point zeroed, check set to the public constant (needs the odd point)");
+        assert!(fresh().intact(), "control: untouched material verifies");
     }
 
     #[test]

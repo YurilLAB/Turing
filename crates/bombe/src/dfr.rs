@@ -97,16 +97,6 @@ impl Law {
         result
     }
 
-    /// The law of v X for an integer v > 0.
-    pub fn scaled(&self, v: i64) -> Law {
-        assert!(v > 0);
-        let mut p = vec![0.0; (self.p.len() - 1) * v as usize + 1];
-        for (i, &x) in self.p.iter().enumerate() {
-            p[i * v as usize] = x;
-        }
-        Law { lo: self.lo * v, p }
-    }
-
     /// The law of X Y for independent X ~ self, Y ~ other.
     pub fn product(&self, other: &Law) -> Law {
         let values: Vec<i64> = self.support().flat_map(|a| other.support().map(move |b| a * b)).collect();
