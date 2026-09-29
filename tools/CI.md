@@ -8,7 +8,7 @@ gap nobody sees.
 
 | Profile | Stages | Time (this machine, warm build) |
 |---|---|---|
-| `quick` (default) | release, overflow, production, robustness, math-audit, constant-time, ct-self-test, noise, simulate | about 5 min |
+| `quick` (default) | release, overflow, production, robustness, math-audit, constant-time, ct-self-test, turing256-py, noise, simulate | about 5 min |
 | `full` | quick + math-audit-negative, noise-negative, simulate-negative, mlkem-million, mutation-patterns, campaign, linux-wsl | tens of minutes |
 | `deep` | full + campaign-deep, an hour's soak and every planted-bug set of `tools/mutate.py` | hours |
 
@@ -118,6 +118,15 @@ of 29 and above, which no existing test uses. The whole existing suite
 (the library's unit tests and the Turing, Turing-256 and Turing-1026
 integration tests) passed with each bug in place; the robustness suite
 failed on both.
+
+**turing256-py** (`research/scripts/turing256_py.py`, under a second)
+reproduces all 89 values of `vectors/turing-256-v2.txt` with a Python
+implementation that shares no code or constant with the two Rust ones: its
+own Keccak (checked against hashlib and NIST's cSHAKE256 sample), and the
+S-box, both matrices and the round constants derived from their labels.
+Three planted mistakes in it (ShiftRows rotating right, one warm-up round
+fewer, no round constants) must each fail first; a hand-edited byte of the
+vector file fails it too (checked).
 
 **math-audit** (`tools/mathaudit.py`) recomputes documented numbers with
 code that shares nothing with the code that produced them:

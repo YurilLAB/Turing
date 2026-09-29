@@ -250,6 +250,7 @@ mod tests {
     impl<T: ?Sized + core::fmt::Debug> AmbiguousIfDebug<IsDebug> for T {}
     const _: fn() = || {
         <Turing as AmbiguousIfDebug<_>>::check();
+        <crate::Turing256 as AmbiguousIfDebug<_>>::check();
         <RoundKeys<ROUND_KEYS> as AmbiguousIfDebug<_>>::check();
     };
 

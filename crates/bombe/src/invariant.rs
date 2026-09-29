@@ -240,6 +240,157 @@ pub fn identical_round_keys() -> usize {
     both
 }
 
+/// The same criterion on Turing-256's 256-bit state (docs/15), for its round
+/// constants alone. Version 2 adds RC_r with round key r, so if every round
+/// key were the same K, rounds r and s would still add K ⊕ RC_r and
+/// K ⊕ RC_s, whose difference RC_r ⊕ RC_s is a linear structure of any
+/// invariant (BCLR's own setting: Midori and PRINTcipher add constants to
+/// one key). W from the constants alone is what holds for every key
+/// schedule, however weak; version 1 had none, so W = {0} there.
+pub mod wide {
+    use turing::linear256;
+    use turing::structure::Layer;
+    use turing::turing256::{layer, ROUNDS};
+
+    /// A 256-bit vector, bit i of the state in bit i % 64 of word i / 64
+    /// (byte j in bits 8j..8j+7, as for the 128-bit maps).
+    pub type V = [u64; 4];
+
+    pub fn from_bytes(b: &[u8; 32]) -> V {
+        std::array::from_fn(|i| u64::from_le_bytes(b[8 * i..8 * i + 8].try_into().expect("8 bytes")))
+    }
+
+    fn to_bytes(v: &V) -> [u8; 32] {
+        std::array::from_fn(|j| (v[j / 8] >> (8 * (j % 8))) as u8)
+    }
+
+    /// One of Turing-256's linear layers, as the images of the unit vectors.
+    pub struct LinearMap256 {
+        columns: Vec<V>,
+    }
+
+    impl LinearMap256 {
+        pub fn turing256(layer: Layer) -> LinearMap256 {
+            let unit = |i: usize| -> V { std::array::from_fn(|w| if w == i / 64 { 1 << (i % 64) } else { 0 }) };
+            LinearMap256 { columns: (0..256).map(|i| from_bytes(&linear256::apply_layer(layer, &to_bytes(&unit(i))))).collect() }
+        }
+
+        pub fn apply(&self, v: &V) -> V {
+            let mut out = [0u64; 4];
+            for (w, &word) in v.iter().enumerate() {
+                let mut bits = word;
+                while bits != 0 {
+                    let c = &self.columns[64 * w + bits.trailing_zeros() as usize];
+                    for (o, x) in out.iter_mut().zip(c) {
+                        *o ^= x;
+                    }
+                    bits &= bits - 1;
+                }
+            }
+            out
+        }
+    }
+
+    /// Dimension of the smallest subspace of GF(2)^256 that contains
+    /// `generators` and is mapped into itself by every map in `maps`.
+    pub fn closure_dim(generators: &[V], maps: &[&LinearMap256]) -> usize {
+        let mut basis: Vec<Option<V>> = vec![None; 256];
+        let mut dim = 0;
+        let mut insert = |mut v: V| -> bool {
+            while let Some(w) = (0..4).rev().find(|&w| v[w] != 0) {
+                let top = 64 * w + 63 - v[w].leading_zeros() as usize;
+                match basis[top] {
+                    None => {
+                        basis[top] = Some(v);
+                        dim += 1;
+                        return true;
+                    }
+                    Some(b) => (0..4).for_each(|i| v[i] ^= b[i]),
+                }
+            }
+            false
+        };
+        let mut queue: Vec<V> = generators.iter().copied().filter(|&g| insert(g)).collect();
+        while let Some(v) = queue.pop() {
+            for m in maps {
+                let w = m.apply(&v);
+                if insert(w) {
+                    queue.push(w);
+                }
+            }
+        }
+        dim
+    }
+
+    /// dim W for the given per-round additions (index r - 1 for round r):
+    /// the MixState rounds alone, the ShiftRows+MixColumns rounds alone, and
+    /// every round with both layers. Round ROUNDS has no linear layer.
+    pub fn spaces(additions: &[[u8; 32]]) -> (usize, usize, usize) {
+        let (l1, l2) = (LinearMap256::turing256(Layer::MixState), LinearMap256::turing256(Layer::ShiftMixColumns));
+        let diffs = |which: Layer| -> Vec<V> {
+            let rounds: Vec<usize> = (1..=ROUNDS).filter(|&r| layer(r) == Some(which)).collect();
+            let first = from_bytes(&additions[rounds[0] - 1]);
+            rounds[1..].iter().map(|&r| std::array::from_fn(|i| from_bytes(&additions[r - 1])[i] ^ first[i])).collect()
+        };
+        let (d1, d2) = (diffs(Layer::MixState), diffs(Layer::ShiftMixColumns));
+        let all: Vec<V> = d1.iter().chain(&d2).copied().collect();
+        (closure_dim(&d1, &[&l1]), closure_dim(&d2, &[&l2]), closure_dim(&all, &[&l1, &l2]))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::rng::Rng;
+
+        #[test]
+        fn maps_match_the_cipher() {
+            let mut rng = Rng::new("test 256 layer maps");
+            for which in [Layer::MixState, Layer::ShiftMixColumns] {
+                let m = LinearMap256::turing256(which);
+                for _ in 0..100 {
+                    let x: [u8; 32] = rng.bytes();
+                    assert_eq!(to_bytes(&m.apply(&from_bytes(&x))), linear256::apply_layer(which, &x));
+                }
+            }
+        }
+
+        // The 256-bit closure agrees with the 128-bit one where both apply:
+        // a rotation-like map reaches everything from one bit, a half turn
+        // reaches two dimensions.
+        #[test]
+        fn closure_on_known_maps() {
+            let shift = |k: usize| LinearMap256 {
+                columns: (0..256).map(|i| std::array::from_fn(|w| if w == (i + k) % 256 / 64 { 1 << ((i + k) % 64) } else { 0 })).collect(),
+            };
+            let (one, half) = (shift(1), shift(128));
+            assert_eq!(closure_dim(&[[1, 0, 0, 0]], &[&one]), 256);
+            assert_eq!(closure_dim(&[[1, 0, 0, 0]], &[&half]), 2);
+            assert_eq!(closure_dim(&[[1, 0, 0, 0], [1, 0, 0, 0]], &[&half]), 2);
+            assert_eq!(closure_dim(&[], &[&one]), 0);
+        }
+
+        // Version 2's constants alone make W the whole state, for each layer
+        // and both: no invariant but an affine one survives, whatever the
+        // round keys are. Controls: no constants (version 1 with equal round
+        // keys) gives W = {0}, and so do constants that differ only between
+        // the two kinds of round (Proposition 1 relates rounds with the same
+        // layer only). A Midori-style control (constants in the lowest bit
+        // of each byte) does not stay small here: like Turing's, both layers
+        // have one invariant factor, so any one non-zero difference is enough.
+        #[test]
+        fn round_constants_alone_reach_the_whole_state() {
+            let rc = &turing::turing256::ROUND_CONSTANTS;
+            assert_eq!(spaces(rc), (256, 256, 256));
+            assert_eq!(spaces(&[[0u8; 32]; ROUNDS]), (0, 0, 0));
+            let by_kind: Vec<[u8; 32]> = (1..=ROUNDS).map(|r| if r % 2 == 1 { [0xa5; 32] } else { [0x3c; 32] }).collect();
+            assert_eq!(spaces(&by_kind), (0, 0, 0));
+            let xor = |a: &[u8; 32], b: &[u8; 32]| -> V { from_bytes(&std::array::from_fn(|i| a[i] ^ b[i])) };
+            assert_eq!(closure_dim(&[xor(&rc[0], &rc[2])], &[&LinearMap256::turing256(Layer::MixState)]), 256);
+            assert_eq!(closure_dim(&[xor(&rc[1], &rc[3])], &[&LinearMap256::turing256(Layer::ShiftMixColumns)]), 256);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

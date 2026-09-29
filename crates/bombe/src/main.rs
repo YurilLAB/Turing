@@ -9,6 +9,7 @@ Usage:
   bombe sbox <SOURCE> [--html <OUT.html>]
   bombe gen-sbox [--rust <OUT.rs>] [--html <OUT.html>]
   bombe gen-linear [--turing-256] [--rust <OUT.rs>]
+  bombe gen-constants --turing-256 [--rust <OUT.rs>]
   bombe key-schedule
   bombe rounds [ROUNDS]
   bombe vectors [--turing-256 | --turing-1026] [--out PATH]
@@ -159,6 +160,27 @@ fn run_gen_linear(args: &[String]) -> Result<bool, String> {
         println!("\nRust constants written to {path}");
     }
     Ok(aes_report.passed() && l.columns.report.passed() && l.state.report.passed())
+}
+
+/// Turing-256's round constants (docs/15, version 2).
+fn run_gen_constants(args: &[String]) -> Result<bool, String> {
+    if args.first().map(String::as_str) != Some("--turing-256") {
+        return Err("usage: bombe gen-constants --turing-256 [--rust <OUT.rs>]".into());
+    }
+    let (rust, html_out) = parse_outputs(&args[1..])?;
+    if html_out.is_some() {
+        return Err("gen-constants has no HTML output".into());
+    }
+    let constants = gen::round_constants256();
+    println!("Turing-256 round constants: cSHAKE256(X = \"\", S = \"{}\")", gen::ROUND_CONSTANTS256_LABEL);
+    for (i, c) in constants.iter().enumerate() {
+        println!("  round {:2}: {}", i + 1, c.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
+    if let Some(path) = rust {
+        std::fs::write(&path, gen::render_round_constants256_rust(&constants)).map_err(|e| format!("cannot write {path}: {e}"))?;
+        println!("\nRust constants written to {path}");
+    }
+    Ok(true)
 }
 
 /// Turing-256's 32x32 MixState (docs/15).
@@ -534,6 +556,7 @@ fn main() -> ExitCode {
         Some("sbox") => run_sbox(&args[1..]),
         Some("gen-sbox") => run_gen(&args[1..]),
         Some("gen-linear") => run_gen_linear(&args[1..]),
+        Some("gen-constants") => run_gen_constants(&args[1..]),
         Some("key-schedule") => run_key_schedule(),
         Some("rounds") => run_rounds(&args[1..]),
         Some("vectors") => run_vectors(&args[1..]),

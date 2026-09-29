@@ -1,10 +1,10 @@
 //! Turing-256's key schedule (docs/15): Turing's three layers (docs/07) on
 //! 32-byte halves.
 //!
-//! 1. **Whitening**: K' = cSHAKE256(K, S = "Turing-256 v1 key"), 64 bytes.
+//! 1. **Whitening**: K' = cSHAKE256(K, S = "Turing-256 v2 key"), 64 bytes.
 //! 2. **Feistel expansion** on K' = (L, R): (L, R) -> (R XOR F_j(L), L)
 //!    with F_j(x) = MixState256(S(x XOR C_j)) and 32-byte constants C_j from
-//!    cSHAKE256("", S = "Turing-256 v1 key schedule constants"). Round keys
+//!    cSHAKE256("", S = "Turing-256 v2 key schedule constants"). Round keys
 //!    are taken in pairs (L, R) after 9 warm-up rounds, then every 8 rounds.
 //!    With 32-byte halves and branch number 33, 8 Feistel rounds already
 //!    force at least 67 active S-boxes (`bombe key-schedule`), so the first R
@@ -21,10 +21,13 @@ use crate::{linear256, sbox, xof};
 use sha3::digest::XofReader;
 use zeroize::Zeroize;
 
-pub const KEY_LABEL: &str = "Turing-256 v1 key";
-pub const CONSTANTS_LABEL: &str = "Turing-256 v1 key schedule constants";
+// Version 2 (round constants, docs/15) moved every label to "v2", so one key
+// used with both versions gives unrelated round keys, not v1's round keys
+// shifted by the public constants (a related-key pair).
+pub const KEY_LABEL: &str = "Turing-256 v2 key";
+pub const CONSTANTS_LABEL: &str = "Turing-256 v2 key schedule constants";
 /// Label for the secret point of the round keys' integrity checksum.
-pub const CHECK_LABEL: &str = "Turing-256 v1 key check";
+pub const CHECK_LABEL: &str = "Turing-256 v2 key check";
 /// Feistel rounds before the first round keys are taken.
 pub const WARMUP_ROUNDS: usize = 9;
 /// Feistel rounds between consecutive round-key pairs.

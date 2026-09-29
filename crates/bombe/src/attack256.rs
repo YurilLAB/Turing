@@ -54,6 +54,13 @@ fn parities(t: &Turing256, base: &Block256, active: &[usize], rounds: usize) -> 
     out
 }
 
+/// Round key `rounds` XOR round constant `rounds`: everything added after
+/// the last S-box layer of `rounds`-round Turing-256.
+fn last_addition(t: &Turing256, rounds: usize) -> Block256 {
+    let (rk, rc) = (t.round_key(rounds), turing::turing256::ROUND_CONSTANTS[rounds - 1]);
+    std::array::from_fn(|j| rk[j] ^ rc[j])
+}
+
 /// Recovers round key `rounds` of a random key, if the structure keeps the
 /// input of the last S-box layer balanced.
 pub fn square_attack(rounds: usize, active: &[usize], max_structures: usize, label: &str) -> Recovery {
@@ -73,7 +80,9 @@ pub fn square_attack(rounds: usize, active: &[usize], max_structures: usize, lab
             break;
         }
     }
-    let rk = t.round_key(rounds);
+    // What the attack recovers is the whole last-round addition: the round
+    // key XOR the public round constant (v2), which gives the round key at once.
+    let rk = last_addition(&t, rounds);
     let correct = (0..32).all(|j| candidates[j] == [rk[j]]);
     Recovery { rounds, structures, texts: 1 << (8 * active.len()), candidates: std::array::from_fn(|j| candidates[j].len()), correct }
 }
@@ -85,7 +94,7 @@ pub fn balanced_bytes(rounds: usize, active: &[usize], label: &str) -> usize {
     let mut rng = Rng::new(label);
     let t = Turing256::new(&rng.bytes());
     let p = parities(&t, &rng.bytes(), active, rounds);
-    let (inv, rk) = (crate::fast::inv_sbox(), t.round_key(rounds));
+    let (inv, rk) = (crate::fast::inv_sbox(), last_addition(&t, rounds));
     (0..32)
         .filter(|&j| (0..=255u8).filter(|&c| p[j][(c >> 6) as usize] >> (c & 63) & 1 == 1).fold(0u8, |acc, c| acc ^ inv[(c ^ rk[j]) as usize]) == 0)
         .count()

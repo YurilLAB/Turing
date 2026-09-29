@@ -156,7 +156,10 @@ docs/14
   its known-answer vectors; `attack256`: the square attack on reduced
   Turing-256; avalanche, the NIST battery, dudect, faults and the memory
   scan for 32-byte blocks (campaign section 24).
-- `tools/mutate.py --round6`: 13 planted bugs.
+- Version 2's round constants (docs/15): `gen-constants --turing-256`
+  regenerates them, `invariant::wide` measures W_L(D) on 256 bits, and
+  `research/scripts/turing256_py.py` is a third implementation in Python.
+- `tools/mutate.py --round6`: 20 planted bugs.
 
 **Turing-1026 (step 12)**, see docs/16
 - `coresvp`: the core-SVP cost of the primal and dual lattice attacks (the

@@ -10,8 +10,10 @@ first checked against what it already reproduced for Turing.
 ```
 cargo run --release -p bombe -- attack             # section 24 attacks Turing-256 (179 findings, 0 failures)
 cargo run --release -p bombe -- gen-linear --turing-256   # regenerates its MixState
+cargo run --release -p bombe -- gen-constants --turing-256  # regenerates its round constants (v2)
 cargo run --release -p bombe -- vectors --turing-256      # its known-answer vectors
 cargo test --release -p bombe --test turing256     # against the independent reference
+python research/scripts/turing256_py.py            # against a third implementation, in Python
 python tools/mutate.py --round6                    # the planted bugs of this round
 ```
 
@@ -35,13 +37,14 @@ quantum collision finding weakens most.
 | Block, key | 256 bits, 256 bits | the request; key search as Turing's |
 | State | 4 rows x 8 columns, byte 4c + r at row r, column c | Turing's layout, twice as wide |
 | Rounds | 24, round keys 25 x 32 bytes | the analysis below; Turing's ceiling |
-| Round r | S-box layer (all 32 bytes), linear layer, round key r | Turing's round |
+| Round r | S-box layer (all 32 bytes), linear layer, round constant r, round key r | Turing's round, plus the constant (version 2, below) |
+| Round constants | 24 x 32 bytes, read in order from cSHAKE256("", S = "Turing-256 v2 round constants") | every round and every column different |
 | S-box | Turing's (A_out ∘ x^254 ∘ A_in, docs/05), constant-time | unchanged |
 | Odd rounds | MixState256: 32 x 32 Cauchy matrix, branch number 33 | one byte changes all 32 |
 | Even rounds | ShiftRows (rows rotate left by 0, 1, 3, 4) + Turing's 4 x 4 MixColumns on all 8 columns | Rijndael's offsets for 8 columns: each column's bytes go to four different columns |
 | Last round | no linear layer | as Turing |
-| Key schedule | cSHAKE256(K, "Turing-256 v1 key") to 64 bytes; Feistel on 32-byte halves with F(x) = MixState256(S(x ⊕ C_j)); 9 warm-up rounds, then a pair of round keys every 8 rounds; feed-forward | Turing's schedule (docs/07) on wider halves |
-| Fault check | Turing's keyed checksum over the 50 stored 16-byte blocks, point from "Turing-256 v1 key check" | docs/13's construction; over 50 blocks the bound is 50/2^127, twice Turing's 25/2^127 |
+| Key schedule | cSHAKE256(K, "Turing-256 v2 key") to 64 bytes; Feistel on 32-byte halves with F(x) = MixState256(S(x ⊕ C_j)), C_j from "Turing-256 v2 key schedule constants"; 9 warm-up rounds, then a pair of round keys every 8 rounds; feed-forward | Turing's schedule (docs/07) on wider halves |
+| Fault check | Turing's keyed checksum over the 50 stored 16-byte blocks, point from "Turing-256 v2 key check" | docs/13's construction; over 50 blocks the bound is 50/2^127, twice Turing's 25/2^127 |
 
 MixState256 comes from cSHAKE256(X = counter, S = "Turing-256 v1
 MixState"): the first 64 distinct bytes are the points x_0..x_31, y_0..y_31
@@ -93,8 +96,15 @@ Section 24 of `bombe attack` (and `tests/turing256.rs`):
 - **Correctness.** The constant-time implementation matches an independent
   reference (`refcipher256`: table S-box, generic matrix products, its own
   ShiftRows and key schedule) on every round count and every round key, and
-  reproduces the 8 known-answer vectors in `vectors/turing-256-v1.txt`,
+  reproduces the 8 known-answer vectors in `vectors/turing-256-v2.txt`,
   which the reference generated. `turing::self_test()` checks two of them.
+  A third implementation, `research/scripts/turing256_py.py` (Python, its
+  own Keccak, CI stage `turing256-py`), shares no code or constant with
+  either: it derives the S-box, both matrices and the round constants from
+  their labels and reproduces all 89 values of the vector file (ciphertexts,
+  decryptions, round constants, round keys and every reduced-round output),
+  and three planted mistakes in it (ShiftRows rotating right, 8 warm-up
+  rounds, no round constants) each fail.
 - **Square attack.** One active byte, 2^8 texts: the input of S-box layer
   3 is balanced in all 32 bytes and layer 4's is not (known key), as the
   division property says; round key 3 of 3-round Turing-256 comes out byte
@@ -137,15 +147,76 @@ block here). A first version used `core::hint::black_box`, which sends the
 masks through memory and cost Turing 45%. Turing-256 got faster, 21.9 to
 14.6 µs per block, since the jumps were mispredicting.
 
+## Version 2: round constants (2026-09-29)
+
+Version 1 added nothing to the state but the round keys, as Turing does:
+its rounds differ from each other only because its round keys do. Two
+attack families live on rounds that are alike. A slide attack needs the
+same round function at two positions; an invariant-subspace attack (the
+kind that broke PRINTcipher and Midori-64 for weak keys) needs a set of
+states that every round maps to itself, such as the states fixed by a
+symmetry of the round (ShiftRows + MixColumns commute with rotating the
+columns) when the round keys share that symmetry.
+Version 1 is protected from both by its key schedule, which makes every
+round key pseudorandom. Version 2 makes the protection hold whatever the
+round keys are, the way SKINNY and Midori use their round constants:
+round r XORs a public 32-byte constant RC_r into the state with round key r.
+
+- **The constants.** RC_1..RC_24 are the first 768 bytes of
+  cSHAKE256("", S = "Turing-256 v2 round constants"), in order, with no
+  search (`bombe gen-constants --turing-256`; a test regenerates
+  `crates/turing/src/round_constants256.rs` and requires an exact match).
+  They are pairwise different, and none is fixed by rotating the columns
+  (by 1 to 7) or the rows within every column (by 1 to 3), so no round
+  equals another and no such rotation commutes with any round's addition,
+  even when the round keys are symmetric. A test checks both against
+  controls built with each symmetry.
+- **New labels.** Every key-schedule label moved from "v1" to "v2". With
+  v1's labels, one key used in both versions would give round keys that
+  differ by exactly the public constants: a related-key pair the attacker
+  knows. The MixState label stays "v1": the matrix did not change.
+- **What it buys, measured.** Beierle, Canteaut, Leander and Rotella
+  (CRYPTO 2017) give the criterion docs/11 applied to Turing's round keys:
+  the differences between what two rounds with the same linear layer L add
+  are linear structures of any invariant, so once W_L(D), the smallest
+  L-invariant space holding those differences, is the whole state, an
+  invariant can only be affine, which would need an S-box with a linear
+  component; Turing's has none.
+  `bombe::invariant::wide` computes it on 256 bits. From the round
+  constants alone, the case where every round key is equal and version 1
+  has W = {0}: W = 256 of 256 for the MixState rounds, for the
+  ShiftRows + MixColumns rounds, and for both layers together; one
+  difference already reaches all 256 dimensions for either layer, as for
+  Turing's (docs/11). The controls give 0: no constants, and constants that
+  differ only between the two kinds of round.
+- **What it does not change.** A constant XORed into every text alike
+  cancels in every difference and keeps every balanced sum balanced, so the
+  trail bounds, the impossible differentials, the division property and the
+  square attack above are exactly as before (the 3-round square attack now
+  recovers round key 3 ⊕ RC_3, which gives round key 3 at once). Key search is
+  still 2^256. The cost is one 32-byte XOR per round. The constants sit in
+  read-only memory beside the S-box and matrix constants; a persistent fault
+  there changes both directions alike, so the checked calls do not see it,
+  exactly as for those constants.
+- **Checked.** The constant-time implementation, the reference (its own
+  cSHAKE256 from the sha3 crate) and the Python implementation (its own
+  Keccak) derive the constants independently and agree on all 24 and on the
+  new vectors, `vectors/turing-256-v2.txt`, which lists them.
+
 ## Planted bugs
 
-`tools/mutate.py --round6` plants 13 bugs: the wrong ShiftRows offsets, the
+`tools/mutate.py --round6` plants 20 bugs. Version 2's seven: encryption
+leaving out the round constants, the same constant in every round,
+decryption taking them in reverse order, the key-schedule labels left at
+v1, the reference without constants, the 256-bit invariant closure never
+applying the layers, and the square attack's target missing the constant.
+Version 1's 13: the wrong ShiftRows offsets, the
 inverse MixState, one warm-up round fewer, no feed-forward, no S-box in the
 key schedule, a linear layer in the last round, decryption's forward layer,
 wrong bit masks in Turing's layers, a count-level ShiftMix transition one
 byte short, a unit vector from five bytes in one column, a broken subset
 enumeration, the reference's ShiftRows rotating the wrong way, and square-
-attack guesses judged on one structure. The tests catch all 13. (A 14th,
+attack guesses judged on one structure. The tests catch all 20. (One more,
 dropping the first key check of the checked calls, was taken out as
 equivalent: the second check still catches every persistent fault, so no
 output changes.)

@@ -15,7 +15,7 @@ and named after Alan Turing, plus **Bombe**, a workbench built to break them.
 | Part | What it is |
 |---|---|
 | **Turing** | 128-bit block, 256-bit key, 24 rounds, constant time, about 4.5 µs per block |
-| **Turing-256** | The same design on a 256-bit block ([docs/15](docs/15-turing-256.md)) |
+| **Turing-256** | The same design on a 256-bit block, with round constants (v2) ([docs/15](docs/15-turing-256.md)) |
 | **Turing-1026** | A post-quantum key-encapsulation mechanism (KEM) on plain LWE in dimension 1026, whose shared keys are Turing keys ([docs/16](docs/16-turing-1026.md)) |
 | **ML-KEM** | FIPS 203, all three parameter sets, checked against NIST's and C2SP's vectors: the standard half of the planned hybrid KEM ([docs/18](docs/18-hybrid-kem-design.md)) |
 | **Bombe** | The cryptanalysis workbench, named after Turing's code-breaking machine |
@@ -80,7 +80,8 @@ bytes, about 13 ms to encapsulate and 26 ms to decapsulate.
   Midori-64, NIST, FrodoKEM, NewHope) before it is trusted on Turing.
 - **Correctness:** Turing, Turing-256 and Turing-1026 each match an
   independent reference implementation and the known-answer vectors in
-  `vectors/`.
+  `vectors/`; Turing-256 and Turing-1026 also match a third implementation
+  in Python.
 - **Implementation attacks:** timing (dudect, no leak), simulated power
   analysis (the masked variant shows no first-order leakage), injected
   faults (every one- and two-bit fault in the stored key material is caught)

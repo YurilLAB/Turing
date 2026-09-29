@@ -30,7 +30,7 @@ fn matches_the_independent_reference() {
 
 #[test]
 fn reproduces_the_known_answer_vectors() {
-    let text = include_str!("../../../vectors/turing-256-v1.txt");
+    let text = include_str!("../../../vectors/turing-256-v2.txt");
     let vectors = refcipher256::parse_vectors(text).expect("parse");
     assert_eq!(vectors.len(), 8);
     for v in vectors {
@@ -54,6 +54,12 @@ fn committed_mix_state_is_reproducible() {
     assert!(c.report.passed());
     let committed = include_str!("../../turing/src/linear256_constants.rs").replace("\r\n", "\n");
     assert_eq!(gen::render_linear256_rust(&c), committed);
+}
+
+#[test]
+fn committed_round_constants_are_reproducible() {
+    let committed = include_str!("../../turing/src/round_constants256.rs").replace("\r\n", "\n");
+    assert_eq!(gen::render_round_constants256_rust(&gen::round_constants256()), committed);
 }
 
 // Every round key sits behind at least 43 active S-boxes of the key

@@ -4,9 +4,17 @@
 //! Encryption: XOR round key 0, then for rounds r = 1..=24: the S-box layer
 //! on all 32 bytes, the round's linear layer (MixState256 in odd rounds,
 //! ShiftRows + MixColumns on 8 columns in even rounds, none in the last),
-//! and round key r. The S-box, the MixColumns matrix, the alternation and
-//! the key schedule's shape are Turing's; the block is twice as wide, so the
-//! birthday bound of any mode moves from 2^64 to 2^128 blocks.
+//! round constant r and round key r. The S-box, the MixColumns matrix, the
+//! alternation and the key schedule's shape are Turing's; the block is twice
+//! as wide, so the birthday bound of any mode moves from 2^64 to 2^128
+//! blocks.
+//!
+//! Version 2 added the round constants: public, different in every round
+//! and in every column, so no two rounds are the same function and no
+//! column rotation commutes with a round even when round keys are equal or
+//! symmetric (slide and invariant-subspace attacks). Turing-256 gets this
+//! from its key schedule too; the constants make it hold whatever the round
+//! keys are (docs/15).
 //!
 //! EXPERIMENTAL. Do not use this to protect real data.
 
@@ -18,6 +26,14 @@ use zeroize::Zeroize;
 
 pub use crate::cipher::FaultDetected;
 
+mod constants {
+    include!("round_constants256.rs");
+}
+
+/// Round constant r is `ROUND_CONSTANTS[r - 1]`, r = 1..=ROUNDS
+/// (`bombe gen-constants --turing-256` regenerates them from their label).
+pub use constants::ROUND_CONSTANTS;
+
 pub type Block256 = [u8; 32];
 
 /// Rounds, as in Turing (docs/15 for the analysis behind the number).
@@ -27,6 +43,15 @@ pub const ROUND_KEYS: usize = ROUNDS + 1;
 pub(crate) const STORED_BLOCKS: usize = 2 * ROUND_KEYS;
 // Rounds 1 and ROUNDS - 1 use MixState, as in Turing.
 const _: () = assert!(ROUNDS.is_multiple_of(2));
+const _: () = assert!(ROUND_CONSTANTS.len() == ROUNDS);
+
+/// XORs round constant `round` (1..=ROUNDS) into the state. The constants
+/// are public and `round` is a loop counter, so this is constant-time.
+fn add_constant(block: &mut Block256, round: usize) {
+    for (b, c) in block.iter_mut().zip(&ROUND_CONSTANTS[round - 1]) {
+        *b ^= c;
+    }
+}
 
 /// The linear layer after the S-box layer of `round` (1-based), or `None`
 /// for the last round: MixState in odd rounds, ShiftRows + MixColumns in
@@ -207,6 +232,7 @@ impl Turing256 {
                 let layer = layer(round).expect("every round but the last has a layer");
                 *block = linear256::apply_layer(layer, block);
             }
+            add_constant(block, round);
             self.add_round_key(block, round);
         }
     }
@@ -215,6 +241,7 @@ impl Turing256 {
         assert!((1..=ROUNDS).contains(&rounds), "rounds must be 1..={ROUNDS}");
         for round in (1..=rounds).rev() {
             self.add_round_key(block, round);
+            add_constant(block, round);
             if round < rounds {
                 let layer = layer(round).expect("every round but the last has a layer");
                 *block = linear256::invert_layer(layer, block);
@@ -283,6 +310,44 @@ mod tests {
             t.decrypt_block(&mut d);
             assert_eq!(d, p);
         }
+    }
+
+    /// Whether rotating the columns (by 1 to 7) or the rows within every
+    /// column (by 1 to 3) leaves `c` unchanged.
+    fn symmetric(c: &Block256) -> bool {
+        (1..8).any(|k| (0..32).all(|j| c[(j + 4 * k) % 32] == c[j])) || (1..4).any(|k| (0..32).all(|j| c[j / 4 * 4 + (j % 4 + k) % 4] == c[j]))
+    }
+
+    // The round constants differ from each other and none is fixed by a
+    // column or row rotation, the symmetries slide and invariant-subspace
+    // attacks use. Controls: constants built with each symmetry are caught.
+    #[test]
+    fn round_constants_are_distinct_and_break_symmetry() {
+        let repeated_column: Block256 = core::array::from_fn(|j| [0x1b, 0x2c, 0x3d, 0x4e][j % 4]);
+        let equal_rows: Block256 = core::array::from_fn(|j| (j / 4) as u8);
+        assert!(symmetric(&repeated_column) && symmetric(&equal_rows), "control: symmetric constants are caught");
+        for (i, c) in ROUND_CONSTANTS.iter().enumerate() {
+            assert!(!symmetric(c), "round constant {} is symmetric", i + 1);
+            assert!(ROUND_CONSTANTS[i + 1..].iter().all(|d| d != c), "round constant {} repeats", i + 1);
+        }
+    }
+
+    // The constants are in both directions: without them a round is the v1
+    // round, and 1-round encryption differs from v1's by exactly constant 1.
+    #[test]
+    fn one_round_adds_constant_one() {
+        let t = Turing256::new(&[3; 32]);
+        let p = [0x77u8; 32];
+        let mut with = p;
+        t.encrypt_n(&mut with, 1);
+        let mut without = p;
+        t.add_round_key(&mut without, 0);
+        sub32(&mut without);
+        t.add_round_key(&mut without, 1);
+        let diff: Block256 = core::array::from_fn(|i| with[i] ^ without[i]);
+        assert_eq!(diff, ROUND_CONSTANTS[0]);
+        t.decrypt_n(&mut with, 1);
+        assert_eq!(with, p);
     }
 
     #[test]

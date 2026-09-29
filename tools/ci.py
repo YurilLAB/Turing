@@ -77,6 +77,8 @@ def stages(profile):
          "the release build's assembly divides no secret in the lattice code (KyberSlash class) and keeps every redundant fault check"),
         ("ct-self-test", "quick", [], [PY, "tools/ct_check.py", "--self-test"], 120, False,
          "the assembly checker's own rules: each must fail on synthetic assembly with its bug"),
+        ("turing256-py", "quick", [], [PY, "research/scripts/turing256_py.py"], 300, False,
+         "Turing-256's vectors reproduced by a Python implementation that derives every constant from its label"),
         ("noise", "quick", [t_rel], ["cargo", "run", "--release", "-p", "bombe", "--", "noise", "--state", NOISE_STATE], 1800, False,
          "real Turing-1026 ciphertexts' decryption error against docs/16's exact law, on every CPU thread"),
         ("simulate", "quick", [t_rel], [gpu_python(), "tools/simulate.py", "--state", SIM_STATE], 1800, False,

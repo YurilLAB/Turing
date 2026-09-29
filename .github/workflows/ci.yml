@@ -57,6 +57,7 @@ jobs:
   #   constant-time  the release build's assembly divides no secret and keeps every
   #                  redundant fault check (tools/ct_check.py)
   #   ct-self-test   ct_check.py's own rules, each against synthetic broken assembly
+  #   turing256-py   Turing-256's vectors from a Python implementation sharing no code
   #   mutation-patterns  every planted bug of every set still matches the code
   #   noise          real Turing-1026 ciphertexts' error against docs/16's exact law
   #   simulate       docs/16's failure law against an FFT and exact sampling (on
@@ -73,6 +74,6 @@ jobs:
           python-version: '3.12'
       - name: Python dependencies
         run: pip install numpy mpmath
-      # python tools/ci.py --only math-audit,constant-time,ct-self-test,mutation-patterns,noise,simulate
+      # python tools/ci.py --only math-audit,constant-time,ct-self-test,turing256-py,mutation-patterns,noise,simulate
       - name: Audits
-        run: python tools/ci.py --only math-audit,constant-time,ct-self-test,mutation-patterns,noise,simulate
+        run: python tools/ci.py --only math-audit,constant-time,ct-self-test,turing256-py,mutation-patterns,noise,simulate

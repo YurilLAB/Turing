@@ -1196,7 +1196,7 @@ pub fn run(quick: bool, deep: bool, progress: &mut dyn FnMut(&Finding)) -> Campa
         Turing256::new(k).encrypt_block(&mut b);
         b == *c
     });
-    log.add(s, "known-answer vectors (vectors/turing-256-v1.txt)", format!("{} of {} reproduced", if kat_ok { vectors.len() } else { 0 }, vectors.len()), pass_if(kat_ok));
+    log.add(s, "known-answer vectors (vectors/turing-256-v2.txt)", format!("{} of {} reproduced", if kat_ok { vectors.len() } else { 0 }, vectors.len()), pass_if(kat_ok));
     let t = Turing256::new(&[7; 32]);
     let blocks = scale(100_000, 20_000);
     let mut b = [0u8; 32];

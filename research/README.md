@@ -18,9 +18,13 @@ this folder holds the sources behind them.
   Turing-1026's parameter search, per-key failure rates and lattice-estimator
   runs, including `t1026_real_sage.py` (the estimator under real SageMath) and
   `t1026_optimizer_audit.py` (its greedy MATZOV search and primal beta range,
-  issues #219 and #149); `t1026_py.py` is a third implementation of the KEM
-  (Python, pycryptodome, NumPy) that reproduces the known-answer vectors from
-  the docs/16 specification.
+  issues #219 and #149); `turing1026_py.py` is a third implementation of the
+  KEM (Python, pycryptodome, NumPy) that reproduces the known-answer vectors
+  from the docs/16 specification.
+- `scripts/turing256_py.py`: a third implementation of Turing-256 v2
+  (Python, standard library only, its own Keccak) that derives every
+  constant from its label and reproduces `vectors/turing-256-v2.txt` (CI
+  stage `turing256-py`).
 - `scripts/`: research helpers:
   - `pdfgrep.py`: keyword windows in a PDF;
   - `decode_glyph_pdf.py`: old TeX Type-3 PDFs whose text extracts as
