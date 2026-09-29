@@ -1,12 +1,12 @@
 # Research archive
 
-Everything Turing's design and its attacks were checked against, kept for
-later work. Design decisions live in `docs/` (one document per step);
-this folder holds the sources behind them.
+This folder holds everything Turing's design and its attacks were checked
+against, kept for later work. Design decisions live in `docs/` (one document
+per step); the sources behind them are here.
 
 - `papers/`: the primary sources as PDFs. They are third-party copyrighted
-  papers, so they stay local: the folder is gitignored, and every entry below
-  links to where it can be downloaded again.
+  papers, so they stay local: the folder is gitignored, and most entries
+  below link to where the paper can be downloaded again.
 - `notes/verified-facts.md`: every number and claim taken from a paper, with
   the file and section it came from, and which ones Bombe reproduces.
 - `notes/derivations.md`: the short proofs behind Bombe's predictions (exact
@@ -14,13 +14,13 @@ this folder holds the sources behind them.
   provable-bound windows, and others).
 - `notes/pq/` and `scripts/pq/`: the post-quantum research (lattices,
   attack costs, decryption failures, transforms, side channels), with the
-  scripts that reproduce its numbers; `scripts/pq/t1026_*.py` compute
-  Turing-1026's parameter search, per-key failure rates and lattice-estimator
-  runs, including `t1026_real_sage.py` (the estimator under real SageMath) and
-  `t1026_optimizer_audit.py` (its greedy MATZOV search and primal beta range,
-  issues #219 and #149); `turing1026_py.py` is a third implementation of the
-  KEM (Python, pycryptodome, NumPy) that reproduces the known-answer vectors
-  from the docs/16 specification.
+  scripts that reproduce its numbers. The `scripts/pq/t1026_*.py` scripts
+  compute Turing-1026's parameter search, per-key failure rates and
+  lattice-estimator runs, including `t1026_real_sage.py` (the estimator under
+  real SageMath) and `t1026_optimizer_audit.py` (its greedy MATZOV search and
+  primal beta range, issues #219 and #149). `turing1026_py.py` is a third
+  implementation of the KEM (Python, pycryptodome, NumPy) that reproduces the
+  known-answer vectors from the docs/16 specification.
 - `scripts/turing256_py.py`: a third implementation of Turing-256 v2
   (Python, standard library only, its own Keccak) that derives every
   constant from its label and reproduces `vectors/turing-256-v2.txt` (CI
@@ -39,8 +39,8 @@ this folder holds the sources behind them.
     `--round4` and the default set;
   - `wsl_linux.py`: builds for Linux on Windows and runs the tests in WSL.
 
-Rule used throughout: a number from a search-engine summary is not a
-source; the primary PDF is.
+One rule applies throughout: a number from a search-engine summary is not a
+source, and the primary PDF is.
 
 ## Papers
 
@@ -99,8 +99,8 @@ source; the primary PDF is.
 
 ## Sources not archived (not freely available)
 
-Checked through their abstracts or through papers that restate them. Get
-them from the publisher when needed:
+We checked these through their abstracts or through papers that restate
+them. Get them from the publisher when you need them:
 
 - Jakobsen, Knudsen. The Interpolation Attack on Block Ciphers. FSE 1997.
 - Wagner. The Boomerang Attack. FSE 1999.

@@ -1,46 +1,47 @@
-# 07 — The key schedule
+# 07. The key schedule
 
 ## What went wrong with AES-256
 
 Biryukov and Khovratovich (ASIACRYPT 2009, "Related-key Cryptanalysis of
 the Full AES-192 and AES-256") broke full AES-256 in the related-key model
 with 2^99.5 time and data. Two properties of the AES key schedule made it
-possible:
+possible.
 
-- **Local collisions.** A difference in the key is injected into the state,
-  then cancelled by the next round key's difference. The paper describes
-  the idea as injecting "a difference into the internal state, causing a
-  disturbance, and then to correct it with the next injections".
-- **An almost linear schedule.** AES-256 key expansion is mostly XOR, with
-  only 8 S-box lookups per 32 bytes of expanded key (4 per round key,
-  against 16 in every cipher round). The authors conclude that "optimal
-  key-schedule trails should be based on low-weight codewords in the key
-  schedule", meaning key differences that stay cheap because they rarely
-  meet an S-box.
+The first is local collisions. A difference in the key is injected into the
+state, then cancelled by the next round key's difference. The paper describes
+the idea as injecting "a difference into the internal state, causing a
+disturbance, and then to correct it with the next injections".
+
+The second is an almost linear schedule. AES-256 key expansion is mostly XOR,
+with only 8 S-box lookups per 32 bytes of expanded key (4 per round key,
+against 16 in every cipher round). The authors conclude that "optimal
+key-schedule trails should be based on low-weight codewords in the key
+schedule", meaning key differences that stay cheap because they rarely meet
+an S-box.
 
 A related-key attack assumes the attacker can get encryptions under keys
 with a chosen relationship. That rarely happens in practice, and the authors
 call their attacks "mainly of theoretical interest". For file encryption,
 where every file key is random and independent, it matters even less. It is
-still a weakness in the design, and Turing is built to not have it.
+still a weakness in the design, and Turing is built not to have it.
 
-## Turing's schedule: a mix of SHAKE256 and Turing's own rounds
+## Turing's schedule, from SHAKE256 and Turing's own rounds
 
-1. **Whitening (cSHAKE256).** K' = cSHAKE256(X = K, S = "Turing v1 key").
+1. Whitening with cSHAKE256: K' = cSHAKE256(X = K, S = "Turing v1 key").
    A chosen key difference becomes a pseudorandom difference the attacker
    cannot predict.
-2. **Feistel expansion (Turing's round function).** Split K' = (L, R) and
+2. Feistel expansion, using Turing's round function. Split K' = (L, R) and
    run (L, R) -> (R XOR F_j(L), L) with F_j(x) = MixState(S(x XOR C_j)).
-   The constants C_j are read from cSHAKE256(X = "", S = "Turing v1 key
-   schedule constants"). After 13 warm-up rounds the first round-key pair
-   (L, R) is taken, then one pair every 8 rounds. This is the same shape as
+   The constants C_j come from cSHAKE256(X = "", S = "Turing v1 key
+   schedule constants"). After 13 warm-up rounds we take the first round-key
+   pair (L, R), then one pair every 8 rounds. The shape is the same as
    Kuznyechik's schedule (8 Feistel rounds per pair of round keys, RFC 7801),
    with Turing's S-box and whole-state MixState inside.
-3. **Feed-forward.** Round key = Feistel half XOR the matching half of K'.
+3. Feed-forward: each round key is a Feistel half XOR the matching half of K'.
 
 Round keys are wiped from memory (`zeroize`) when dropped.
 
-### Proof: every round key is expensive to reach
+### Proof that every round key is expensive to reach
 
 Bombe computes, by dynamic programming, the minimum number of active
 S-boxes any non-zero key difference must cross (`bombe key-schedule`).
@@ -56,30 +57,29 @@ state space:
 | 12 | 53 | ≤ 2^-318 |
 | 13 | 54 | ≤ 2^-324 |
 
-Each round key depends on a certain number of Feistel rounds. An L half is
-taken after the rounds run so far, but an R half equals the L half of *one
-round earlier*, so it lags by one. With 13 warm-up rounds the first pair
-depends on 13 and 12 rounds, and later pairs on 8 more each. The weakest
-round key is therefore behind 12 rounds, at least **53 active S-boxes**.
+Each round key depends on some number of Feistel rounds. An L half is taken
+after the rounds run so far, but an R half equals the L half of one round
+earlier, so it lags by one. With 13 warm-up rounds the first pair depends on
+13 and 12 rounds, and later pairs on 8 more each. The weakest round key is
+therefore behind 12 rounds, which means at least 53 active S-boxes.
 
-Target: every round key individually behind at least 43 active S-boxes
-(2^-258, beyond the 2^256 key space). 13 is the smallest warm-up that meets
-it.
+The target is that every round key, taken individually, sits behind at least
+43 active S-boxes (2^-258, beyond the 2^256 key space). A warm-up of 13
+rounds is the smallest that meets it.
 
-**This bound holds even if cSHAKE256 were broken** and an attacker could
-choose the difference in K' directly. The two layers are independent
-defences.
+The bound holds even if cSHAKE256 were broken and an attacker could choose
+the difference in K' directly. The two layers are independent defences.
 
 The prover respects Kanda's theorem (SAC 2000, as stated in ePrint
 2010/426): a Feistel cipher with an SP round function of branch number B has
 at least rB + ⌊r/2⌋ active S-boxes in every 4r rounds. This is tested for
 halves of 4, 8 and 16 bytes, and for 4 and 8 rounds the prover gives exactly
-Kanda's values (B and 2B + 1). The bound counts differential *trails*
+Kanda's values (B and 2B + 1). The bound counts differential trails
 (characteristics). Clustering of many trails into one differential is the
 usual caveat, and the margin (2^-318 against a 2^-256 target) is there for
 it.
 
-### Correction made in the step 7 review
+### Correction from the step 7 review
 
 The first version of this schedule used 12 warm-up rounds and claimed 53
 active S-boxes "before the first round keys", plus a target of 22 active
@@ -112,8 +112,8 @@ known shortcut.
 - Planted bugs, all caught: dropping the feed-forward, one fewer warm-up
   round, and removing the S-boxes from F.
 
-The last one is worth remembering. **With the S-boxes removed, the schedule
-still passed the avalanche test**, because cSHAKE256 and MixState spread bits
-around even when the schedule is linear. Avalanche does not detect linearity,
-and linearity is exactly what the 2009 attacks used. The non-affinity test
-was added because of this.
+Removing the S-boxes was the instructive one. The schedule still passed the
+avalanche test, because cSHAKE256 and MixState spread bits around even when
+the schedule is linear. Avalanche does not detect linearity, and linearity is
+exactly what the 2009 attacks used. The non-affinity test was added because
+of this.

@@ -1,13 +1,13 @@
-# 13 — Version 2: 24 rounds, and keys that leave nothing behind (step 10, fourth campaign)
+# 13. Version 2: 24 rounds, and keys that leave nothing behind (step 10, fourth campaign)
 
-The questions for this round: can the cipher be made "less linear" and its
-mathematics harder? What does modern practice say about everything *around*
-the cipher: where the key sits in memory, what it touches, randomising
-secrets before and after use? And which timing, time-of-check-to-time-of-use
-(TOCTOU) and other implementation attacks could break it outright? Every
-claim below is measured by `bombe attack` (sections 8 and 12–21), checked by
-tests, and the new defences are each shown to matter by a planted bug that
-the tests catch.
+This round had three questions to settle: whether the cipher could be made
+less linear and its mathematics harder; what modern practice says about
+everything around the cipher (where the key sits in memory, what it touches,
+how secrets are randomised before and after use); and which timing,
+time-of-check-to-time-of-use (TOCTOU) and other implementation attacks could
+break it outright. Every claim below is measured by `bombe attack` (sections 8
+and 12–21) and checked by tests, and each new defence is shown to matter by a
+planted bug that the tests catch.
 
 ```
 cargo run --release -p bombe -- attack          # 21 sections, 137 findings (140 with --deep), 0 failures
@@ -20,62 +20,67 @@ python tools/mutate.py --round4                 # the planted bugs of this round
 
 | Asked | Done | Evidence |
 |---|---|---|
-| A less linear S-box | The published way to make the inverse less algebraic while keeping it 4-uniform weakens it on every other count; kept the S-box | `tests/sbox_alternatives.rs` |
-| Harder mathematics | 16 → **24 rounds** (the stated maximum); every 3-round window still carries the provable 2^-102.0 / 2^-99.6 bounds | campaign 3–5, 15 |
+| A less linear S-box | We kept the S-box: the published way to make the inverse less algebraic while keeping it 4-uniform weakens it on every other count | `tests/sbox_alternatives.rs` |
+| Harder mathematics | 16 to 24 rounds (the stated maximum); every 3-round window still carries the provable 2^-102.0 / 2^-99.6 bounds | campaign 3–5, 15 |
 | Where the key lives and what it touches | Locked, dump-excluded pages per secret; stack burned after key setup; nothing found by a memory-dump attacker | campaign 20, `tests/memory.rs` |
 | Randomising secrets before and after use | First-order masked cipher (fresh shares every call), OpenSSH-style shielded key, fork-safe mask generator, keys derived from a hashed OS seed | campaign 19, `tests/leakage.rs` |
 | Timing, TOCTOU and other breaking attacks | dudect on eight code paths; assembly read for jumps and table lookups; a second key check closes the check-to-use window; concurrency and fork tested | campaign 8, 21 |
 | Fact-checking | Primary sources for every claim (`research/`); 35 planted bugs (§7) | `tools/mutate.py --round4` |
 
-## 1. Less linear: the S-box
+## 1. A less linear S-box
 
-Turing's S-box is A_out ∘ x^254 ∘ A_in (docs/05). Its nonlinearity 112 and
-differential uniformity 4 are the best any 8-bit permutation is known to
-reach, and its degree 7 is the maximum; boomerang uniformity is 6. What
-remains "linear" about it is algebraic: like every inversion S-box it
+Turing's S-box is A_out ∘ x^254 ∘ A_in (docs/05). Its nonlinearity of 112 and
+differential uniformity of 4 are the best any 8-bit permutation is known to
+reach, its degree of 7 is the maximum, and its boomerang uniformity is 6. The
+part that is still "linear" is algebraic. Like every inversion S-box, it
 satisfies 39 linearly independent quadratic equations in its input and
-output bits (23 of them bi-affine), the structure algebraic attacks start
-from.
+output bits (23 of them bi-affine), and that is the structure algebraic
+attacks start from.
 
-The published way to break that structure while staying differentially
-4-uniform is to swap two outputs of the inverse. Li, Wang and Yu (ePrint
-2013/731, Theorem 1): F(x) = (π(x))^-1 with π the transposition (1 α) is
+The published way to break that structure and stay differentially 4-uniform
+is to swap two outputs of the inverse. Li, Wang and Yu (ePrint 2013/731,
+Theorem 1) show that F(x) = (π(x))^-1, with π the transposition (1 α), is
 4-uniform exactly when Tr(α) = Tr(1/α) = 1. Bombe confirms the theorem on
 all 254 values of α (72 qualify) and measures every qualifying swap:
 
 | | Inverse (Turing) | Every 4-uniform swap |
 |---|---|---|
-| Quadratic equations (bi-affine) | 39 (23) | **37 (21)** |
+| Quadratic equations (bi-affine) | 39 (23) | 37 (21) |
 | Nonlinearity | 112 | 110 |
 | Boomerang uniformity | 6 | 10 (α = 0x20) |
 | Provable linear bound, MixState window | 2^-99.6 | over 2^5 weaker (α = 0x20) |
 
-Two equations fewer is not a meaningful gain against algebraic attacks,
-and it costs linear, boomerang and provable strength. So the S-box stays,
-and the margin comes from rounds instead.
+Two equations fewer is not a meaningful gain against algebraic attacks, and
+it costs linear, boomerang and provable strength. So we kept the S-box and
+took the margin from rounds instead.
 
-## 2. Version 2: 24 rounds
+## 2. Version 2 and 24 rounds
 
-- **24 rounds, 25 round keys.** MixState in rounds 1, 3, …, 23,
-  ShiftRows + MixColumns in rounds 2, …, 22, no linear layer in round 24.
-  24 is Turing's ceiling (`structure::MAX_ROUNDS`, enforced at compile time).
-- **Why 24.** The longest attack the tools can build is 8 rounds (docs/09).
-  Version 1 had twice that; version 2 has three times. The per-window
-  provable bounds do not improve with more rounds: any 3 rounds still give
-  MEDP ≤ 2^-102.0 and MELP ≤ 2^-99.6, and any 5 rounds 2^-110.8 and 2^-105.9.
-  What 8 extra rounds buy is margin against the attacks those bounds do not
-  cover: key-dependent hulls, meet-in-the-middle and algebraic attacks.
-- **Active S-boxes.** The whole cipher needs at least 12 × 17 = 204 (the
-  bounder confirms that is exact); the weakest 16-round window 121.
-- **New key-schedule labels.** The schedule is prefix-consistent: asked for
-  more round keys it produces the same first ones. With version 1's labels,
-  version 2's first 17 round keys would equal version 1's, and a v1 and a v2
-  ciphertext of the same block under the same key would be related through
-  only v2's last 8 rounds. The labels are now "Turing v2 key" and
-  "Turing v2 key schedule constants". The S-box and the matrices keep their
-  v1 generation labels, because they did not change.
-- **Vectors.** `vectors/turing-v2.txt`, generated by the independent
-  reference implementation; the library's self-test uses them.
+The cipher has 24 rounds and 25 round keys. MixState runs in rounds 1, 3, …,
+23, ShiftRows + MixColumns in rounds 2, …, 22, and round 24 has no linear
+layer. 24 is Turing's ceiling (`structure::MAX_ROUNDS`, enforced at compile
+time).
+
+On the choice of 24, the longest attack the tools can build is 8 rounds
+(docs/09), and version 1 had twice that. Version 2 has three times. The
+per-window provable bounds do not improve with more rounds: any 3 rounds
+still give MEDP ≤ 2^-102.0 and MELP ≤ 2^-99.6, and any 5 rounds 2^-110.8 and
+2^-105.9. What the 8 extra rounds buy is margin against the attacks those
+bounds do not cover: key-dependent hulls, meet-in-the-middle and algebraic
+attacks.
+
+On active S-boxes, the whole cipher needs at least 12 × 17 = 204 (the bounder
+confirms that is exact), and the weakest 16-round window needs 121.
+
+The key schedule is prefix-consistent: asked for more round keys, it produces
+the same first ones. With version 1's labels, version 2's first 17 round keys
+would equal version 1's, and a v1 and a v2 ciphertext of the same block under
+the same key would be related through only v2's last 8 rounds. So the labels
+are now "Turing v2 key" and "Turing v2 key schedule constants". The S-box and
+the matrices keep their v1 generation labels, because they did not change.
+
+The test vectors are in `vectors/turing-v2.txt`, generated by the independent
+reference implementation, and the library's self-test uses them.
 
 ## 3. Where the key lives
 
@@ -88,37 +93,37 @@ and the margin comes from rounds instead.
 | `ShieldedKey` | a 16 KB random prekey and the key XORed with cSHAKE256(prekey) | two `SecretBox`es |
 | `random::new_key` | the new key; its 64-byte seed (wiped) | `SecretBox` |
 
-The library never stores the key it is given: `Turing::new` reads it once,
+The library never stores the key it is given. `Turing::new` reads it once,
 through the key schedule. A `SecretBox` is a page-aligned allocation of its
 own, locked with VirtualLock or mlock(2) and, on Linux, marked
 MADV_DONTDUMP ("Exclude from a core dump those pages", madvise(2), since
-Linux 3.4). Page locks carry no count, so one allocation per secret keeps
-freeing one secret from unlocking another. The value is wiped before the
-pages go back to the system, and debug builds assert that it was.
-proc(5)'s `VmFlags` line shows the result on Linux, `lo` ("pages are
-locked in memory") and `dd` ("do not include area into core dump"), and a
-test reads it from /proc/self/smaps (against a heap allocation that shows
-neither).
+Linux 3.4). Page locks carry no count, so with one allocation per secret,
+freeing one never unlocks another. The value is wiped before the pages go
+back to the system, and debug builds assert that it was. On Linux the
+`VmFlags` line of proc(5) shows the result, `lo` ("pages are locked in
+memory") and `dd` ("do not include area into core dump"). A test reads it
+from /proc/self/smaps and compares it with a heap allocation that shows
+neither.
 
-Locking is limited: Windows lets a process lock about its minimum working
-set (200 KB by default), Linux its RLIMIT_MEMLOCK. When a lock is refused
-for that reason, the allocation raises the limit and tries once more (the
-working set on Windows, as Microsoft's VirtualLock documentation says an
-application that locks more pages must; the soft limit on Linux, up to the
-hard one; at most 64 MB in all). Before the review of 2026-09-28 (R11), the
-third Turing-1026 key, and every per-operation workspace once two keys
+Locking has a cap. Windows lets a process lock about its minimum working set
+(200 KB by default) and Linux its RLIMIT_MEMLOCK. When a lock is refused for
+that reason, the allocation raises the limit and tries once more (it raises
+the working set on Windows, as Microsoft's VirtualLock documentation says an
+application that locks more pages must, and the soft limit on Linux, up to
+the hard one; at most 64 MB in all). Before the review of 2026-09-28 (R11),
+the third Turing-1026 key, and every per-operation workspace once two keys
 existed, went unlocked. `memory::unlocked_allocations()` counts, for the
 whole process, the secrets that still ended up unlocked.
 
-What the operating system granted is reported, not assumed. `locked()`,
-`dump_excluded()` and `wiped_on_fork()` return its answers to mlock,
-MADV_DONTDUMP and MADV_WIPEONFORK (false wherever a call was refused or does
-not exist, as on Windows), and the key types pass them on as
-`keys_locked()` and `keys_dump_excluded()` (`locked()` and
-`dump_excluded()` for `ShieldedKey`). The first version discarded the two
-madvise results, so a refused one went unnoticed; a test now checks each
-answer against the kernel's `VmFlags`, and another that advice the kernel
-refuses is reported as refused.
+The library reports what the operating system granted instead of assuming
+it. `locked()`, `dump_excluded()` and `wiped_on_fork()` return its answers to
+mlock, MADV_DONTDUMP and MADV_WIPEONFORK (false wherever a call was refused
+or does not exist, as on Windows), and the key types pass them on as
+`keys_locked()` and `keys_dump_excluded()` (`locked()` and `dump_excluded()`
+for `ShieldedKey`). The first version discarded the two madvise results, so a
+refused one went unnoticed. A test now checks each answer against the
+kernel's `VmFlags`, and another checks that advice the kernel refuses is
+reported as refused.
 
 ### Burning the stack
 
@@ -127,36 +132,36 @@ Keccak states) pass through the stack, where compiler temporaries are out of
 reach of `zeroize`. After each key setup the library overwrites 32 KB of the
 stack below the caller (`memory::burn_stack`), as libgcrypt does with
 `_gcry_burn_stack` after key setup (Blowfish, DES) and after block
-operations. Measured by painting the stack, the key schedule uses 2.8 KB
-in a release build and the masked key setup 3.8 KB; unoptimised, up to
-21.8 KB.
+operations. Measured by painting the stack, the key schedule uses 2.8 KB in a
+release build and the masked key setup 3.8 KB; unoptimised, up to 21.8 KB.
 
-It is needed. Scanning straight after a key setup without the burn, the
+The burn is needed. Scanning straight after a key setup without it, the
 Windows release build leaves two 8-byte pieces of K' in dead stack, and they
-survive later encryptions and even the cipher being dropped. An unoptimised
-build leaves two whole copies of K' and pieces of round key 24. The Linux
-release build happened to leave nothing: what is left depends on the
-compiler's choices, which is why the burn does not rely on them. With the
-burn nothing is left in any build. A planted bug that shrinks the burn to
-1 KB brings K' back, and the tests catch it.
+survive later encryptions and even dropping the cipher. An unoptimised build
+leaves two whole copies of K' and pieces of round key 24. The Linux release
+build happened to leave nothing, but what is left depends on the compiler's
+choices, which is why the burn doesn't rely on them. With the burn, nothing is left in
+any build. A planted bug that shrinks the burn to 1 KB brings K' back, and
+the tests catch it.
 
 ### The memory-dump attacker
 
 Cold-boot attacks read RAM after power-off (Halderman et al. 2008), crash
 dumps and hibernation files hold a process's memory, and RAMBleed reads
 another process's memory bit by bit through Rowhammer (Kwong et al., IEEE
-S&P 2020). Each only finds what is still there. Bombe's `memscan` reads
-every readable page of its own process (VirtualQuery and ReadProcessMemory
-on Windows, /proc/self/maps and /proc/self/mem on Linux) and looks for
-every 8-byte fragment of the key, of K', of the Feistel states at each
-round-key pair and of all 25 round keys. A hit counts only if it is where the
-secret belongs: the caller's key buffer, or a plain `Turing`'s locked page.
+S&P 2020). Each only finds what is still there. Bombe's `memscan` reads every
+readable page of its own process (VirtualQuery and ReadProcessMemory on
+Windows, /proc/self/maps and /proc/self/mem on Linux) and looks for every
+8-byte fragment of the key, of K', of the Feistel states at each round-key
+pair and of all 25 round keys. A hit only counts as a leak if it is somewhere
+the secret doesn't belong. The caller's key buffer and a plain `Turing`'s
+locked page are where it is allowed to be.
 
 The search list holds each fragment XORed with a random pad and compares
 memory XOR pad, so the list itself contains no key. The code under test runs
-on its own thread, which parks between steps without calling anything, and
-the scan runs from another thread, so it cannot overwrite the dead stack it
-is looking at.
+on its own thread, which parks between steps without calling anything. The
+scan runs from another thread, so it cannot overwrite the dead stack it is
+looking at.
 
 | Scenario (release build, Windows) | Found outside where it belongs |
 |---|---|
@@ -170,14 +175,14 @@ is looking at.
 | `ShieldedKey::new` with the caller's copy wiped; a cipher made from it; after refresh | nothing of the key, the round keys or K' |
 | The shielding mask itself (mask XOR shielded key = key), after `new`, after a cipher, after `refresh` | nothing since the fix of 2026-09-27; before it, the whole mask after `new` and a mask after `refresh`, in dead stack (4 of 4 fragments each) |
 
-The scan above never searched for the shielding mask, which is neither
-the key nor a key-schedule value, so it could not see that `new` and
-`refresh` each left one in their own stack frame, above the part
-`burn_stack` reaches: `mask` returned the 32 bytes by value. The review of
-2026-09-27 found it (research/reviews/2026-09-27/v2-hardening.md, F6). The
-mask, the mask difference and the unshielded key now exist only in
-`SecretBox`es, and `tests/memory.rs` (`shield_mask_is_nowhere_in_memory`)
-searches for every mask, with a control that finds the scanner's own copy.
+The scan above never searched for the shielding mask, which is neither the
+key nor a key-schedule value. So it missed that `new` and `refresh` each left
+one in their own stack frame, above the part `burn_stack` reaches, because
+`mask` returned the 32 bytes by value. The review of 2026-09-27 found it
+(research/reviews/2026-09-27/v2-hardening.md, F6). The mask, the mask
+difference and the unshielded key now exist only in `SecretBox`es.
+`tests/memory.rs` (`shield_mask_is_nowhere_in_memory`) searches for every
+mask, with a control that finds the scanner's own copy.
 
 ### The OS generator keeps a copy
 
@@ -196,84 +201,95 @@ request replaces them. Measured over six runs per request size:
 | 136 | 6 of 6 | the last 8 (the partial 16-byte block) |
 
 The getrandom crate hands `ProcessPrng` the caller's buffer directly, so the
-copy is inside Windows' generator, in a heap region; we have not located the
+copy is inside Windows' generator, in a heap region. We have not located the
 code that makes it. Microsoft's description (Ferguson, *The Windows 10 random
 number generation infrastructure*, 2019) has requests under 128 bytes served
 from a 128-byte buffer whose bytes are wiped as they are handed out, and says
 that after a call "the buffered RNG state no longer has the data to
 reconstruct the output it provided". The copy measured here is outside that
-description: it happens for large requests too, which bypass the buffer, and
+description. It happens for large requests too, which bypass the buffer, and
 what is left follows 16-byte blocks (a 136-byte request leaves just its final
 8 bytes). On Linux, `getrandom(2)` writes straight into the buffer, and none
 of 8 keys left a copy.
 
-So nothing secret is used as the OS returned it. `random::new_key` makes a
-key as cSHAKE256 of a 64-byte OS seed; the mask generator's seed is 64 bytes
-and only ever hashed. At most 16 seed bytes can remain, which leaves 384 bits
-unknown. Of 8 keys straight from `ProcessPrng`, 2 to 4 left fragments in each
-run; of 8 from `new_key`, none.
+So we never use a secret as the OS returned it. `random::new_key` makes a
+key as cSHAKE256 of a 64-byte OS seed, and the mask generator's seed is 64
+bytes that are only ever hashed. At most 16 seed bytes can remain, which
+leaves 384 bits unknown. Of 8 keys straight from `ProcessPrng`, 2 to 4 left
+fragments in each run; of 8 from `new_key`, none.
 
 ### What is out of reach
 
-Values in CPU registers, and registers saved by the kernel on a context
-switch; hibernation, which writes all of RAM to disk whether locked or not
-(full-disk encryption covers it); memory the OS refused to lock (`locked()`
-says so, and it is still wiped); full-memory crash dumps on Windows, which
-this library does not exclude its pages from; virtual-machine snapshots. mlock(2): "Memory locks are not
-inherited by a child created via fork(2)", so a forked child that keeps
-using a cipher made before the fork holds its keys in pages that can be
-swapped. Ciphers should be made after forking.
+These are out of reach:
 
-## 4. Randomisation: masking and shielding
+- values in CPU registers, and registers saved by the kernel on a context
+  switch
+- hibernation, which writes all of RAM to disk whether locked or not
+  (full-disk encryption covers it)
+- memory the OS refused to lock (`locked()` says so, and it is still wiped)
+- full-memory crash dumps on Windows, which this library does not exclude its
+  pages from
+- virtual-machine snapshots
+
+Locks also don't survive a fork. mlock(2): "Memory locks are not inherited by
+a child created via fork(2)", so a forked child that keeps using a cipher
+made before the fork holds its keys in pages that can be swapped. Ciphers
+should be made after forking.
+
+## 4. Randomisation through masking and shielding
 
 ### The masked cipher
 
-`MaskedTuring` keeps every secret value as two shares whose XOR is the
-value (first-order Boolean masking). Linear layers and key additions act
-on each share; affine constants go into one share; the inversion x^254 is
-Rivain and Prouff's SecExp254 (CHES 2010, Algorithm 3): squarings share by
-share, two mask refreshes, and four secure multiplications in the style of
-Ishai, Sahai and Wagner (CRYPTO 2003). Coron, Prouff, Rivain and Roche
-(FSE 2013) showed that this use of refreshing "is defeated by an attack of
-order ⌈d/2⌉ + 1"; at d = 1 that is order 2, which first-order masking does
-not claim to resist. The round-key shares are re-randomised at the start of
-every call, so after key setup the key never sits in memory as itself, and
-it looks different every time. Key setup itself is not masked: the key
-schedule runs in the clear, as the plain cipher's does, and the round keys
-exist unshared, in locked memory, until they are split into shares and
-wiped (review of 2026-09-28, R12). About 21 µs per block, 4.6 times the plain cipher
+`MaskedTuring` keeps every secret value as two shares whose XOR is the value
+(first-order Boolean masking). Linear layers and key additions act on each
+share, and affine constants go into one share. The inversion x^254 is Rivain
+and Prouff's SecExp254 (CHES 2010, Algorithm 3): squarings share by share,
+two mask refreshes, and four secure multiplications in the style of Ishai,
+Sahai and Wagner (CRYPTO 2003). Coron, Prouff, Rivain and Roche (FSE 2013)
+showed that this use of refreshing "is defeated by an attack of order
+⌈d/2⌉ + 1". At d = 1 that is order 2, which first-order masking does not
+claim to resist.
+
+The round-key shares are re-randomised at the start of every call, so after
+key setup the key never sits in memory as itself, and it looks different
+every time. Key setup itself is not masked. The key schedule runs in the
+clear, as the plain cipher's does, and the round keys exist unshared, in
+locked memory, until they are split into shares and wiped (review of
+2026-09-28, R12). A block costs about 21 µs, 4.6 times the plain cipher
 (4.5 µs).
 
 The masks come from cSHAKE256 keyed with a 64-byte OS seed. Whoever knows
-that generator's state knows every future mask, so the state lives in its
-own locked allocation, the seed is written straight into it and Keccak-f
-runs in place there. Two processes must never share it: after fork(2) a
-parent and child would use each mask twice. On Linux the state's pages are
-MADV_WIPEONFORK ("Present the child process with zero-filled memory in
-this range after a fork(2)", since Linux 4.14; `VmFlags` shows `wf`), so a
-child finds them zeroed and reseeds before its first mask. The generator
-also compares, with what it recorded when it was seeded, a fork generation
-that a fork handler (pthread_atfork) moves on in every child, and the
-process ID: the masked cipher at the start of every operation, and every
-public draw from the generator (`fill`, `u64`, `block`) before it draws. The
-first version checked the process ID in the masked cipher only, so a program
-drawing from the generator directly, on a system without MADV_WIPEONFORK or
-with a kernel that refused it, would have drawn its parent's masks in a fork
-child. The process ID alone is not enough either: a descendant can be given
-the ID of the process that seeded the stream once that process has exited,
-and on Linux with MADV_WIPEONFORK refused such a child drew exactly the
-seeder's masks, in 3 of 3 runs (review of 2026-09-28, R8). The generation
-does not depend on IDs. All three mechanisms are tested: on Linux with a
-real fork, the generation with a real fork of a stream whose recorded ID is
-set to the child's own, the process-ID check on every platform by changing
-the recorded ID, and each public draw with a real fork of a generator whose
-pages are not wiped.
+that generator's state knows every future mask, so the state lives in its own
+locked allocation, the seed is written straight into it and Keccak-f runs in
+place there. Two processes must never share it: after fork(2) a parent and
+child would use each mask twice. On Linux the state's pages are
+MADV_WIPEONFORK ("Present the child process with zero-filled memory in this
+range after a fork(2)", since Linux 4.14; `VmFlags` shows `wf`), so a child
+finds them zeroed and reseeds before its first mask.
+
+The generator also checks two things against what it recorded when it was
+seeded: a fork generation, which a fork handler (pthread_atfork) moves on in
+every child, and the process ID. The masked cipher checks at the start of
+every operation, and every public draw from the generator (`fill`, `u64`,
+`block`) checks before it draws. The first version checked the process ID in
+the masked cipher only, so a program drawing from the generator directly, on
+a system without MADV_WIPEONFORK or with a kernel that refused it, would have
+drawn its parent's masks in a fork child. The process ID alone is not enough
+either: a descendant can be given the ID of the process that seeded the
+stream once that process has exited, and on Linux with MADV_WIPEONFORK
+refused such a child drew exactly the seeder's masks, in 3 of 3 runs (review
+of 2026-09-28, R8). The generation does not depend on IDs.
+
+All three mechanisms are tested: on Linux with a real fork; the generation,
+with a real fork of a stream whose recorded ID is set to the child's own; the
+process-ID check, on every platform, by changing the recorded ID; and each
+public draw, with a real fork of a generator whose pages are not wiped.
 
 ### Attacking it
 
-Bombe simulates a device that leaks the Hamming weight of every byte of
-every share plus Gaussian noise (the model of Prouff, Rivain and Bévan,
-IEEE Trans. Computers 2009), at a signal-to-noise ratio of 1.
+Bombe simulates a device that leaks the Hamming weight of every byte of every
+share plus Gaussian noise (the model of Prouff, Rivain and Bévan, IEEE Trans.
+Computers 2009), at a signal-to-noise ratio of 1.
 
 | Attack | Result |
 |---|---|
@@ -286,117 +302,124 @@ IEEE Trans. Computers 2009), at a signal-to-noise ratio of 1.
 | Control: masks repeated in every trace (a fixed seed) | 552 of 768, and 1,202 of 1,728, leak (caught) |
 | TVLA, second order (centred products) | 281 of 384 points leak, as expected |
 
-TVLA follows Goodwill et al. (NIST NIAT 2011) to the letter: the traces are
+TVLA follows Goodwill et al. (NIST NIAT 2011) to the letter. The traces are
 split into two independent groups, and a point leaks only if |t| > 4.5 in
 both, in the same direction ("if the t-test statistic exceeded +/- C at a
 particular instance in time purely by chance, this rare occurrence is
-unlikely to repeat"). That matters here: with 768 points one group alone
-reached |t| = 4.35. The second-order products are centred on the known
-mean 4 of a uniform byte's weight, where Schneider and Moradi (CHES 2015)
-centre on each class's sample mean; for uniformly random shares the two
-agree.
+unlikely to repeat"). The rule matters here: with 768 points one group alone
+reached |t| = 4.35. The second-order products are centred on the known mean 4
+of a uniform byte's weight, whereas Schneider and Moradi (CHES 2015) centre
+on each class's sample mean. For uniformly random shares the two agree.
 
-The operation-level TVLA is what makes this more than a check of the state
-between layers. Three planted bugs keep every ciphertext correct but break
+The operation-level TVLA checks more than the state between layers, and
+three planted bugs show why. Each keeps every ciphertext correct but breaks
 the masking: a secure multiplication that forms the unmasked product
-(a0 ⊕ a1)(b0 ⊕ b1), SecExp254 without its first refresh, and an S-box
-whose output is recombined and re-shared as (y, 0). The operation-level
-test catches all three, and the layer-level tests catch only the last.
+(a0 ⊕ a1)(b0 ⊕ b1), SecExp254 without its first refresh, and an S-box whose
+output is recombined and re-shared as (y, 0). The operation-level test
+catches all three, and the layer-level tests catch only the last.
 
-What the model leaves out: a real CPU also leaks the *transitions* between
-values in one register or bus, which can combine two shares into one
-observation; hardware glitches; and anything the compiler adds. The tests
-check the values the source computes. The secure multiplication fences its
-cross term with `black_box`, but nothing here reads the machine code for
-two shares meeting in one register: that needs a verification tool built
-for it, and is left open.
+The model leaves out a few things: the transitions between values in one
+register or bus, which a real CPU also leaks and which can combine two
+shares into one observation; hardware glitches; and anything the compiler
+adds. The tests check the values the source computes. The secure
+multiplication fences its cross term with `black_box`, but nothing here reads
+the machine code for two shares meeting in one register. That needs a
+verification tool built for it, and is left open.
 
 ### The shielded key
 
 `ShieldedKey` keeps a key at rest the way OpenSSH has since 8.1 (2019),
 "against speculation and memory side-channel attacks like Spectre, Meltdown
-and Rambleed": XORed with cSHAKE256 of a random 16 KB prekey
-("relatively large 'prekey' consisting of random data (currently 16KB)").
-An attacker reading memory bit by bit has to recover all 16,416 bytes
-"with high accuracy", as OpenSSH puts it. An earlier version of this page
-said "without error", which is too strong: each bit still unknown only
-doubles the candidates for the key, each testable against a known
-plaintext and ciphertext at the cost of a 16 KB cSHAKE256 and a key setup,
-and a wrong bit in an unknown place multiplies them by about 131,000. A few
-bad bits can be searched; with 256 unknown, the search is no faster than
-guessing the key. The key is unshielded only inside `cipher()` and `masked()`,
-into a stack buffer that is wiped, with the stack burned after. `refresh()`
-replaces the prekey by XORing in the difference of the two masks, so the
-plain key never appears.
+and Rambleed". The key is XORed with cSHAKE256 of a random 16 KB prekey
+("relatively large 'prekey' consisting of random data (currently 16KB)"). An
+attacker who reads memory bit by bit has to recover all 16,416 bytes "with
+high accuracy", as OpenSSH puts it.
 
-## 5. Integrity, and the gap between check and use
+An earlier version of this page said "without error", which is too strong.
+Each bit still unknown only doubles the candidates for the key, each testable
+against a known plaintext and ciphertext at the cost of a 16 KB cSHAKE256 and
+a key setup, and a wrong bit in an unknown place multiplies them by about
+131,000. A few bad bits can be searched; with 256 unknown, the search is no
+faster than guessing the key.
 
-The round keys carry a keyed checksum, Σ H^(i+1) · RK_i in GF(2^128) (the
-GCM polynomial x^128 + x^7 + x^2 + x + 1), at a secret point H. A plain
-`Turing` derives H from the key (cSHAKE256 of K' under the label "Turing v2
-key check", made odd); a `MaskedTuring` draws it at random, so checking it
-handles no value that depends on the key. The checksum is linear in the
-round keys, so it works on shares.
+The key is unshielded only inside `cipher()` and `masked()`, into a stack
+buffer that is wiped, with the stack burned after. `refresh()` replaces the
+prekey by XORing in the difference of the two masks, so the plain key never
+appears.
 
-A fault that changes the keys by E_i and the stored checksum by e, and
-leaves H alone, goes unseen only if Σ H^(i+1) · E_i = e: a non-zero
+## 5. Integrity and the gap between check and use
+
+The round keys carry a keyed checksum, Σ H^(i+1) · RK_i in GF(2^128) (the GCM
+polynomial x^128 + x^7 + x^2 + x + 1), at a secret point H. A plain `Turing`
+derives H from the key (cSHAKE256 of K' under the label "Turing v2 key
+check", made odd); a `MaskedTuring` draws it at random, so checking it
+handles no value that depends on the key. The checksum is linear in the round
+keys, so it works on shares.
+
+A fault that changes the keys by E_i and the stored checksum by e, and leaves
+H alone, goes unseen only if Σ H^(i+1) · E_i = e. That is a non-zero
 polynomial equation in H of degree at most 25, true for at most 25 of the
-2^127 odd points, whatever the keys. A fault that also moves H by d ≠ 0 is
-checked at H + d, and goes unseen only if
-Σ ((H + d)^(i+1) + H^(i+1)) · RK_i + Σ (H + d)^(i+1) · E_i = e. Round
-key 0's term there is exactly d · RK_0, and RK_0 appears nowhere else, so
-the equation holds for one value of RK_0 only, whatever H and the other
-round keys are: probability 2^-128 while round key 0 is unknown, as it is
-to anyone who still needs a fault attack to learn it. Someone who knew
-every round key could match a moved point with a recomputed checksum, but
-would have nothing left to attack; a unit test shows both. Either way, a
-fault arranged without knowing the key escapes with probability at most
-25/2^127 ≈ 2^-122.4, however many bits it flips and wherever they are, H
-included, provided the pattern of flipped bits does not depend on the
-stored data. A reset (stuck-at) fault breaks that proviso: it is also
-arranged without the key, but its pattern is the stored value itself, and
-at H = 0 the checksum is 0 for every key set. Until the review of
-2026-09-27 (research/reviews/2026-09-27/v2-hardening.md, F1), zeroing the
-stored check and H made every later fault pass, and zeroing round key 24
-with them (one 64-byte cache line) released C' with C XOR C' = RK_24, the
-whole last round key. The check now carries a public non-zero constant
-term (keyschedule.rs, CHECK_CONSTANT) and `intact` also requires H to be
-odd, so neither those resets, nor all material zeroed, nor all of it stuck
-at one, verifies (`reset_faults_are_caught`, plain and masked, and
-`tools/mutate.py --review1`). An earlier version of this page only asserted the case of a
-fault in H. The weights start at H^1: with H^0, bit j of RK_0 and bit j of
-the stored checksum would cancel whatever H is. Both cases were also
-checked in GF(2^8) with four round keys, where every point and every RK_0
-can be tried (`research/scripts/gf8_checksum_bound.py`): with H untouched a
-fault passes at no more than 4 of the 128 odd points, the bound, which is
-attained (E = (80, bd, bb, 55), e = 39 passes at 11, 79, 87 and bf); an
-earlier version of this page reported "no fault tried passed at more than
-3", sample luck (reviews of 2026-09-27, F2, and 2026-09-28, R13). With H
+2^127 odd points, whatever the keys.
+
+A fault that also moves H by d ≠ 0 is checked at H + d, and goes unseen only
+if Σ ((H + d)^(i+1) + H^(i+1)) · RK_i + Σ (H + d)^(i+1) · E_i = e. Round key
+0's term there is exactly d · RK_0, and RK_0 appears nowhere else, so the
+equation holds for one value of RK_0 only, whatever H and the other round
+keys are. The probability is 2^-128 while round key 0 is unknown, as it is to
+anyone who still needs a fault attack to learn it. Someone who knew every
+round key could match a moved point with a recomputed checksum, but would
+have nothing left to attack; a unit test shows both.
+
+Either way, a fault arranged without knowing the key escapes with probability
+at most 25/2^127 ≈ 2^-122.4, however many bits it flips and wherever they
+are, H included, provided the pattern of flipped bits does not depend on the
+stored data. A reset (stuck-at) fault breaks that proviso. It is also
+arranged without the key, but its pattern is the stored value itself, and at
+H = 0 the checksum is 0 for every key set. Until the review of 2026-09-27
+(research/reviews/2026-09-27/v2-hardening.md, F1), zeroing the stored check
+and H made every later fault pass, and zeroing round key 24 with them (one
+64-byte cache line) released C' with C XOR C' = RK_24, the whole last round
+key. The check now carries a public non-zero constant term (keyschedule.rs,
+CHECK_CONSTANT) and `intact` also requires H to be odd, so neither those
+resets, nor all material zeroed, nor all of it stuck at one, verifies
+(`reset_faults_are_caught`, plain and masked, and
+`tools/mutate.py --review1`). An earlier version of this page only asserted
+the case of a fault in H.
+
+The weights start at H^1: with H^0, bit j of RK_0 and bit j of the stored
+checksum would cancel whatever H is. Both cases were also checked in GF(2^8)
+with four round keys, where every point and every RK_0 can be tried
+(`research/scripts/gf8_checksum_bound.py`). With H untouched, a fault passes
+at no more than 4 of the 128 odd points, the bound, which is attained
+(E = (80, bd, bb, 55), e = 39 passes at 11, 79, 87 and bf). An earlier
+version of this page reported "no fault tried passed at more than 3", which
+was sample luck (reviews of 2026-09-27, F2, and 2026-09-28, R13). With H
 moved each fault passed for exactly one RK_0 in 256, at every point.
 
 The point has to be secret. Version 2 first used the public point x,
 Σ x^i · RK_i, and said that changes in several round keys escape only if
 Σ x^i · E_i = 0, "a relation a physical fault does not arrange". An outside
 review showed the relation has two-bit solutions: flipping bit b of RK_i and
-bit b − 1 of RK_i+1 adds x^(i+b) twice. That makes 35,800 pairs of
-round-key bits, and 2,900 more that pair a round-key bit with a bit of the
-stored checksum: 0.7% of all two-bit faults, each of which the checked calls
-passed, releasing a ciphertext under the wrong keys. A pair in round keys 23
-and 24 is the last-round DFA setting of docs/11. With the keyed checksum
-none of the 5,118,400 pairs of round-key bits passes a checked call, and the
-unit tests show that no fault of one or two bits anywhere in the stored
-material goes unseen: through linearity for the round keys and the stored
-checksum, and one by one for the 434,240 that move the point. Each
-checksum is 25 constant-time multiplications in GF(2^128) (integer
-multiplications of operands with holes, as in BearSSL's ctmul64), about
-1.5 µs, so a checked call now costs 2.6 encryptions instead of 2.1.
+bit b − 1 of RK_i+1 adds x^(i+b) twice. That makes 35,800 pairs of round-key
+bits, and 2,900 more that pair a round-key bit with a bit of the stored
+checksum: 0.7% of all two-bit faults, each of which the checked calls passed,
+releasing a ciphertext under the wrong keys. A pair in round keys 23 and 24
+is the last-round DFA setting of docs/11.
+
+With the keyed checksum none of the 5,118,400 pairs of round-key bits passes a
+checked call, and the unit tests show that no fault of one or two bits
+anywhere in the stored material goes unseen: through linearity for the round
+keys and the stored checksum, and one by one for the 434,240 that move the
+point. Each checksum is 25 constant-time multiplications in GF(2^128)
+(integer multiplications of operands with holes, as in BearSSL's ctmul64),
+about 1.5 µs, so a checked call now costs 2.6 encryptions instead of 2.1.
 
 The checked calls (`encrypt_block_checked`, `decrypt_block_checked`, and
 their masked twins) verify the checksum, compute, decrypt the result and
-compare, and **verify the checksum again**. The second check is new. A key
-bit that flips after the first check, before the computation reads it,
-corrupts encryption and decryption alike, so decrypt-and-compare passes and
-a ciphertext under a wrong key would be released. With the flip in round key
+compare, then verify the checksum a second time. The second check is new. A
+key bit that flips after the first check but before the computation reads it
+corrupts encryption and decryption alike, so decrypt-and-compare passes and a
+ciphertext under a wrong key would be released. If the flip is in round key
 23, that ciphertext and a correct one form a differential-fault pair on the
 last S-box layer (docs/11).
 
@@ -413,18 +436,18 @@ last S-box layer (docs/11).
 | fork(2), masked cipher (Linux) | the child's masks differ from the parent's |
 
 In safe Rust nothing but a hardware fault or unsafe code can reach that
-window. The cipher is borrowed for the whole call, so nothing can hold
-`&mut` to it, and the block is `&mut`, so no other thread can rewrite it
-between reads (no double fetch). The compiler enforces the rest. Every key
-type is `Send + Sync`. `MaskedTuring` is not `Clone`, because a copy would
-draw the same masks, and needs `&mut` for every call. Doc tests check both
-with their error codes (E0277, E0596): the codes are verified on nightly,
-where rustdoc checks them, and a deliberately wrong code fails.
+window. The cipher is borrowed for the whole call, so nothing can hold `&mut`
+to it, and the block is `&mut`, so no other thread can rewrite it between
+reads (no double fetch). The compiler enforces the rest. Every key type is
+`Send + Sync`. `MaskedTuring` is not `Clone`, because a copy would draw the
+same masks, and it needs `&mut` for every call. Doc tests check both with
+their error codes (E0277, E0596). The codes are verified on nightly, where
+rustdoc checks them, and a deliberately wrong code fails.
 
 ## 6. Timing
 
-dudect-style fixed-versus-random Welch t-tests (campaign 8), |t| > 4.5 counting
-as a leak:
+The timing tests are dudect-style fixed-versus-random Welch t-tests (campaign
+8), with |t| > 4.5 counting as a leak:
 
 | Code path | max \|t\| |
 |---|---|
@@ -439,33 +462,33 @@ as a leak:
 (Full run on Windows; the quick runs on Windows and Linux also stay below
 2.7.)
 
-The release assembly was read for the new code (rustc 1.95.0, x86-64,
-Windows GNU toolchain). `tools/asm_branches.py` lists conditional jumps, and
-now, with `--loads`, every memory access whose address has an index
-register, since a table lookup indexed by secret data leaks its index
-through the cache (Bernstein, 2005). The control is Bombe's table-lookup
-reference cipher: 17 accesses indexed by state bytes. In Turing's functions
-every index is public: round number × 16 for round keys, loop counters,
-the position in the public constant stream, a buffer position, or the
-input length in cSHAKE's padding. Every jump tests a public value: a fault
-check's result, the fork flag and process ID, round and loop counters,
-allocation results. `sec_mult` compiles with no jump at all. After review 6
-(rechecked with rustc 1.94.1 on x86-64 Linux), the keyed checksum's
-GF(2^128) multiplication (`mul128`, `clmul64`) has neither jumps nor indexed
-accesses; the two `intact()` checks jump only on their counter over the
-round keys, which they read at round number × 16.
+The release assembly was read for the new code (rustc 1.95.0, x86-64, Windows
+GNU toolchain). `tools/asm_branches.py` lists conditional jumps and, now, with
+`--loads`, every memory access whose address has an index register, since a
+table lookup indexed by secret data leaks its index through the cache
+(Bernstein, 2005). The control is Bombe's table-lookup reference cipher: 17
+accesses indexed by state bytes. In Turing's functions every index is
+public: round number × 16 for round keys, loop counters, the position in the
+public constant stream, a buffer position, or the input length in cSHAKE's
+padding. Every jump tests a public value: a fault check's result, the fork
+flag and process ID, round and loop counters, allocation results. `sec_mult`
+compiles with no jump at all. After review 6 (rechecked with rustc 1.94.1 on
+x86-64 Linux), the keyed checksum's GF(2^128) multiplication (`mul128`,
+`clmul64`) has neither jumps nor indexed accesses. The two `intact()` checks
+jump only on their counter over the round keys, which they read at round
+number × 16.
 
 Hertzbleed (Wang et al., USENIX Security 2022) turns power draw into remote
 timing: frequency scaling makes the CPU's speed depend on its power, and so
-on the data. dudect measures time on this machine, not power, and cannot
-rule it out for the plain cipher. The masked cipher answers it at first
-order for encryption and decryption: every value they handle is independent
-of the key, so their average power is too. Key setup is not masked (above).
+on the data. dudect measures time on this machine, not power, and cannot rule
+it out for the plain cipher. The masked cipher deals with it at first order
+for encryption and decryption: every value they handle is independent of the
+key, so their average power is too. Key setup is not masked (above).
 
 ## 7. Planted bugs
 
 `python tools/mutate.py --round4` plants 35 bugs in this round's code and
-checks the tests catch each one: 24 of the first 25 (the 25th, a
+checks that the tests catch each one: 24 of the first 25 (the 25th, a
 multiplication by x without reduction, went with the public checksum), and
 eleven that came with the fixes of docs/08, review 6. Among them:
 
@@ -483,35 +506,35 @@ eleven that came with the fixes of docs/08, review 6. Among them:
 
 The first 25 were all caught on Windows, with the Linux paths in WSL. After
 review 6 the set was run again on Linux, where 34 of the 35 apply (the
-page-locking bug is in Windows code): all caught by failing tests except
+page-locking bug is in Windows code). All were caught by failing tests except
 "scanning after the worker moves on", which needs the key-schedule residue
-that only the Windows build leaves where the scanner looks (§3); it survives
+that only the Windows build leaves where the scanner looks (§3). It survives
 on Linux with the code as it was before review 6 too.
 
-Two of the first run's misses were in the tests, not the code. The burn
-wrote into a zero-initialised array, so removing its wiping loop changed
-nothing: it now writes into uninitialised memory. And a test filter skipped
-the Linux test that should catch one bug.
+Two of the first run's misses were in the tests, not the code. The burn wrote
+into a zero-initialised array, so removing its wiping loop changed nothing;
+it now writes into uninitialised memory. And a test filter skipped the Linux
+test that should catch one bug.
 
 The older sets were rerun against version 2. `--step8`, `--step9` and
-`--round3` are all caught. The default set had one survivor from step 7,
-now fixed: truncated-difference propagation claimed "all bytes non-zero"
-for an MDS block holding one certainly non-zero byte next to unknown ones.
-The impossible-differential search never builds such patterns, so no
-result was wrong, but nothing tested the rule. A new test pushes random
-patterns, mixing certain and unknown bytes, and concrete differences
-through the real layers in both directions. That test also found that
-`impossible::find` returned a different witness on each run: it iterated
-`HashMap`s, whose order is randomised per process. It now uses ordered maps
-and returns the same witness every time.
+`--round3` are all caught. The default set had one survivor from step 7, now
+fixed: truncated-difference propagation claimed "all bytes non-zero" for an
+MDS block holding one certainly non-zero byte next to unknown ones. The
+impossible-differential search never builds such patterns, so no result was
+wrong, but nothing tested the rule. A new test pushes random patterns, mixing
+certain and unknown bytes, and concrete differences through the real layers
+in both directions. That test also found that `impossible::find` returned a
+different witness on each run, because it iterated `HashMap`s, whose order is
+randomised per process. It now uses ordered maps and returns the same witness
+every time.
 
 ## 8. Requirements for the file tool (step 9)
 
-- File keys from `turing::random::new_key`, never raw OS output.
-- Read each ciphertext chunk into private memory once, verify its tag on
-  that copy, and decrypt that same copy. Reading the file again to decrypt
-  would let a writer swap the data between check and use (the double-fetch
-  pattern Wang et al. found in the Linux kernel, USENIX Security 2017).
+- Take file keys from `turing::random::new_key`, never from raw OS output.
+- Read each ciphertext chunk into private memory once, verify its tag on that
+  copy, and decrypt that same copy. Reading the file again to decrypt would
+  let a writer swap the data between check and use (the double-fetch pattern
+  Wang et al. found in the Linux kernel, USENIX Security 2017).
 - Release no plaintext before its tag verifies. Andreeva et al. (ASIACRYPT
   2014): "Scenarios in which authenticated encryption schemes output
   decrypted plaintext before successful verification raise many security

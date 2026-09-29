@@ -1,15 +1,15 @@
-# 11 — Key handling, and the attacks that broke other ciphers (step 10, second campaign)
+# 11. Key handling, and the attacks that broke other ciphers (step 10, second campaign)
 
 > Numbers in this document are for version 1 (16 rounds, 17 round keys).
 > Version 2 has 24 rounds and 25 round keys (docs/13); the attacks and tools
 > are unchanged, and `bombe attack` reports the version 2 figures.
 
-Two questions for this round. How safely does the implementation handle keys?
-And does Turing survive the attacks that broke real ciphers: MISTY1,
+This round asks two things: how safely the implementation handles keys, and
+whether Turing survives the attacks that broke real ciphers (MISTY1,
 COCONUT98, Trivium variants, AES-256's key schedule, PRINTcipher, Midori-64,
-SHARK variants, KeeLoq, smart cards? Everything below is measured by
-`bombe attack` (sections 3 and 9–14) and checked by tests. Each tool was first
-made to reproduce a published result.
+SHARK variants, KeeLoq and smart cards). Everything below is measured by
+`bombe attack` (sections 3 and 9–14) and checked by tests. We first made each
+tool reproduce a published result.
 
 ```
 cargo run --release -p bombe -- attack          # 71 findings, about 35 s (--quick: 13 s)
@@ -20,7 +20,7 @@ cargo run --release -p bombe -- attack --deep   # adds the 2^33-encryption attac
 
 | Attack (what it broke) | Breaks Turing to | Full cipher | Evidence |
 |---|---|---|---|
-| Division property, Todo 2015 (first attack on full MISTY1) | integral key recovery on **4 rounds** with 2^32 chosen plaintexts | resists | predicted by the new engine, then run: 2^16 and 2^24 fail at 4 rounds, 2^32 recovers the whole round key (every byte unique after 2 sets, 867 s), and again under a second key in `attack --deep` |
+| Division property, Todo 2015 (first attack on full MISTY1) | integral key recovery on 4 rounds with 2^32 chosen plaintexts | resists | predicted by the new engine, then run: 2^16 and 2^24 fail at 4 rounds, 2^32 recovers the whole round key (every byte unique after 2 sets, 867 s), and again under a second key in `attack --deep` |
 | Boomerang, Wagner 1999 (COCONUT98) | 2 rounds (2^-13.0 per quartet) | resists | 1 round returns at 2^-5.4, the S-box's BCT value 6/256; 2 rounds at exactly the predicted 2^-13.0; 0 of 262,144 quartets return at 3 and 4 rounds |
 | Cube testers, Dinur–Shamir / Aumasson et al. 2009 (767-round Trivium) | 2 rounds | resists | all 2,048 cube-sum bits zero at 1–2 rounds; 1,031 of 2,048 at 3 (random: half) |
 | Related keys, Biryukov–Khovratovich 2009 (AES-256) | nothing | resists | one-bit key differences give round-key differences of mean 64.02 of 128 bits, lowest 42; even with cSHAKE removed, mean 63.94, lowest 40 |
@@ -31,13 +31,13 @@ cargo run --release -p bombe -- attack --deep   # adds the 2^33-encryption attac
 | Slide attacks, Biryukov–Wagner 1999 (KeeLoq) | — | not applicable | see below |
 
 The design-level attacks stop at 4 rounds of 16. The two implementation
-attacks work against any unprotected cipher, AES included; the fixes are
-engineering, not design (below).
+attacks work against any unprotected cipher, AES included, and their fixes are
+engineering rather than design (below).
 
-## Key handling: what was found and fixed
+## Key handling problems found and fixed
 
-The step-8 code (commit 9dc7358) was reviewed for where key material lives
-and what can reach it.
+We reviewed the step-8 code (commit 9dc7358) for where key material lives and
+what can reach it.
 
 | # | Problem in step 8 | Fix |
 |---|---|---|
@@ -47,55 +47,57 @@ and what can reach it.
 | 4 | Nothing stopped a future `#[derive(Debug)]` from printing round keys into logs. | A compile-time guard: if `Turing` or `RoundKeys` ever implements `Debug`, the crate's tests stop compiling. Checked by adding such an impl: error E0283. |
 | 5 | The reference `linear::mat_vec` claimed to be constant-time. In the release build the compiler turns `gf::mul`'s masks into a conditional jump on each bit of the state (21 jumps in `mix_columns_with`). Nothing in the cipher calls it, so nothing leaked. | Docs corrected. `mat_vec` and `mix_columns_with` are compiled only for tests and analysis builds, and a normal build cannot call them (the same probe). |
 
-**The assembly review.** Branch-free source is not branch-free machine code;
-Schneider et al. ("Breaking Bad", ASIA CCS 2025) measured compilers breaking
-constant-time code across many libraries, and item 5 is that effect here.
-`tools/asm_branches.py` lists every conditional jump in chosen functions of
-the release build with the instructions before it. In `encrypt_block`,
-`decrypt_block`, `Turing::new`, the Feistel round, `cshake256_secret`,
-`inv8`, `sub8`, the Affine8 maps, `apply16` and `apply_columns`, every
-conditional jump tests a round counter, a loop bound, the public layer choice,
-the read position in the public constant stream, a length or an allocation
-result. None tests key or state data. The constant-time claim covers exactly
-these functions, in this build, with this compiler (rustc 1.95.0 on x86-64
-Windows, checked 2026-09-26). It has to be rechecked when the compiler
-changes.
+Branch-free source is not branch-free machine code. Schneider et al.
+("Breaking Bad", ASIA CCS 2025) measured compilers breaking constant-time
+code across many libraries, and item 5 is that effect here. For the assembly
+review, `tools/asm_branches.py` lists every conditional jump in chosen
+functions of the release build, along with the instructions before it. In
+`encrypt_block`, `decrypt_block`, `Turing::new`, the Feistel round,
+`cshake256_secret`, `inv8`, `sub8`, the Affine8 maps, `apply16` and
+`apply_columns`, every conditional jump tests a round counter, a loop bound,
+the public layer choice, the read position in the public constant stream, a
+length or an allocation result. None tests key or state data. The
+constant-time claim covers exactly these functions, in this build, with this
+compiler (rustc 1.95.0 on x86-64 Windows, checked 2026-09-26), and it has to
+be rechecked when the compiler changes.
 
-**Round keys are independent.** DFA and CPA recover *round* keys. In AES-128
-one round key gives the master key, and in AES-256 two consecutive round keys
-do, because the key schedule runs backwards. Turing's round keys are
-Feistel states XORed with K' (feed-forward), and K' comes from cSHAKE256, so
-a recovered round key gives neither K' nor the other round keys. An attacker
-has to extract each of the 17 round keys separately, one round deeper each
-time. That makes these attacks harder work, not impossible: 17 round keys
-decrypt as well as the master key does.
+DFA and CPA recover round keys. In AES-128 one round key gives the master
+key, and in AES-256 two consecutive round keys do, because the key schedule
+runs backwards. Turing's round keys are Feistel states XORed with K'
+(feed-forward), and K' comes from cSHAKE256, so a recovered round key gives
+neither K' nor the other round keys. An attacker has to extract each of the
+17 round keys separately, one round deeper each time. That makes these
+attacks more work but not impossible, since 17 round keys decrypt as well as
+the master key does.
 
-**Equivalent keys exist but cannot be found.** Hashing 256 bits to 256 bits
-hits about 1 − 1/e ≈ 63% of the outputs, so about 2^255.3 distinct K' values
-are reachable and some keys collide. Finding a pair means finding a cSHAKE256
-collision (about 2^128 work), and brute force still needs about 2^255 trials.
-Every key derivation that hashes a key does the same.
+Equivalent keys exist, but no one can find a pair. Hashing 256 bits to 256
+bits hits about 1 − 1/e ≈ 63% of the outputs, so about 2^255.3 distinct K'
+values are reachable and some keys collide. Finding a pair means finding a
+cSHAKE256 collision (about 2^128 work), and brute force still needs about
+2^255 trials. Every key derivation that hashes a key does the same.
 
-**What the cipher cannot fix** (requirements for the file tool, step 9):
+Some things are out of the cipher's hands, so they become requirements for
+the file tool (step 9):
 
-- Keys in use are in memory. Lock the pages holding the key and round keys
-  (`VirtualLock` on Windows, `mlock` elsewhere) so they never reach swap or
-  the hibernation file (Halderman et al. 2008 recovered keys from RAM).
-- Intermediate states such as p ⊕ RK0 stay on the stack after encryption,
-  and Rust gives no guarantee against compiler-made copies. With known
-  plaintext, p ⊕ RK0 gives RK0. The practical defence is the same as for the
-  round keys: keep the process's memory private and short-lived.
-- Passphrases and derived keys must be wiped by the tool, and never logged.
+- Keys in use sit in memory. The pages holding the key and round keys must
+  be locked (`VirtualLock` on Windows, `mlock` elsewhere) so they never reach
+  swap or the hibernation file (Halderman et al. 2008 recovered keys from
+  RAM).
+- Intermediate states such as p ⊕ RK0 stay on the stack after encryption, and
+  Rust gives no guarantee against compiler-made copies. With known plaintext,
+  p ⊕ RK0 gives RK0. The practical defence is the same as for the round keys:
+  keep the process's memory private and short-lived.
+- The tool must wipe passphrases and derived keys, and never log them.
 
 ## The attacks
 
-### Division property (Todo 2015): the attack that broke full MISTY1
+### Division property (Todo 2015), which broke full MISTY1
 
 The word-level division property tracks, through each layer, which products
 of input bits still sum to zero over a chosen-plaintext set. Bombe's engine
 (`bombe::division`) reproduces the known AES results: one active byte stays
 balanced to the input of the 4th S-box layer, a diagonal to the 5th. For
-Turing:
+Turing it gives:
 
 | Active bytes (plaintexts) | Balanced up to the input of S-box layer |
 |---|---|
@@ -103,39 +105,39 @@ Turing:
 | 4–14 (2^32–2^112) | 4 |
 | 15 (2^120) | 5 |
 
-So the square attack reaches **4 rounds** once it uses 2^32 plaintexts per
-set, one more than the 2^8 structure of step 8. That prediction was then
-run. With 2^16 and 2^24 per set, no key guess survives at 4 rounds. With
-2^32 (4 active bytes, 2 sets, 2^33 encryptions on 12 threads), every byte of
-the 4th round key came out unique and correct, in 867 s; `attack --deep`
-repeats it under another key (the whole campaign then takes 906 s). The attack stops after two
+So the square attack reaches 4 rounds once it uses 2^32 plaintexts per set,
+one more than the 2^8 structure of step 8. We then ran that prediction. With
+2^16 and 2^24 per set, no key guess survives at 4 rounds. With 2^32 (4 active
+bytes, 2 sets, 2^33 encryptions on 12 threads), every byte of the 4th round
+key came out unique and correct, in 867 s; `attack --deep` repeats it under
+another key (the whole campaign then takes 906 s). The attack stops after two
 sets once every byte is unique; otherwise it takes more. A wrong guess
 survives a set with probability 2^-8, so two sets leave a false survivor
 about 6% of the time.
 
-The 2^120 structure keeps the set balanced for four full rounds, so its
-key recovery would reach 5 rounds, with more chosen plaintexts than any
+The 2^120 structure stays balanced for four full rounds, so a key recovery
+from it would reach 5 rounds, but it needs more chosen plaintexts than any
 attacker could collect. The rule behind the round count (docs/09) was
-max(3, 4) + 4 = 8. Counting this 4-round integral distinguisher it is
-max(3, 4, 4) + 4 = 8: unchanged, and still half of 16. (docs/14 later
-placed a 2^32 set at round 2 by guessing all of round key 0; it stays
-balanced for four rounds too, and the attack reaches 7 rounds on paper,
-with the full codebook.)
+max(3, 4) + 4 = 8. With this 4-round integral distinguisher counted it
+becomes max(3, 4, 4) + 4 = 8, so the total is unchanged and still half of 16.
+(docs/14 later placed a 2^32 set at round 2 by guessing all of round key 0;
+that set also stays balanced for four rounds, and the attack reaches 7 rounds
+on paper, with the full codebook.)
 
-### Boomerang (Wagner 1999): broke COCONUT98
+### Boomerang (Wagner 1999), which broke COCONUT98
 
-Two short differentials, one from each end, can beat one long one. The
-return rate for one round matches the S-box's Boomerang Connectivity Table
-entry exactly: best pair 6/256 = 2^-5.4, measured 2^-5.4. Two rounds still
-return at 2^-13.0 (33 of 262,144 quartets). Both pairs cross MixState with
-the same 16-byte difference, so only S-box events count. The pairs must be
-shifted alike through the last S-box. On the way back both pairs are also
-shifted by the same value, which puts the first S-box through a second,
-correlated switch (the multi-round switch of Wang and Peyrin, ToSC 2019).
-Counting over both S-box inputs gives exactly 8/65,536 = 2^-13.00, or 32
-expected returns. Treating the two S-boxes as independent predicts 2^-15.2,
-four times too few. From three rounds nothing comes back in 262,144
-quartets. A random permutation returns with probability 2^-128.
+Two short differentials, one from each end, can beat one long one. For one
+round the return rate matches the S-box's Boomerang Connectivity Table entry
+exactly: the best pair gives 6/256 = 2^-5.4, and we measured 2^-5.4. Two
+rounds still return at 2^-13.0 (33 of 262,144 quartets). Both pairs cross
+MixState with the same 16-byte difference, so only S-box events count. The
+pairs must be shifted alike through the last S-box. On the way back both
+pairs are also shifted by the same value, which puts the first S-box through
+a second, correlated switch (the multi-round switch of Wang and Peyrin, ToSC
+2019). Counting over both S-box inputs gives exactly 8/65,536 = 2^-13.00, or
+32 expected returns. Treating the two S-boxes as independent predicts 2^-15.2,
+four times too few. From three rounds nothing comes back in 262,144 quartets.
+A random permutation returns with probability 2^-128.
 
 ### Cube testers (Dinur–Shamir 2009; Aumasson et al. 2009)
 
@@ -145,23 +147,23 @@ recovered keys of Trivium with 767 of its 1152 initialisation rounds. For
 Turing the sums vanish at 1–2 rounds and look random from 3. After one round
 each output bit depends on a single byte, so its degree is at most 8. After
 two, each output bit is the last S-box (degree 7) applied to a sum of
-functions of single bytes. So every term involves at most 7 first-round
-bytes, and its degree is at most the number of cube bits in those 7 bytes.
-Sixteen random bits spread over more than 7 bytes 99.65% of the time (10.7
-on average), which keeps the degree below 16.
+functions of single bytes. Every term therefore involves at most 7
+first-round bytes, and its degree is at most the number of cube bits in those
+7 bytes. Sixteen random bits spread over more than 7 bytes 99.65% of the time
+(10.7 on average), which keeps the degree below 16.
 
-### Related keys (Biryukov–Khovratovich 2009): broke AES-256's key schedule
+### Related keys (Biryukov–Khovratovich 2009), which broke AES-256's key schedule
 
-The attack needs round-key differences it can predict. Flipping each of the
-256 key bits of 16 random keys, the 69,632 round-key differences average
-64.02 of 128 bits with the lowest at 42. The same holds with the cSHAKE256
+The attack needs round-key differences it can predict. We flipped each of the
+256 key bits of 16 random keys, and the 69,632 round-key differences average
+64.02 of 128 bits, with the lowest at 42. The same holds with the cSHAKE256
 layer removed (mean 63.94, lowest 40), so the Feistel stage defends on its
 own. Encrypting one plaintext under related keys gives output differences of
 mean 64.13 bits after one round and 64.00 after 16.
 
-### Interpolation (Jakobsen–Knudsen 1997): broke a SHARK variant
+### Interpolation (Jakobsen–Knudsen 1997), which broke a SHARK variant
 
-Write the cipher as a polynomial over GF(2^8) and solve for its
+The attack writes the cipher as a polynomial over GF(2^8) and solves for its
 coefficients; it works when the polynomial is sparse. Every function on
 GF(2^8) is exactly one polynomial of degree below 256 (Lagrange). Bombe
 computes it and reproduces the published AES S-box polynomial: 9 terms,
@@ -170,27 +172,26 @@ computes it and reproduces the published AES S-box polynomial: 9 terms,
 its input straight into x^-1. It is what the algebraic descriptions of AES
 build on (Ferguson–Schroeppel–Whiting 2001, Murphy–Robshaw 2002), though no
 attack on AES has come of it. Turing puts an affine map in front of the
-inversion: its S-box has **254 terms** and its inverse 255, as dense as a
+inversion, so its S-box has 254 terms and its inverse 255, as dense as a
 random permutation (about 254).
 
 ### Invariant attacks (Leander et al. 2011; Todo–Leander–Sasaki 2016)
 
-These find a property of the state that every round preserves, so it
-survives any number of rounds. They broke PRINTcipher, Midori-64, iSCREAM,
+Invariant attacks find a property of the state that every round preserves, so
+it survives any number of rounds. They broke PRINTcipher, Midori-64, iSCREAM,
 SCREAM, NORX v2.0, Simpira v1 and Haraka v.0 (list from BCLR). All of them
 use the same round key in every round up to simple round constants (the
 permutations among them use round constants alone).
 
-Beierle, Canteaut, Leander and Rotella (CRYPTO 2017) turned this into a
-criterion. If two rounds share the linear layer L, the difference of their
-round keys is a linear structure of any such invariant, and the linear
-structures form an L-invariant subspace. So they contain W_L(D), the
-smallest L-invariant subspace holding all those differences. If W_L(D) is
-the whole state, only affine invariants remain, and those would need an
-S-box with a linear component. Turing's has none: every component has
-degree 7.
+Beierle, Canteaut, Leander and Rotella (CRYPTO 2017) gave a criterion for
+this. If two rounds share the linear layer L, the difference of their round
+keys is a linear structure of any such invariant, and the linear structures
+form an L-invariant subspace. So the linear structures contain W_L(D), the
+smallest L-invariant subspace holding all those differences. If W_L(D) is the
+whole state, only affine invariants remain, and those would need an S-box
+with a linear component. Turing's has none: every component has degree 7.
 
-`bombe::invariant` computes W_L(D). It was checked against the paper first.
+`bombe::invariant` computes W_L(D). We checked it against the paper first.
 For Midori-64's linear layer it reproduces the published invariant factors
 (eight (X+1)^6 and eight (X+1)^2): the dimensions reached with 1, 2, … 16
 differences are 6, 12, … 48, 50, … 64. It also confirms that Midori's
@@ -208,11 +209,11 @@ For Turing's real round keys (7 differences between MixState rounds, 6
 between the others), W_L(D) = 128 for each layer and for both together, for
 all 64 random keys tried. A cipher using the same round key in every round
 gives W_L(D) = 0 and is flagged. By the paper's Theorem 1, AES's 9 MixColumns
-rounds (AES-128) can reach at most 64 dimensions whatever the round keys,
-so this proof cannot cover AES at all. For Turing one difference is enough.
+rounds (AES-128) can reach at most 64 dimensions whatever the round keys, so
+this proof cannot cover AES at all. For Turing one difference is enough.
 
-Limit: the criterion covers invariants that are the same in every round.
-Invariants that alternate between rounds are not excluded by it.
+One limit: the criterion covers invariants that are the same in every round.
+It does not exclude invariants that alternate between rounds.
 
 ### Differential fault analysis (Piret–Quisquater 2003)
 
@@ -225,15 +226,16 @@ software and extracted AES-NI keys from SGX enclaves this way.
 For Turing a byte fault before round 15's S-box layer passes one S-box, then
 MixState spreads it to all 16 bytes as β times one matrix column. Guessing
 the position and β (16 × 255 hypotheses) and solving each key byte
-separately leaves 65,536 candidates after one fault and **1 after two**, the
-right one. Decrypting the output and comparing it with the input catches
-every one of 20,000 single faults at random rounds, bytes and values.
+separately leaves 65,536 candidates after one fault and 1 after two, the
+right one. The countermeasure is to decrypt the output and compare it with
+the input, which catches every one of 20,000 single faults at random rounds,
+bytes and values.
 
-Two limits of that countermeasure. It doubles the cost. It also cannot catch
-a *persistent* fault in the round-key memory, since encryption and
-decryption would both use the corrupted key. Persistent fault analysis
-(Zhang et al., TCHES 2018) usually targets S-box tables in memory. Turing
-has none; its S-box is computed.
+That countermeasure has two limits. It doubles the cost, and it cannot catch
+a persistent fault in the round-key memory, since encryption and decryption
+would both use the corrupted key. Persistent fault analysis (Zhang et al.,
+TCHES 2018) usually targets S-box tables in memory, and Turing has none: its
+S-box is computed.
 
 ### Correlation power analysis (Brier–Clavier–Olivier 2004)
 
@@ -247,8 +249,8 @@ keys from SGX and the Linux kernel.
 
 Simulated on Turing's real first-round S-box outputs, CPA recovers all 16
 bytes of round key 0 from 10 traces without noise, 40 at a signal-to-noise
-ratio of 1 and 320 at 0.1. Every unmasked cipher falls this way; the
-countermeasure is **masking**. Turing's S-box computes x^254 with exactly the
+ratio of 1 and 320 at 0.1. Every unmasked cipher falls this way, and the
+countermeasure is masking. Turing's S-box computes x^254 with exactly the
 addition chain Rivain and Prouff mask at any order (CHES 2010, Algorithm 2:
 x^2, x^3, x^12, x^15, x^240, x^252, x^254, with 4 multiplications, which
 they note is the minimum). Squaring is linear in characteristic 2, and the
@@ -257,7 +259,7 @@ desktop the attacker needs physical access or a leaky interface such as the
 RAPL counters PLATYPUS read, so masking belongs with hardware or
 shared-machine threat models.
 
-### Slide attacks (Biryukov–Wagner 1999): not applicable
+### Slide attacks (Biryukov–Wagner 1999), not applicable
 
 Slide attacks need the cipher to be the same keyed function repeated,
 F^r. KeeLoq fell to one because its 64-bit key is reused cyclically
@@ -269,20 +271,21 @@ self-similarity to slide either.
 
 ## Checking the checkers
 
-- **Published and predicted results reproduced:** the AES S-box polynomial
-  (9 terms, all coefficients), BCLR's Midori-64 invariant factors, the AES
-  integral distinguishers (division engine), the S-box's BCT value in the
-  1-round boomerang rate, and the exact 2-round rate (32 returns expected,
-  33 measured).
-- **Controls caught:** identical round keys (W_L(D) = 0), CPA with too few
-  traces for the noise fails, a `Debug` impl breaks the build, the reference
-  `mix_columns_with` shows its 21 bit-testing jumps to the assembly tool.
-- **16 planted bugs, all caught by the test meant for them:** secret cSHAKE
-  without its label, K' right half copied from the left, a `Debug` impl on
-  `Turing`, an unsound division rule, the forward S-box in the structured
-  attack, a boomerang with one ciphertext shifted, a cube missing one point
-  per thread, a related-key weight counting one byte, the DFA using a row
-  instead of a column, the fault injected a round late, polynomial
+- The tools reproduced published and predicted results: the AES S-box
+  polynomial (9 terms, all coefficients), BCLR's Midori-64 invariant factors,
+  the AES integral distinguishers (division engine), the S-box's BCT value in
+  the 1-round boomerang rate, and the exact 2-round rate (32 returns
+  expected, 33 measured).
+- The controls caught what they should: identical round keys give
+  W_L(D) = 0, CPA with too few traces for the noise fails, a `Debug` impl
+  breaks the build, and the reference `mix_columns_with` shows its 21
+  bit-testing jumps to the assembly tool.
+- We planted 16 bugs, and the test meant for each one caught it: secret
+  cSHAKE without its label, K' right half copied from the left, a `Debug`
+  impl on `Turing`, an unsound division rule, the forward S-box in the
+  structured attack, a boomerang with one ciphertext shifted, a cube missing
+  one point per thread, a related-key weight counting one byte, the DFA using
+  a row instead of a column, the fault injected a round late, polynomial
   coefficients reversed, a closure that forgets images, the wrong Turing
   layer map, round-key differences mixed across layers, a CPA model adding
   instead of XORing, and the exact boomerang rate using MixState instead of

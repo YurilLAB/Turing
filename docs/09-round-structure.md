@@ -1,4 +1,4 @@
-# 09 — Round structure and round count (step 7; version 2 in step 10)
+# 09. Round structure and round count (step 7; version 2 in step 10)
 
 ## The round
 
@@ -6,11 +6,11 @@ Encryption adds round key 0, then runs 24 rounds (version 2; version 1
 had 16). Each round is:
 
 1. the S-box layer (16 S-boxes),
-2. a linear layer, **MixState in odd rounds (1, 3, …, 23)** and
-   **ShiftRows + MixColumns in even rounds (2, 4, …, 22)**, none in round 24,
+2. a linear layer, MixState in odd rounds (1, 3, …, 23) and
+   ShiftRows + MixColumns in even rounds (2, 4, …, 22), none in round 24,
 3. the round key.
 
-That makes 25 round keys and 12 MixState layers. It is defined in
+That makes 25 round keys and 12 MixState layers. The structure is defined in
 `crates/turing/src/structure.rs`, which also fixes 24 as the maximum.
 
 The last round has no linear layer for the same reason AES drops its last
@@ -21,26 +21,26 @@ anyone, so it adds no security.
 
 ### Trail bounder (differential and linear)
 
-`crates/bombe/src/trail.rs` tracks which of the 16 bytes carry a difference
-(a 16-bit *activity pattern*). S-box layers keep the pattern and cost one
+`crates/bombe/src/trail.rs` tracks which of the 16 bytes carry a difference,
+a 16-bit activity pattern. An S-box layer keeps the pattern and costs one
 active S-box per active byte. An MDS layer with n inputs allows a transition
 from pattern X to pattern Y exactly when both are zero or wt(X) + wt(Y) ≥ n + 1
 (every support of that size is taken by some codeword of an MDS code, so this
-is exact at the byte level). A dynamic program over all 2^16 patterns gives
-the minimum number of active S-boxes over any number of rounds, for any mix
-of layers.
+is exact at the byte level). A dynamic program over all 2^16 patterns then
+gives the minimum number of active S-boxes over any number of rounds, for any
+mix of layers.
 
 Linear trails give the same numbers. Masks move through ShiftRows in the same
 direction as differences, and through the transposed inverse of an MDS
 matrix, which is also MDS with the same branch number.
 
-**Validation:**
+We validated the bounder in these ways:
 
 - AES (ShiftRows + MixColumns in every round) reproduces the published table
   for 1–14 rounds exactly: 1, 5, 9, 25, 26, 30, 34, 50, 51, 55, 59, 75, 76, 80
   (Mouha, Wang, Gu, Preneel, Inscrypt 2011, Table 4).
-- MixState in every round gives 1, 17, 18, 34, 35, …, the two-round
-  propagation theorem met exactly.
+- MixState in every round gives 1, 17, 18, 34, 35, …, which meets the
+  two-round propagation theorem exactly.
 - The column-by-column shortcut agrees with brute-force enumeration of every
   allowed pattern pair, on all 14 mixed schedules with 1–3 linear layers.
 - Every pair of rounds meets its layer's branch number (5 or 17) in all 64
@@ -48,15 +48,15 @@ matrix, which is also MDS with the same branch number.
 
 ### Impossible-differential search
 
-`crates/bombe/src/impossible.rs` is the miss-in-the-middle method. Each byte
-is certainly zero, certainly non-zero, or unknown. What is certain is pushed
-forward from the input pattern and backward from the output pattern, and any
-contradiction (a byte zero on one side and non-zero on the other, or a linear
-layer whose two sides cannot fit its branch number) proves the pair of
-patterns impossible for every key. The rules only claim what must hold, so
-everything found is real.
+`crates/bombe/src/impossible.rs` implements the miss-in-the-middle method.
+Each byte is certainly zero, certainly non-zero, or unknown. What is certain
+gets pushed forward from the input pattern and backward from the output
+pattern. Any contradiction proves the pair of patterns impossible for every
+key: a byte that is zero on one side and non-zero on the other, or a linear
+layer whose two sides cannot fit its branch number. The rules only claim what
+must hold, so everything found is real.
 
-**Validation:**
+We validated it too:
 
 - For AES it finds the classic 4-round impossible differential (Biham and
   Keller) and none over 5 rounds. Sun, Liu, Guo, Rijmen and Li (EUROCRYPT
@@ -76,7 +76,7 @@ consecutive rounds anywhere in the cipher:
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | AES-like (no MixState) | 5 | 9 | 25 | 26 | 30 | 34 | 50 | 4 | 8 | 4 | 5312 |
 | MixState every round | 17 | 18 | 34 | 35 | 51 | 52 | 68 | 4 | 6 | 2 | 8192 |
-| **MixState every 2nd round (Turing)** | **5** | **18** | **25** | **35** | **36** | **52** | **53** | **4** | **7** | **4** | **6848** |
+| MixState every 2nd round (Turing) | 5 | 18 | 25 | 35 | 36 | 52 | 53 | 4 | 7 | 4 | 6848 |
 | MixState every 3rd round | 5 | 9 | 22 | 26 | 30 | 43 | 47 | 4 | 7 | 4 | 6272 |
 | MixState every 4th round | 5 | 9 | 22 | 26 | 30 | 34 | 47 | 4 | 8 | 4 | 5888–6080 |
 | MixColumns every 3rd, MixState otherwise | 5 | 18 | 22 | 23 | 39 | 40 | 44 | 4 | 8 | 3 | 7232 |
@@ -84,20 +84,20 @@ consecutive rounds anywhere in the cipher:
 
 "to 22" and "to 43" are the rounds after which every window has at least 22
 active S-boxes (probability ≤ 2^-132) or 43 (≤ 2^-258). Cost counts field
-multiplications in the constant-time code. For version 2's 24 rounds
+multiplications in the constant-time code. With version 2's 24 rounds
 (`rounds` with no argument) the window figures are the same and every cost
 grows by half: Turing 10304 against 8000 for the AES-like structure.
 
 What the table shows:
 
-- **Strict alternation gives the best trail bounds for its cost.** Any 3
-  rounds have 18 active S-boxes (AES: 9), any 5 have 35 (AES: 26), any 7 have
-  52 (AES: 34).
-- **MixState every 4th or 5th round buys nothing** at 7–8 rounds compared with
+- Strict alternation gives the best trail bounds for its cost. Any 3 rounds
+  have 18 active S-boxes (AES: 9), any 5 have 35 (AES: 26), any 7 have 52
+  (AES: 34).
+- MixState every 4th or 5th round buys nothing at 7–8 rounds compared with
   AES. The step-6 review rule "MixState at least every 4 rounds" was too weak
   and is replaced by alternation.
-- **Alternation does not shorten impossible differentials: they still reach
-  4 rounds.** The tool shows why. One active byte becomes 4 through
+- Alternation does not shorten impossible differentials, which still reach
+  4 rounds. The tool shows why. One active byte becomes 4 through
   MixColumns, and from a one-byte output the same happens backwards. A
   MixState in between would need 4 + 4 ≥ 17, a contradiction.
 - Mixes heavier in MixState cut impossible differentials to 3 rounds, but
@@ -107,12 +107,11 @@ What the table shows:
 
 ### Why MixState in the odd rounds
 
-Odd-round and even-round alternation have identical bounds. Odd rounds put
-MixState in round 1 and in the last linear layer (round 15 in version 1,
-23 in version 2). An attack extended
-by a round at either end then has to guess a whole 16-byte round key to
-follow one active byte, instead of one 4-byte column. It costs one more
-MixState layer.
+Odd-round and even-round alternation have identical bounds. With odd rounds,
+MixState sits in round 1 and in the last linear layer (round 15 in version 1,
+23 in version 2). An attack extended by a round at either end then has to
+guess a whole 16-byte round key to follow one active byte, instead of one
+4-byte column. The price is one more MixState layer.
 
 ## Turing's numbers
 
@@ -131,39 +130,41 @@ MixState layer.
 | 24 (version 2's whole cipher) | 204 | ≤ 2^-1224 |
 
 For the whole cipher, the 24 rounds split into 12 pairs, each around one
-MixState, so the two-round theorem gives 12 × 17 = 204. The bounder confirms
-that is the exact minimum. Differential and linear bounds are the same.
+MixState, so the two-round theorem gives 12 × 17 = 204, and the bounder
+confirms that is the exact minimum. Differential and linear bounds are the
+same.
 
 - Longest impossible differential: 4 rounds.
 - Full diffusion: every output byte depends on every input byte after 3
   rounds (2 starting from a MixState round).
 
-## Round count: 16, then 24
+## Why 16 rounds, then 24
 
-Version 1 chose 16 by the rule below. Version 2 raised it to 24 (docs/13):
-the published ways to make the S-box less algebraic weakened it on every
+Version 1 chose 16 by the rule below. Version 2 raised it to 24 (docs/13).
+The published ways to make the S-box less algebraic weakened it on every
 other count, so the extra strength comes from rounds, with 24 fixed as the
 maximum. The rule:
 
 1. A differential or linear distinguisher is usable only if its trail
    probability is above 2^-128, since the attacker cannot get more than the
    2^128 possible blocks. Every 4-round window already has at least 22 active
-   S-boxes (≤ 2^-132), so usable trails cover at most **3 rounds**.
-2. The longest impossible differential covers **4 rounds**.
+   S-boxes (≤ 2^-132), so usable trails cover at most 3 rounds.
+2. The longest impossible differential covers 4 rounds.
 3. Attacks add rounds around a distinguisher by guessing key material. The
    best impossible-differential attacks on AES add 3 rounds to a 4-round
-   distinguisher. We allow **4** (2 at each end), even though MixState at
+   distinguisher. We allow 4 (2 at each end), even though MixState at
    both ends makes each of those rounds cost a full 16-byte key guess.
    That allowance was needed: against a 256-bit key the 2^128 guess is
    affordable on paper, and the square attack spends one such round at
    the front and two at the back, 4 + 3 = 7 rounds (docs/14).
 4. So the longest attack these techniques can build is max(3, 4) + 4 =
-   **8 rounds**.
-5. Version 1 had **twice that: 16 rounds**, more than AES-256's 14.
-   Version 2 has **three times that: 24 rounds**.
+   8 rounds.
+5. Version 1 had twice that, 16 rounds, more than AES-256's 14.
+   Version 2 has three times that, 24 rounds.
 
-Cross-check: even trails that a 2^256 budget could not use (≥ 43 active
-S-boxes) run out after 7 rounds, and 7 + 4 = 11 is well below 16, let alone 24.
+As a cross-check, even trails that a 2^256 budget could not use (≥ 43 active
+S-boxes) run out after 7 rounds, and 7 + 4 = 11 is well below 16, let alone
+24.
 
 For comparison, the best single-key attacks on AES-256 reach 9 of its 14
 rounds with practical-model meet-in-the-middle techniques, and 10 rounds with
@@ -174,39 +175,41 @@ more exotic ones.
 These tools cover differential, linear and impossible-differential
 cryptanalysis at the byte level. They do not model:
 
-- **differentials and linear hulls** (many trails adding up), the usual gap
+- differentials and linear hulls (many trails adding up), the usual gap
   between trail bounds and real probabilities,
-- **meet-in-the-middle** attacks (the best known attacks on AES-256),
-- **integral / division-property** distinguishers,
-- **algebraic** attacks.
+- meet-in-the-middle attacks (the best known attacks on AES-256),
+- integral / division-property distinguishers,
+- algebraic attacks.
 
-Step 10 has since measured three of these. **Clustering is bounded**
-(docs/12). Park et al.'s theorem counts every trail at once, under
-independent round keys. Any 3 consecutive rounds contain S-box layer,
-MixState, S-box layer, so every differential over them has probability at
-most 2^-102.0 and every linear hull at most 2^-99.6 (the same argument gives
-AES only 2^-28.3). Any 5 rounds: 2^-110.8 and 2^-105.9. The integral
-part (docs/11): the word-level division
-property keeps a 2^120-plaintext set balanced through 4 rounds, and a 4-round
-key recovery with 2^32 plaintexts was run and works: max(3, 4, 4) + 4 = 8,
-so the rule above is unchanged. Cube testers stop at 2 rounds, and the
-interpolation attack finds no sparse polynomial to start from. The fifth
-campaign (docs/14) measured meet-in-the-middle: Demirci-Selçuk sequences
-over 4 rounds need 36 parameters (AES 24), but differential enumeration
-brings the table to 22 bytes (2^176), below the 2^256 keys, so that family
-reaches 6 rounds, and 7 with round key 0 guessed, on paper (corrected
-after the review of 2026-09-27; docs/14, section 3). The yoyo game stops
-at 5 rounds, and the square attack with round key 0 guessed reaches 7
-rounds on paper (the full codebook, about 2^174 encryptions): both 7-round
-attacks are within the rule's 8. Hulls and bit-level models remain, and
-the factor-of-two margin is there for them.
+Step 10 has since measured three of these. Clustering is bounded (docs/12):
+Park et al.'s theorem counts every trail at once, under independent round
+keys. Any 3 consecutive rounds contain S-box layer, MixState, S-box layer, so
+every differential over them has probability at most 2^-102.0 and every
+linear hull at most 2^-99.6 (the same argument gives AES only 2^-28.3). For
+any 5 rounds the figures are 2^-110.8 and 2^-105.9.
+
+On the integral side (docs/11), the word-level division property keeps a
+2^120-plaintext set balanced through 4 rounds, and a 4-round key recovery
+with 2^32 plaintexts was run and works. With that, max(3, 4, 4) + 4 = 8 and
+the rule above is unchanged. Cube testers stop at 2 rounds, and the
+interpolation attack finds no sparse polynomial to start from.
+
+The fifth campaign (docs/14) measured meet-in-the-middle. Demirci-Selçuk
+sequences over 4 rounds need 36 parameters (AES 24), but differential
+enumeration brings the table to 22 bytes (2^176), below the 2^256 keys, so
+that family reaches 6 rounds, and 7 with round key 0 guessed, on paper
+(corrected after the review of 2026-09-27; docs/14, section 3). The yoyo game
+stops at 5 rounds, and the square attack with round key 0 guessed reaches 7
+rounds on paper (the full codebook, about 2^174 encryptions). Both 7-round
+attacks are within the rule's 8. Hulls and bit-level models remain, and the
+factor-of-two margin is there for them.
 
 ## Cost
 
 In the constant-time code (field multiplications, each 8 steps), a 24-round
 Turing encryption costs 10304 units against 8000 for an AES-like 24-round
-structure (16 rounds: 6848 against 5312): 29% more for 50–100% more active
-S-boxes in 3–7 round windows.
+structure (16 rounds: 6848 against 5312). That is 29% more for 50–100% more
+active S-boxes in 3–7 round windows.
 
 ## Sources
 

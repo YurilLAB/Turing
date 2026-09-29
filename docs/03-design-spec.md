@@ -1,35 +1,37 @@
-# 03 — Design spec
+# 03. Design spec
 
 Status: architecture agreed. Component details (S-box, linear layer, key
-schedule, round count, AEAD) are filled in by steps 4–9.
+schedule, round count, AEAD) are filled in by steps 4 to 9.
 
 ## Decided
 
-- Symmetric cipher designed from scratch, written in Rust.
-- 256-bit key (quantum margin: ~128-bit security against Grover).
-- Substitution-permutation network (SPN).
-- Post-quantum public-key encryption from the start. **Changed in step 12
-  (owner's decision): the KEM is Turing's own, Turing-1026 (docs/16)**, on
-  the standard plain-LWE problem with our parameters, hashing, transform and
-  implementation; the data cipher is Turing or Turing-256. The earlier plan
-  kept only the data cipher ours and used X-Wing (X25519 + ML-KEM-768 with
-  its SHA3-256 combiner, draft-connolly-cfrg-xwing-kem, not yet an RFC),
+- The symmetric cipher is designed from scratch and written in Rust.
+- The key is 256 bits, for a quantum margin of about 128-bit security against
+  Grover.
+- The structure is a substitution-permutation network (SPN).
+- Post-quantum public-key encryption is there from the start. In step 12 we
+  changed the plan so that the KEM is our own, Turing-1026 (docs/16). It sits
+  on the standard plain-LWE problem with our parameters, hashing, transform
+  and implementation, and the data cipher is Turing or Turing-256. The earlier
+  plan kept only the data cipher ours and used X-Wing (X25519 + ML-KEM-768
+  with its SHA3-256 combiner, draft-connolly-cfrg-xwing-kem, not yet an RFC),
   where X25519 guards against a future break of the lattice part.
   Turing-1026 has no such second, non-lattice partner yet (docs/16, "What is
   not done").
-- Sender signatures (ML-DSA): **later**, after file encryption works end to
+- Sender signatures (ML-DSA) come later, after file encryption works end to
   end. The file format reserves space for them (versioned header).
-- Constants and key-derived values: **cSHAKE256** (NIST SP 800-185) with the
-  input as X and an ASCII label of the form `"Turing v1 <purpose>"` as the
-  customization string S (`crates/turing/src/xof.rs`); version 2 renamed
-  the key-schedule labels to `"Turing v2 ..."` (docs/13), while the S-box
-  and matrices keep the v1 labels they were generated with. cSHAKE encodes the
-  label's length, so no two labels can ever produce the same hash input;
-  plain SHAKE256(label || input), used until step 7, only had that property
-  because the lengths happened to differ. It produces any output length, so
-  one rule covers everything, and standard tools reproduce it.
+- Constants and key-derived values all come from cSHAKE256 (NIST SP 800-185),
+  with the input as X and an ASCII label of the form `"Turing v1 <purpose>"`
+  as the customization string S (`crates/turing/src/xof.rs`). Version 2
+  renamed the key-schedule labels to `"Turing v2 ..."` (docs/13), while the
+  S-box and matrices keep the v1 labels they were generated with. cSHAKE
+  encodes the label's length, so no two labels can ever produce the same hash
+  input. Plain SHAKE256(label || input), which we used until step 7, only had
+  that property because the lengths happened to differ. It produces any
+  output length, so one rule covers everything, and standard tools reproduce
+  it.
 
-## Layer 1: the Turing block cipher
+## Layer 1, the Turing block cipher
 
 | Parameter | Proposal | Reason |
 |---|---|---|
@@ -48,20 +50,20 @@ schedule, round count, AEAD) are filled in by steps 4–9.
 
 - Bijective (every output appears exactly once).
 - Differential uniformity ≤ 4 (max DDT entry, non-trivial rows).
-- Linearity (max |Walsh coefficient|) ≤ 32: correlation ≤ 2^-3, i.e. a
+- Linearity (max |Walsh coefficient|) ≤ 32: correlation ≤ 2^-3, that is, a
   linear approximation holds with probability at most 1/2 ± 2^-4.
   (Nonlinearity ≥ 112.)
 - Boomerang uniformity ≤ 6.
 - Algebraic degree 7 (maximal for a bijective 8-bit S-box).
 - No fixed points: S(x) ≠ x and S(x) ≠ x XOR 0xFF.
 - Shortest permutation cycle ≥ 16 (stricter than AES, which has a 2-cycle).
-- Computable in constant time: Turing evaluates it arithmetically (two affine
+- Computable in constant time. Turing evaluates it arithmetically (two affine
   maps and x^254) with no table lookups; compact Boolean circuits for field
   inversion are also known if speed is needed later.
 
-Note: forbidding S(x) = x in one component is fine. One of Enigma's
-weaknesses was that the *whole* machine could never map a letter to itself;
-our full cipher must remain able to map any block to any block.
+Forbidding S(x) = x in one component is fine. One of Enigma's weaknesses was
+that the whole machine could never map a letter to itself. Our full cipher
+must stay able to map any block to any block.
 
 ### Constants must be "nothing up my sleeve"
 
@@ -70,11 +72,11 @@ published, reproducible rule, so anyone can check that none were chosen to
 plant a weakness. Dual_EC_DRBG is the cautionary example: unexplained
 constants that turned out to enable a backdoor.
 
-## Layer 2: file encryption
+## Layer 2, file encryption
 
-- Each file gets a fresh random 256-bit **file key** from
-  `turing::random::new_key` (cSHAKE256 of a 64-byte OS seed: raw OS output
-  can leave a copy in the generator's memory, docs/13).
+- Each file gets a fresh random 256-bit file key from
+  `turing::random::new_key`. That is cSHAKE256 of a 64-byte OS seed, because
+  raw OS output can leave a copy in the generator's memory (docs/13).
 - Each chunk is read into private memory once, its tag verified on that
   copy, and that same copy decrypted; no plaintext is released before its
   tag verifies (docs/13, section 8).
@@ -83,19 +85,19 @@ constants that turned out to enable a backdoor.
   counter and a "last chunk" flag (STREAM construction). This prevents
   reordering, dropping, or truncating chunks.
 - The header is authenticated as well, so it can't be tampered with.
-- AEAD construction (e.g. CTR + MAC) is decided in step 9.
+- The AEAD construction (e.g. CTR + MAC) is decided in step 9.
 
-## Layer 3: hybrid key wrapping (how the file key reaches the reader)
+## Layer 3, hybrid key wrapping (how the file key reaches the reader)
 
-The header carries one or more **stanzas**, each able to unlock the file key:
+The header carries one or more stanzas, each able to unlock the file key.
 
-- **Recipient stanza**: Turing-1026 (docs/16), whose shared key is derived
+- A recipient stanza uses Turing-1026 (docs/16), whose shared key is derived
   from the whole ciphertext and, through its coins, the recipient's public
   key. (The earlier plan was a hybrid KEM, X25519 + ML-KEM, under a vetted
   combiner, so that an attacker had to break both; a second, non-lattice
   KEM beside Turing-1026 would restore that property.)
-- **Password stanza**: Argon2id (memory-hard; slows GPU guessing) with a random
-  salt and stored parameters.
+- A password stanza uses Argon2id (memory-hard; slows GPU guessing) with a
+  random salt and stored parameters.
 
 The file key is wrapped under the stanza's key-encryption key with the Turing
 AEAD.

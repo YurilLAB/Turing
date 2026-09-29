@@ -1,55 +1,61 @@
-# 01 — What makes a cipher hard to break
+# 01. What makes a cipher hard to break
 
-Turing is an experimental cipher. It is designed the way real ciphers are
-designed (security measured, not assumed), but a new algorithm is only trusted
-after years of public cryptanalysis, so it must not protect real secrets.
+Turing is an experimental cipher. We design it the way real ciphers are
+designed, measuring security instead of assuming it. But a new algorithm is
+only trusted after years of public cryptanalysis, so it must not protect real
+secrets.
 
 ## 1. The key is the only secret (Kerckhoffs's principle)
 
-Assume the attacker has the full algorithm and source code. All security must
-come from the key. Anything that relies on the design staying hidden is broken.
+Assume the attacker has the full algorithm and the source code. Then all the
+security has to come from the key, and anything that relies on the design
+staying hidden is already broken.
 
-## 2. The goal: indistinguishable from random
+## 2. Indistinguishable from random
 
-A secure block cipher is a *pseudorandom permutation*: without the key, nobody
-can tell its output apart from a random shuffle of all 2^128 blocks. If that
-holds, the best attack is brute force over the key space. With a 256-bit key
-that is 2^256 trials. Any attack faster than brute force means the cipher is
-broken, even if that attack is still impractical.
+A secure block cipher is a pseudorandom permutation: without the key, nobody
+can tell its output from a random shuffle of all 2^128 blocks. If that holds,
+the best attack is brute force over the key space, which with a 256-bit key is
+2^256 trials. Any attack faster than brute force means the cipher is broken,
+even if that attack is still impractical.
 
 ## 3. Confusion and diffusion (Shannon, 1949)
 
-- **Confusion**: the relationship between key and ciphertext is complex and
-  non-linear.
-- **Diffusion**: flipping one input bit flips about half of all output bits
-  (the *avalanche effect*). We will measure this, not assume it.
+Confusion means the relationship between key and ciphertext is complex and
+non-linear. Diffusion means that flipping one input bit flips about half of
+all output bits, which is called the avalanche effect. We will measure this
+rather than assume it.
 
 ## 4. Linear means broken
 
-If a cipher were only XOR, shifts and bit permutations, every output bit would
-be a linear equation in the input and key bits. Gaussian elimination solves
-those in seconds. Every cipher therefore needs a non-linear component, usually
-an **S-box**: a small lookup table (for example 8 bits in, 8 bits out) that no
-simple equation describes.
+If a cipher were built only from XOR, shifts and bit permutations, every
+output bit would be a linear equation in the input and key bits, and Gaussian
+elimination solves those in seconds. So every cipher needs a non-linear
+component, usually an S-box: a small lookup table (for example 8 bits in,
+8 bits out) that no simple equation describes.
 
-## 5. The two big attacks, and the metrics they give us
+## 5. The two big attacks and their metrics
 
-- **Differential cryptanalysis** (Biham and Shamir): feed in input pairs with a
-  chosen XOR difference, look for output differences that occur more often than
-  chance. An S-box's weakness is measured by its **Difference Distribution
-  Table (DDT)**. The largest entry is its *differential uniformity*; AES's
-  S-box reaches 4 out of 256, close to optimal for 8 bits.
-- **Linear cryptanalysis** (Matsui): look for XOR relations between input and
-  output bits that hold with probability away from 1/2. Measured by the
-  **Linear Approximation Table (LAT)**.
+Differential cryptanalysis (Biham and Shamir) feeds in pairs of inputs with
+a chosen XOR difference and looks for output differences that turn up more
+often than chance. You measure an S-box's weakness with its difference
+distribution table (DDT). The largest entry is the differential
+uniformity, and AES's S-box reaches 4 out of 256, about as good as an 8-bit
+S-box gets.
 
-Neither attack has to work on one round; it has to survive through all rounds.
+Linear cryptanalysis (Matsui) looks for XOR relations between input and
+output bits that hold with a probability away from 1/2. The metric here is
+the linear approximation table (LAT).
 
-**Wide-trail strategy.** The linear layer is chosen so that any differential or
-linear trail must pass through many *active S-boxes*. AES guarantees at least 25
-active S-boxes over any 4 rounds. At probability at most 2^-6 each, the best
-4-round trail has probability at most 2^-150. This turns "secure" into a proven
-bound, and it is how Turing's round count will be chosen.
+Neither attack has to work on one round; it has to survive through all the
+rounds.
+
+The wide-trail strategy works on the linear layer: it is chosen so that any
+differential or linear trail has to pass through many active S-boxes. AES
+guarantees at least 25 active S-boxes over any 4 rounds. At probability at
+most 2^-6 each, the best 4-round trail has probability at most 2^-150. That
+turns "secure" into a proven bound, and it is how we will pick Turing's round
+count.
 
 ## 6. Flaws designers build in by accident
 
@@ -64,32 +70,32 @@ bound, and it is how Turing's round count will be chosen.
 
 ## 7. The Turing connection
 
-Enigma was broken by a combination of things, not a single flaw. Marian
-Rejewski of the Polish Cipher Bureau first broke it in December 1932 with
-permutation-group mathematics and intelligence material, and the Poles
-handed their methods to Britain and France in 1939. At Bletchley Park,
-Turing's Bombe searched for rotor settings consistent with a guessed piece of
-plaintext (a "crib"). Gordon Welchman's diagonal board, which used the
-reciprocity of the plugboard, cut the false settings sharply. Structural
-properties and operator habits made this possible. Enigma could never
-encrypt a letter to itself, which showed where a crib could not sit, and
-operators kept sending predictable phrases. The lesson for this project: any
-detectable pattern, however small, is a way in.
+No single flaw broke Enigma; it fell to a combination of things. Marian
+Rejewski of the Polish Cipher Bureau first broke it in December 1932, using
+permutation-group mathematics and intelligence material, and in 1939 the
+Poles handed their methods to Britain and France. At Bletchley Park, Turing's
+Bombe searched for rotor settings consistent with a guessed piece of
+plaintext (a "crib"), and Gordon Welchman's diagonal board, which used the
+reciprocity of the plugboard, cut the false settings sharply. Two things made
+this possible: structural properties of the machine and operator habits.
+Enigma could never encrypt a letter to itself, which showed where a crib
+could not sit, and operators kept sending predictable phrases. The lesson for
+this project is that any detectable pattern, however small, is a way in.
 
 ## Roadmap
 
-1. Math foundations (this document) — done
-2. Design spec: block size, key size, structure — done (03)
-3. Analysis tools in Rust: DDT, LAT, avalanche tests — done (04)
-4. Design and measure the S-box — done (05)
-5. Design the linear layer and prove its branch number — done (06)
-6. Design the key schedule — done (07), reviewed (08)
-7. Set the round count from proven bounds — done (09)
-8. Implement the cipher with test vectors — done (10), with the round tracer
-9. File encryption: mode, authentication, key derivation, file format —
+1. Math foundations (this document): done
+2. Design spec (block size, key size, structure): done (03)
+3. Analysis tools in Rust (DDT, LAT, avalanche tests): done (04)
+4. Design and measure the S-box: done (05)
+5. Design the linear layer and prove its branch number: done (06)
+6. Design the key schedule: done (07), reviewed (08)
+7. Set the round count from proven bounds: done (09)
+8. Implement the cipher with test vectors: done (10), with the round tracer
+9. File encryption (mode, authentication, key derivation, file format):
    parked until the cipher is hardened and validated (requirements collected
    in docs/11 and 12)
-10. Attack it ourselves — first campaign done (10): square, differential,
+10. Attack it ourselves. First campaign done (10): square, differential,
     linear, avalanche, NIST battery, key checks, timing. Second campaign done
     (11): division property, boomerang, cube testers, related keys,
     interpolation, invariant attacks, fault and power analysis, and a

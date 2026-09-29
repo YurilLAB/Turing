@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/YurilLAB/Turing/actions/workflows/ci.yml/badge.svg)](https://github.com/YurilLAB/Turing/actions/workflows/ci.yml)
 
-A block cipher and a post-quantum key exchange designed from scratch in Rust
-and named after Alan Turing, plus **Bombe**, a workbench built to break them.
+Turing is a block cipher and a post-quantum key exchange, designed from
+scratch in Rust and named after Alan Turing. The repository also holds
+Bombe, a workbench built to break them.
 
 > [!WARNING]
 > **Experimental. Do not use it to protect real data.** A new cipher is only
@@ -14,11 +15,11 @@ and named after Alan Turing, plus **Bombe**, a workbench built to break them.
 
 | Part | What it is |
 |---|---|
-| **Turing** | 128-bit block, 256-bit key, 24 rounds, constant time, about 4.5 µs per block |
-| **Turing-256** | The same design on a 256-bit block, with round constants (v2) ([docs/15](docs/15-turing-256.md)) |
-| **Turing-1026** | A post-quantum key-encapsulation mechanism (KEM) on plain LWE in dimension 1026, whose shared keys are Turing keys ([docs/16](docs/16-turing-1026.md)) |
-| **ML-KEM** | FIPS 203, all three parameter sets, checked against NIST's and C2SP's vectors: the standard half of the planned hybrid KEM ([docs/18](docs/18-hybrid-kem-design.md)) |
-| **Bombe** | The cryptanalysis workbench, named after Turing's code-breaking machine |
+| Turing | 128-bit block, 256-bit key, 24 rounds, constant time, about 4.5 µs per block |
+| Turing-256 | The same design on a 256-bit block, with round constants (v2) ([docs/15](docs/15-turing-256.md)) |
+| Turing-1026 | A post-quantum key-encapsulation mechanism (KEM) on plain LWE in dimension 1026, whose shared keys are Turing keys ([docs/16](docs/16-turing-1026.md)) |
+| ML-KEM | FIPS 203, all three parameter sets, checked against NIST's and C2SP's vectors: the standard half of the planned hybrid KEM ([docs/18](docs/18-hybrid-kem-design.md)) |
+| Bombe | The cryptanalysis workbench, named after Turing's code-breaking machine |
 
 A file-encryption tool on top of them, with password unlock (Argon2id), is
 planned.
@@ -44,49 +45,52 @@ Turing is a substitution-permutation network, the family AES belongs to. Each
 of its 24 rounds substitutes every byte of the block, mixes the bytes
 together and adds a round key.
 
-- **S-box:** AES's field inversion (x^254 in GF(2^8)) between two affine
-  maps of Turing's own. Nonlinearity 112, differential uniformity 4 and
-  degree 7, the best known for an 8-bit S-box. It is computed, never looked
-  up in a table.
-- **Mixing:** odd rounds multiply the whole state by a 16×16 MDS matrix, so
-  one changed byte changes all 16; even rounds use AES's ShiftRows and
-  MixColumns. Any differential or linear trail through the full cipher has
-  at least 204 active S-boxes.
-- **Key schedule:** cSHAKE256, then a Feistel network of S-box and mixing
-  rounds, fed forward. Round keys cannot be run back to the key, and any key
-  difference crosses at least 53 active S-boxes.
-- **No hidden constants:** every constant is cSHAKE256 of a public label, and
-  Bombe regenerates them all.
-- **Constant time:** no branch or memory access depends on secret data, and
-  the release build's assembly is checked for it.
+The S-box is AES's field inversion (x^254 in GF(2^8)) between two affine maps
+of Turing's own. It has nonlinearity 112, differential uniformity 4 and
+degree 7, the best known for an 8-bit S-box, and it is computed, never looked
+up in a table.
 
-**Turing-1026** gives a sender a random 256-bit key and a ciphertext that only
+For mixing, odd rounds multiply the whole state by a 16×16 MDS matrix, so one
+changed byte changes all 16, and even rounds use AES's ShiftRows and
+MixColumns. Any differential or linear trail through the full cipher has at
+least 204 active S-boxes.
+
+The key schedule starts with cSHAKE256 and then runs a Feistel network of
+S-box and mixing rounds, fed forward. Round keys cannot be run back to the
+key, and any key difference crosses at least 53 active S-boxes.
+
+There are no hidden constants: every constant is cSHAKE256 of a public label,
+and Bombe regenerates them all. The implementation is constant time, meaning
+no branch or memory access depends on secret data, and the release build's
+assembly is checked for it.
+
+Turing-1026 gives a sender a random 256-bit key and a ciphertext that only
 the recipient can open. It rests on learning with errors in its plainest form
 (no ring structure, as in FrodoKEM), with a Fujisaki-Okamoto transform
 against chosen ciphertexts. The best known attack costs 2^252.4 in the
 standard core-SVP count (ML-KEM-1024: 2^253.9), and a ciphertext fails to
-decrypt with probability 2^-266. Public key 61,592 bytes, ciphertext 15,934
-bytes, about 13 ms to encapsulate and 26 ms to decapsulate.
+decrypt with probability 2^-266. The public key is 61,592 bytes and the
+ciphertext 15,934 bytes; encapsulating takes about 13 ms and decapsulating
+about 26 ms.
 
 ## What has been tested
 
-- **Attacks:** `bombe attack` runs 25 sections of attacks against the real
-  code, from differential, linear and square attacks to boomerang,
-  related-key, invariant, yoyo and meet-in-the-middle. The best of them break
-  4 of the 24 rounds in practice. On paper, the square attack reaches 7
-  rounds, but needs every possible plaintext-ciphertext pair and about 2^174
-  encryptions ([docs/14](docs/14-attacks-from-the-aes-256-literature.md)).
-- **The tools first:** every analysis tool reproduces published results (AES,
-  Midori-64, NIST, FrodoKEM, NewHope) before it is trusted on Turing.
-- **Correctness:** Turing, Turing-256 and Turing-1026 each match an
-  independent reference implementation and the known-answer vectors in
-  `vectors/`; Turing-256 and Turing-1026 also match a third implementation
-  in Python.
-- **Implementation attacks:** timing (dudect, no leak), simulated power
-  analysis (the masked variant shows no first-order leakage), injected
+- `bombe attack` runs 25 sections of attacks against the real code, from
+  differential, linear and square attacks to boomerang, related-key,
+  invariant, yoyo and meet-in-the-middle. The best of them break 4 of the 24
+  rounds in practice. On paper, the square attack reaches 7 rounds, but it
+  needs every possible plaintext-ciphertext pair and about 2^174 encryptions
+  ([docs/14](docs/14-attacks-from-the-aes-256-literature.md)).
+- Every analysis tool reproduces published results (AES, Midori-64, NIST,
+  FrodoKEM, NewHope) before we trust it on Turing.
+- Turing, Turing-256 and Turing-1026 each match an independent reference
+  implementation and the known-answer vectors in `vectors/`. Turing-256 and
+  Turing-1026 also match a third implementation in Python.
+- For implementation attacks we looked at timing (dudect, no leak), simulated
+  power analysis (the masked variant shows no first-order leakage), injected
   faults (every one- and two-bit fault in the stored key material is caught)
   and a memory-dump attacker (no key material left behind).
-- **The tests themselves:** `tools/mutate.py` plants bugs in the code and
+- The tests get tested too: `tools/mutate.py` plants bugs in the code and
   checks that a test catches each one, and `tools/ci.py` runs every check,
   putting the GPU and every CPU thread to work on the statistical ones.
 
@@ -128,9 +132,9 @@ Run each with `cargo run --release -p bombe -- <command>`.
 | `tools/` | The CI runner, mutation testing, constant-time and WSL checks |
 | `research/` | The papers index, notes and scripts behind the docs (the papers stay local) |
 
-The docs in order: the cipher's design
-([01](docs/01-foundations.md)–[09](docs/09-round-structure.md)), attacks and
-hardening ([10](docs/10-attack-bench.md)–[14](docs/14-attacks-from-the-aes-256-literature.md)),
-Turing-256 ([15](docs/15-turing-256.md)), Turing-1026
-([16](docs/16-turing-1026.md)–[17](docs/17-turing-1026-security-argument.md))
-and the hybrid KEM ([18](docs/18-hybrid-kem-design.md)).
+The docs are grouped by number. The cipher's design is
+[01](docs/01-foundations.md)–[09](docs/09-round-structure.md), attacks and
+hardening [10](docs/10-attack-bench.md)–[14](docs/14-attacks-from-the-aes-256-literature.md),
+Turing-256 [15](docs/15-turing-256.md), Turing-1026
+[16](docs/16-turing-1026.md)–[17](docs/17-turing-1026-security-argument.md)
+and the hybrid KEM [18](docs/18-hybrid-kem-design.md).
